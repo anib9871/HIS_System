@@ -1,10 +1,10 @@
 <?php
 // config/master_db.php
-$db_host = '127.0.0.1';
+$db_host = 'mysql.railway.internal'; // Railway ka private network host
 $db_port = '3306';
-$db_name = 'his_master_db';
+$db_name = 'railway'; // Railway par default DB ka naam aksar 'railway' hota hai (Variables tab mein MYSQL_DATABASE dekh lena)
 $db_user = 'root';
-$db_pass = 'Mysql123@'; // MySQL Workbench ka password agar hai toh yahan daalein
+$db_pass = 'tAkeZegypoAxZNlmmMBnDHHKFdbWwmIe'; // Apna Railway Variables tab se copy kiya hua password yahan paste karo
 
 try {
     $master_pdo = new PDO(
