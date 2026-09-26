@@ -1,12 +1,21 @@
 <?php
+// ============================================================
 // login.php
+// HIS MULTI-TENANT LOGIN
+// ============================================================
 
 error_reporting(E_ALL);
-ini_set('display_errors', 1);
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
+
+
+// ============================================================
+// MASTER DATABASE
+// ============================================================
 
 require_once __DIR__ . '/config/master_db.php';
 
@@ -24,11 +33,49 @@ $db_pass = getenv('MYSQLPASSWORD');
 
 
 // ============================================================
+// CHECK RAILWAY VARIABLES
+// ============================================================
+
+if (empty($db_host) || empty($db_user) || empty($db_pass)) {
+
+    die("
+        <div style='
+            font-family:Arial,sans-serif;
+            padding:30px;
+            background:#fff3f3;
+            color:#b91c1c;
+            min-height:100vh;
+        '>
+
+            <h2>Database Configuration Error</h2>
+
+            <p>
+                Railway MySQL environment variables nahi mil rahe.
+            </p>
+
+            <p>
+                Check:
+            </p>
+
+            <ul>
+                <li>MYSQLHOST</li>
+                <li>MYSQLPORT</li>
+                <li>MYSQLUSER</li>
+                <li>MYSQLPASSWORD</li>
+            </ul>
+
+        </div>
+    ");
+}
+
+
+// ============================================================
 // CHECK ALREADY LOGGED IN
 // ============================================================
 
 if (isset($_SESSION['user_id'])) {
 
+    // SUPER ADMIN
     if (
         isset($_SESSION['role_id']) &&
         (int)$_SESSION['role_id'] === 1
@@ -36,12 +83,11 @@ if (isset($_SESSION['user_id'])) {
 
         header("Location: superadmin/dashboard.php");
         exit;
-
-    } else {
-
-        header("Location: admin/dashboard.php");
-        exit;
     }
+
+    // HOSPITAL / STAFF ADMIN
+    header("Location: admin/dashboard.php");
+    exit;
 }
 
 
@@ -55,7 +101,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $password = trim($_POST['password'] ?? '');
 
 
-    if (empty($username) || empty($password)) {
+    // ========================================================
+    // BASIC VALIDATION
+    // ========================================================
+
+    if ($username === '' || $password === '') {
 
         $error = "Please fill in both Username and Password!";
 
@@ -99,31 +149,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($user && $password === $user['password']) {
 
-                $_SESSION['user_id']   = $user['user_id'];
-                $_SESSION['username']  = $user['username'];
-                $_SESSION['role_id']   = (int)$user['role_id'];
+                // ------------------------------------------------
+                // COMMON SESSION
+                // ------------------------------------------------
+
+                $_SESSION['user_id'] =
+                    $user['user_id'];
+
+                $_SESSION['username'] =
+                    $user['username'];
+
+                $_SESSION['role_id'] =
+                    (int)$user['role_id'];
 
                 $_SESSION['role_name'] =
                     $user['role_name'] ?? 'User';
 
                 $_SESSION['org_id'] =
-                    $user['org_id'];
+                    $user['org_id'] ?? null;
 
                 $_SESSION['org_name'] =
                     $user['org_name'] ?? 'Hospital Admin';
 
-                /*
-                 * IMPORTANT:
-                 *
-                 * Superadmin ka tenant DB nahi hota.
-                 * Hospital admin ka DB master_organization se aayega.
-                 */
+
+                // ==================================================
+                // SUPER ADMIN
+                // role_id = 1
+                // ==================================================
 
                 if ((int)$user['role_id'] === 1) {
 
                     $_SESSION['user_type'] = 'superadmin';
 
-                    // Superadmin ke liye tenant DB clear
+                    // Superadmin ka tenant DB nahi hota
                     unset($_SESSION['tenant_db_name']);
 
                     header(
@@ -143,17 +201,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_SESSION['tenant_db_name'] =
                         $user['db_name'];
 
-                } else {
+                    $_SESSION['user_type'] =
+                        'admin';
 
-                    $error =
-                        "Hospital database is not configured!";
-
-                }
-
-
-                if (empty($error)) {
-
-                    $_SESSION['user_type'] = 'admin';
                     $_SESSION['is_admin'] = 1;
 
                     header(
@@ -161,22 +211,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     );
 
                     exit;
+
+                } else {
+
+                    $error =
+                        "Hospital database is not configured for this organization.";
                 }
+            }
 
 
-            } else {
+            // ==================================================
+            // 2. CHECK TENANT DATABASES FOR STAFF USERS
+            // ==================================================
 
-
-                // ==================================================
-                // 2. CHECK TENANT DATABASES FOR STAFF USERS
-                // ==================================================
+            if (empty($error) && !$user) {
 
                 $authenticated = false;
 
 
-                /*
-                 * Active organizations master DB se milengi.
-                 */
+                // ==================================================
+                // GET ACTIVE ORGANIZATIONS
+                // ==================================================
 
                 $all_orgs = $master_pdo->query("
                     SELECT
@@ -190,6 +245,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ORDER BY org_id ASC
                 ")->fetchAll();
 
+
+                // ==================================================
+                // CHECK EACH TENANT DATABASE
+                // ==================================================
 
                 foreach ($all_orgs as $org) {
 
@@ -208,7 +267,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                             "mysql:host={$db_host};" .
                             "port={$db_port};" .
-                            "dbname={$org['db_name']};" .
+                            "dbname=" . $org['db_name'] . ";" .
                             "charset=utf8mb4",
 
                             $db_user,
@@ -228,7 +287,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 
                         // ==========================================
-                        // CHECK STAFF USER
+                        // CHECK TENANT USERS TABLE
                         // ==========================================
 
                         $t_stmt = $tenant_check_pdo->prepare("
@@ -260,8 +319,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                         if (
                             $t_user &&
+                            isset($t_user['password']) &&
                             $t_user['password'] === $password
                         ) {
+
+                            // --------------------------------------
+                            // SESSION
+                            // --------------------------------------
 
                             $_SESSION['user_id'] =
                                 $t_user['user_id'];
@@ -270,13 +334,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $t_user['username'];
 
                             $_SESSION['fullname'] =
-                                $t_user['fullname'];
+                                $t_user['fullname']
+                                ?? $t_user['username'];
 
                             $_SESSION['role_id'] =
                                 (int)$t_user['role_id'];
 
                             $_SESSION['role_name'] =
-                                $t_user['role_name'] ?? 'Staff';
+                                $t_user['role_name']
+                                ?? 'Staff';
 
                             $_SESSION['org_id'] =
                                 $org['org_id'];
@@ -284,21 +350,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $_SESSION['org_name'] =
                                 $org['org_name'];
 
-                            /*
-                             * VERY IMPORTANT
-                             *
-                             * Ab tenant_db.php isi DB se
-                             * automatically connect karega.
-                             */
-
+                            // IMPORTANT
+                            // Tenant DB yahi set hoga
                             $_SESSION['tenant_db_name'] =
                                 $org['db_name'];
 
                             $_SESSION['menu_access'] =
-                                $t_user['menu_access'];
+                                $t_user['menu_access']
+                                ?? '';
 
                             $_SESSION['is_admin'] =
-                                (int)$t_user['is_admin'];
+                                (int)($t_user['is_admin'] ?? 0);
 
                             $_SESSION['user_type'] =
                                 'admin';
@@ -306,6 +368,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                             $authenticated = true;
 
+
+                            // ======================================
+                            // REDIRECT ADMIN DASHBOARD
+                            // ======================================
 
                             header(
                                 "Location: admin/dashboard.php"
@@ -317,11 +383,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     } catch (PDOException $e) {
 
-                        /*
-                         * Agar kisi organization ka DB temporarily
-                         * available nahi hai to next organization
-                         * check karo.
-                         */
+                        // ------------------------------------------
+                        // Agar kisi tenant DB mein problem hai
+                        // to next organization check karo
+                        // ------------------------------------------
 
                         continue;
                     }
@@ -348,6 +413,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 }
+
 ?>
 
 
@@ -380,44 +446,80 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <style>
 
         body {
+
             background: #0f172a;
+
             font-family: 'Segoe UI', sans-serif;
+
             display: flex;
+
             align-items: center;
+
             justify-content: center;
+
             min-height: 100vh;
+
             margin: 0;
+
         }
+
 
         .login-card {
+
             width: 100%;
+
             max-width: 400px;
+
             background: #ffffff;
+
             border-radius: 12px;
-            box-shadow: 0 15px 30px rgba(0,0,0,0.25);
+
+            box-shadow:
+                0 15px 30px rgba(0,0,0,0.25);
+
             overflow: hidden;
+
         }
+
 
         .card-header {
+
             background: #0284c7;
+
             color: white;
+
             padding: 25px 20px;
+
             text-align: center;
+
             border: none;
+
         }
+
 
         .btn-custom {
+
             background: #0284c7;
+
             border: none;
+
             color: white;
+
             padding: 10px;
+
             font-weight: 600;
+
             border-radius: 6px;
+
         }
 
+
         .btn-custom:hover {
+
             background: #0369a1;
+
             color: white;
+
         }
 
     </style>
@@ -441,8 +543,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         </h4>
 
+
         <small class="text-white-50">
+
             Enterprise Multi-Tenant Portal
+
         </small>
 
     </div>
@@ -467,9 +572,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             <div class="mb-3">
 
-                <label class="form-label text-secondary small fw-semibold">
+                <label
+                    class="form-label text-secondary small fw-semibold"
+                >
+
                     Username
+
                 </label>
+
 
                 <input
                     type="text"
@@ -478,6 +588,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     placeholder="Enter username"
                     required
                     autofocus
+                    autocomplete="username"
                 >
 
             </div>
@@ -485,9 +596,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             <div class="mb-4">
 
-                <label class="form-label text-secondary small fw-semibold">
+                <label
+                    class="form-label text-secondary small fw-semibold"
+                >
+
                     Password
+
                 </label>
+
 
                 <input
                     type="password"
@@ -495,6 +611,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     class="form-control"
                     placeholder="Enter password"
                     required
+                    autocomplete="current-password"
                 >
 
             </div>
