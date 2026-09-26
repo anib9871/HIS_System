@@ -1,15 +1,26 @@
 <?php
-// logout.php (Universal Central Logout)
+// logout.php - Universal Central Logout
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// 1. Saare Session Variables empty karein
+
+// ============================================================
+// 1. CLEAR ALL SESSION VARIABLES
+// ============================================================
+
 $_SESSION = array();
 
-// 2. Session Cookie destroy karein
+
+// ============================================================
+// 2. DESTROY SESSION COOKIE
+// ============================================================
+
 if (ini_get("session.use_cookies")) {
+
     $params = session_get_cookie_params();
+
     setcookie(
         session_name(),
         '',
@@ -21,14 +32,26 @@ if (ini_get("session.use_cookies")) {
     );
 }
 
-// 3. Session completely destroy karein
+
+// ============================================================
+// 3. DESTROY SESSION
+// ============================================================
+
 session_destroy();
 
-// 4. Cache clear headers (Back button dabane par page na khule)
+
+// ============================================================
+// 4. PREVENT CACHED PAGES
+// ============================================================
+
 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 header("Cache-Control: post-check=0, pre-check=0", false);
 header("Pragma: no-cache");
 
-// 5. Direct Absolute Path to Main Login (Chahe kisi bhi folder se logout karein)
-header("Location: /HIS_System/login.php?msg=logged_out");
+
+// ============================================================
+// 5. REDIRECT TO LOGIN
+// ============================================================
+
+header("Location: login.php?msg=logged_out");
 exit;
