@@ -32,6 +32,30 @@ function formatFYWithHyphen($fy_code) {
 
 // AUTO-ADD REQUIRED COLUMNS
 try {
+    // SAME MOBILE NUMBER CAN BE SHARED BY MULTIPLE FAMILY MEMBERS.
+    // Remove any UNIQUE index on patient_master.mobile so direct registration
+    // of another family member with the same mobile does not fail.
+    try {
+        $idxStmt = $tenant_pdo->query("SHOW INDEX FROM patient_master");
+        $mobileUniqueIndexes = [];
+        while ($idx = $idxStmt->fetch(PDO::FETCH_ASSOC)) {
+            $keyName = (string)($idx['Key_name'] ?? '');
+            $columnName = (string)($idx['Column_name'] ?? '');
+            $nonUnique = (int)($idx['Non_unique'] ?? 1);
+
+            if ($keyName !== 'PRIMARY' && $columnName === 'mobile' && $nonUnique === 0) {
+                $mobileUniqueIndexes[$keyName] = true;
+            }
+        }
+
+        foreach (array_keys($mobileUniqueIndexes) as $keyName) {
+            $safeKeyName = str_replace('`', '``', $keyName);
+            $tenant_pdo->exec("ALTER TABLE patient_master DROP INDEX `{$safeKeyName}`");
+        }
+    } catch (Exception $e) {
+        // Do not block registration if an optional schema cleanup fails.
+    }
+
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS department_id INT NULL AFTER doctor_id");
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS service_id INT NULL AFTER department_id");
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS category_id INT NULL AFTER service_id");
@@ -126,7 +150,7 @@ function generateSecureUHID($tenant_pdo, $center_id, $fy_code) {
     } catch (Exception $e) {}
 
     $uhid_base = "{$org_prefix}-{$center_code}-{$fy_code}-";
-    $stmt = $tenant_pdo->prepare("SELECT uhid FROM opd_patients WHERE uhid LIKE ? ORDER BY patient_id DESC LIMIT 1 FOR UPDATE");
+    $stmt = $tenant_pdo->prepare("SELECT uhid FROM patient_master WHERE uhid LIKE ? ORDER BY patient_id DESC LIMIT 1 FOR UPDATE");
     $stmt->execute([$uhid_base . '%']);
     $last_uhid = $stmt->fetchColumn();
 
@@ -134,53 +158,39 @@ function generateSecureUHID($tenant_pdo, $center_id, $fy_code) {
     return $uhid_base . $next_serial;
 }
 
-// ==============================================================
- // PATIENT LOOKUP AJAX
- // Reuses the Patient Master created from Appointment or Registration.
- // ==============================================================
-if (isset($_GET['ajax']) && $_GET['ajax'] === 'patient_lookup') {
-    header('Content-Type: application/json; charset=utf-8');
-
-    $mobile_lookup = preg_replace('/\D+/', '', $_GET['mobile'] ?? '');
-
-    if (strlen($mobile_lookup) < 10) {
-        echo json_encode(['found' => false]);
-        exit;
-    }
-
-    try {
-        $stmt = $tenant_pdo->prepare("
-            SELECT patient_id, uhid, fullname, gender, age, mobile
-            FROM opd_patients
-            WHERE org_id = ?
-              AND center_id = ?
-              AND (mobile = ? OR mobile LIKE ?)
-            ORDER BY patient_id DESC
-            LIMIT 1
-        ");
-        $stmt->execute([$org_id, $center_id, $mobile_lookup, $mobile_lookup . ',%']);
-        $patient = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        echo json_encode(
-            $patient
-                ? ['found' => true, 'patient' => $patient]
-                : ['found' => false]
-        );
-    } catch (Exception $e) {
-        echo json_encode(['found' => false]);
-    }
-    exit;
-}
-
 // Handle Edit Fetch
 $edit_data = null;
 $edit_visit_id = (int)($_GET['edit_visit'] ?? 0);
+$appointment_prefill = null;
+$appointment_id = (int)($_GET['appointment_id'] ?? 0);
+
+if ($appointment_id > 0 && $edit_visit_id <= 0) {
+    try {
+        $ap_stmt = $tenant_pdo->prepare("
+            SELECT a.*,
+                   p.uhid AS master_uhid,
+                   p.fullname AS master_fullname,
+                   p.mobile AS master_mobile,
+                   p.age AS master_age,
+                   p.gender AS master_gender
+            FROM opd_appointments a
+            LEFT JOIN patient_master p ON a.uhid = p.uhid
+            WHERE a.appointment_id = ?
+              AND a.org_id = ?
+              AND a.center_id = ?
+            LIMIT 1
+        ");
+        $ap_stmt->execute([$appointment_id, $org_id, $center_id]);
+        $appointment_prefill = $ap_stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+    } catch (Exception $e) {}
+}
+
 if ($edit_visit_id > 0) {
     try {
         $edit_stmt = $tenant_pdo->prepare("
             SELECT v.*, p.uhid, p.fullname, p.mobile, p.age, p.gender 
             FROM opd_visits v 
-            JOIN opd_patients p ON v.patient_id = p.patient_id 
+            JOIN patient_master p ON v.patient_id = p.patient_id 
             WHERE v.visit_id = ? AND v.org_id = ? AND v.center_id = ?
         ");
         $edit_stmt->execute([$edit_visit_id, $org_id, $center_id]);
@@ -232,8 +242,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
     $payable = $fee - $discount;
     if ($payable < 0) $payable = 0;
 
-    $pay_mode   = trim($_POST['summary_payment_mode'] ?? "CASH: ₹{$payable}");
+    $pay_mode   = trim($_POST['summary_payment_mode'] ?? '');
     $post_edit_id  = (int)($_POST['post_edit_id'] ?? 0);
+    $appointment_id = (int)($_POST['appointment_id'] ?? 0);
+
+    // PAYMENT DEFAULT: when receptionist does not select any payment mode,
+    // automatically treat the payable amount as CASH at save/receipt time.
+    $payment_mode_lower = strtolower(trim($pay_mode));
+    $is_payment_unselected = (
+        $pay_mode === '' ||
+        $payment_mode_lower === 'unpaid (₹0)' ||
+        preg_match('/^cash:\s*₹?0(?:\.00)?$/i', $pay_mode)
+    );
+
+    if ($is_payment_unselected && $total_paid <= 0 && $payable > 0) {
+        $total_paid = $payable;
+        $change_ret = 0;
+        $pay_mode = 'CASH: ₹' . number_format($payable, 2, '.', '');
+        $pay_breakdown = json_encode([
+            'Cash' => ['amount' => $payable]
+        ], JSON_UNESCAPED_UNICODE);
+    }
 
     // 1 = Paid, 2 = Partial, 3 = Not Paid.
     if ($payable <= 0) $pay_status = 1;
@@ -254,7 +283,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                 $up_visit->execute([$post_edit_id, $org_id]);
                 $patient_id = $up_visit->fetchColumn();
 
-                $tenant_pdo->prepare("UPDATE opd_patients SET fullname = ?, gender = ?, age = ?, mobile = ? WHERE patient_id = ? AND org_id = ?")
+                $uhid_stmt = $tenant_pdo->prepare("SELECT uhid FROM patient_master WHERE patient_id = ? AND org_id = ? LIMIT 1");
+                $uhid_stmt->execute([$patient_id, $org_id]);
+                $patient_uhid = (string)$uhid_stmt->fetchColumn();
+                if ($patient_uhid === '') {
+                    throw new Exception("Patient UHID was not found.");
+                }
+
+                $tenant_pdo->prepare("UPDATE patient_master SET fullname = ?, gender = ?, age = ?, mobile = ? WHERE patient_id = ? AND org_id = ?")
                            ->execute([$fullname, $gender, $age, $mobile, $patient_id, $org_id]);
 
                 $tenant_pdo->prepare("
@@ -265,30 +301,88 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     WHERE visit_id = ? AND org_id = ?
                 ")->execute([$visit_date, $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status, $post_edit_id, $org_id]);
 
+                if ($appointment_id > 0) {
+                    $tenant_pdo->prepare("
+                        UPDATE opd_appointments
+                        SET status = 'Checked In', uhid = ?
+                        WHERE appointment_id = ? AND org_id = ? AND center_id = ?
+                    ")->execute([$patient_uhid, $appointment_id, $org_id, $center_id]);
+                }
+
                 $tenant_pdo->commit();
                 if (function_exists('set_flash_msg')) set_flash_msg("OPD Record updated successfully!");
                 header("Location: opd_registration.php");
                 exit;
             } else {
-                // INSERT NEW RECORD
-                $primary_mobile = explode(',', $mobile)[0]; 
-                
-                $check_stmt = $tenant_pdo->prepare("SELECT patient_id, uhid FROM opd_patients WHERE mobile LIKE ? AND org_id = ? LIMIT 1 FOR UPDATE");
-                $check_stmt->execute([trim($primary_mobile) . '%', $org_id]);
-                $existing_patient = $check_stmt->fetch();
+                // INSERT NEW REGISTRATION
+                // IMPORTANT: A MOBILE NUMBER IS NOT A UNIQUE PATIENT ID.
+                // Multiple family members are allowed to share the same mobile number.
+                //
+                // Appointment flow:
+                //   1) Existing registered patient selected -> use that patient's UHID.
+                //   2) New family member appointment (uhid = NULL) -> create a NEW patient + UHID NOW, at registration.
+                //
+                // Direct registration without an appointment -> ALWAYS create a NEW patient + UHID,
+                // even when the mobile number already exists for another family member.
+                $patient_id = 0;
+                $uhid = '';
 
-                if ($existing_patient) {
-                    $patient_id = $existing_patient['patient_id'];
-                    $uhid = $existing_patient['uhid'];
-                    $tenant_pdo->prepare("UPDATE opd_patients SET mobile = ? WHERE patient_id = ? AND org_id = ?")->execute([$mobile, $patient_id, $org_id]);
+                if ($appointment_id > 0) {
+                    $appt_lock = $tenant_pdo->prepare("
+                        SELECT appointment_id, uhid, status
+                        FROM opd_appointments
+                        WHERE appointment_id = ? AND org_id = ? AND center_id = ?
+                        LIMIT 1
+                        FOR UPDATE
+                    ");
+                    $appt_lock->execute([$appointment_id, $org_id, $center_id]);
+                    $appt_row = $appt_lock->fetch(PDO::FETCH_ASSOC);
+
+                    if (!$appt_row) {
+                        throw new Exception("Appointment not found.");
+                    }
+
+                    // Existing registered patient: keep the original patient record / UHID.
+                    if (!empty($appt_row['uhid'])) {
+                        $appt_uhid = trim((string)$appt_row['uhid']);
+                        $p_stmt = $tenant_pdo->prepare("
+                            SELECT patient_id, uhid
+                            FROM patient_master
+                            WHERE uhid = ? AND org_id = ? AND center_id = ?
+                            LIMIT 1
+                            FOR UPDATE
+                        ");
+                        $p_stmt->execute([$appt_uhid, $org_id, $center_id]);
+                        $existing_for_appt = $p_stmt->fetch(PDO::FETCH_ASSOC);
+
+                        if (!$existing_for_appt) {
+                            throw new Exception("Linked appointment patient was not found.");
+                        }
+
+                        $patient_id = (int)$existing_for_appt['patient_id'];
+                        $uhid = $existing_for_appt['uhid'];
+                    } else {
+                        // NEW FAMILY MEMBER: create a separate patient row even if the mobile is already used.
+                        $uhid = generateSecureUHID($tenant_pdo, $center_id, $current_fy_code);
+                        $stmt = $tenant_pdo->prepare("
+                            INSERT INTO patient_master
+                                (org_id, center_id, uhid, fullname, gender, age, mobile, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                        ");
+                        $stmt->execute([$org_id, $center_id, $uhid, $fullname, $gender, $age, $mobile]);
+                        $patient_id = (int)$tenant_pdo->lastInsertId();
+                    }
                 } else {
+                    // DIRECT REGISTRATION: always create a NEW patient record.
+                    // Same mobile may belong to many family members.
                     $uhid = generateSecureUHID($tenant_pdo, $center_id, $current_fy_code);
                     $stmt = $tenant_pdo->prepare("
-                        INSERT INTO opd_patients (org_id, center_id, uhid, fullname, gender, age, mobile, status) 
+                        INSERT INTO patient_master
+                            (org_id, center_id, uhid, fullname, gender, age, mobile, status)
                         VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                     ");
                     $stmt->execute([$org_id, $center_id, $uhid, $fullname, $gender, $age, $mobile]);
-                    $patient_id = $tenant_pdo->lastInsertId();
+                    $patient_id = (int)$tenant_pdo->lastInsertId();
                 }
 
                 // ==========================================================
@@ -337,14 +431,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                 $next_receipt_no = $last_receipt_no + 1;
 
                 $v_stmt = $tenant_pdo->prepare("
-                    INSERT INTO opd_visits (org_id, center_id, patient_id, doctor_id, department_id, service_id, category_id, insurance_id, token_no, receipt_no, visit_date, consultation_fee, discount_amount, discount_percent, remark, payment_mode, amount_paid, change_return, payment_breakdown, payment_status, status) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Waiting')
+                    INSERT INTO opd_visits
+                    (
+                        org_id, center_id, patient_id, doctor_id, department_id, service_id,
+                        category_id, insurance_id, token_no, receipt_no, visit_date,
+                        consultation_fee, discount_amount, discount_percent, remark,
+                        payment_mode, amount_paid, change_return, payment_breakdown,
+                        payment_status, status
+                    )
+                    VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Waiting')
                 ");
+
+                if (count([
+                    $org_id, $center_id, $patient_id, $doctor_id, $department_id, $service_id,
+                    $category_id, $insurance_id, $next_token, $next_receipt_no, $visit_date,
+                    $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid,
+                    $change_ret, $pay_breakdown, $pay_status
+                ]) !== 20) {
+                    throw new Exception("OPD VISITS INSERT PARAMETER COUNT ERROR");
+                }
+
                 $v_stmt->execute([$org_id, $center_id, $patient_id, $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $next_token, $next_receipt_no, $visit_date, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status]);
 
+                if ($appointment_id > 0) {
+                    $tenant_pdo->prepare("
+                        UPDATE opd_appointments
+                        SET status = 'Checked In', uhid = ?
+                        WHERE appointment_id = ? AND org_id = ? AND center_id = ?
+                    ")->execute([$uhid, $appointment_id, $org_id, $center_id]);
+                }
+
                 $tenant_pdo->commit();
-                
-                $display_token = (string)$next_token;
+                                $display_token = (string)$next_token;
                 $display_receipt = $display_fy . '/' . str_pad($next_receipt_no, 2, '0', STR_PAD_LEFT);
                 $doc_name = "General OPD";
                 if ($doctor_id > 0) {
@@ -404,7 +523,7 @@ try {
     $tv_stmt = $tenant_pdo->prepare("
         SELECT v.*, p.uhid, p.fullname, p.mobile, p.age, p.gender, d.full_name as doctor_name
         FROM opd_visits v
-        JOIN opd_patients p ON v.patient_id = p.patient_id
+        JOIN patient_master p ON v.patient_id = p.patient_id
         LEFT JOIN master_doctors d ON v.doctor_id = d.id
         WHERE v.org_id = ? AND v.center_id = ?
         ORDER BY v.visit_id DESC
@@ -632,7 +751,7 @@ input[inputmode="numeric"],
     <div class="col-12">
         <div class="card border-0 shadow-sm rounded-3">
             <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
-                <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-person-plus text-primary me-2"></i><?= $edit_data ? 'Edit Patient Registration #' . $edit_data['visit_id'] : 'New Patient Registration' ?></h6>
+                <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-person-plus text-primary me-2"></i><?= $edit_data ? 'Edit Patient Registration #' . $edit_data['visit_id'] : ($appointment_prefill ? 'Appointment Check-In / OPD Registration' : 'New Patient Registration') ?></h6>
                 <?php if ($edit_data): ?>
                     <a href="opd_registration.php" class="btn btn-sm btn-outline-secondary py-0">Cancel Edit</a>
                 <?php endif; ?>
@@ -641,6 +760,7 @@ input[inputmode="numeric"],
                 <form method="POST" id="opdForm">
                     <input type="hidden" name="register_patient" value="1">
                     <input type="hidden" name="post_edit_id" value="<?= $edit_data['visit_id'] ?? 0 ?>">
+                    <input type="hidden" name="appointment_id" value="<?= (int)($appointment_prefill['appointment_id'] ?? 0) ?>">
                     
                     <input type="hidden" name="consultation_fee" id="consultation_fee" value="<?= $edit_data['consultation_fee'] ?? 0 ?>">
                     <input type="hidden" name="modal_discount" id="modal_discount" value="<?= $edit_data['discount_amount'] ?? 0 ?>">
@@ -657,7 +777,7 @@ input[inputmode="numeric"],
                             <div class="visit-date-picker-wrap">
                                 <div class="input-group input-group-sm">
                                     <input type="hidden" name="visit_date" id="visit_date"
-                                           value="<?= htmlspecialchars($edit_data['visit_date'] ?? date('Y-m-d')) ?>">
+                                           value="<?= htmlspecialchars($edit_data['visit_date'] ?? ($appointment_prefill['appointment_date'] ?? date('Y-m-d'))) ?>">
                                     <input type="text" id="visit_date_display"
                                            class="form-control text-dark fw-bold"
                                            value="<?= htmlspecialchars(!empty($edit_data['visit_date']) ? date('d-m-Y', strtotime($edit_data['visit_date'])) : date('d-m-Y')) ?>"
@@ -684,12 +804,12 @@ input[inputmode="numeric"],
                             <input type="text" class="form-control form-control-sm bg-light font-monospace text-muted" value="<?= htmlspecialchars($edit_data['uhid'] ?? 'Auto Generated') ?>" readonly>
                         </div>
                         <div class="col-md-3">
-                            <label class="form-label small fw-semibold">Patient Full Name * <span class="text-muted fw-normal">(AUTO-FILLED FROM MOBILE)</span></label>
-                            <input type="text" name="fullname" id="registration_fullname" class="form-control form-control-sm text-capitalize" value="<?= htmlspecialchars($edit_data['fullname'] ?? '') ?>" placeholder="Patient Name" required autofocus>
+                            <label class="form-label small fw-semibold">Patient Full Name *</label>
+                            <input type="text" name="fullname" class="form-control form-control-sm text-capitalize" value="<?= htmlspecialchars($edit_data['fullname'] ?? ($appointment_prefill['master_fullname'] ?? ($appointment_prefill['patient_name'] ?? ''))) ?>" placeholder="Patient Name" required autofocus>
                         </div>
                         <div class="col-md-2">
                             <label class="form-label small fw-semibold">Gender *</label>
-                            <?php $current_gender = $edit_data['gender'] ?? ''; ?>
+                            <?php $current_gender = $edit_data['gender'] ?? ($appointment_prefill['master_gender'] ?? ($appointment_prefill['gender'] ?? '')); ?>
                             <select name="gender" id="gender" class="form-select form-select-sm" required>
                                 <option value="" disabled <?= $current_gender === '' ? 'selected' : '' ?>>-- Select Gender --</option>
                                 <option value="Male" <?= $current_gender === 'Male' ? 'selected' : '' ?>>Male</option>
@@ -699,22 +819,23 @@ input[inputmode="numeric"],
                         </div>
                         <div class="col-md-1">
                             <label class="form-label small fw-semibold">Age *</label>
-                            <input type="number" name="age" id="registration_age" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['age'] ?? '') ?>" placeholder="Age" required>
+                            <input type="number" name="age" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['age'] ?? ($appointment_prefill['master_age'] ?? ($appointment_prefill['age'] ?? ''))) ?>" placeholder="Age" required>
                         </div>
                         
                         <!-- MOBILE NUMBERS SECTION -->
                         <div class="col-md-2">
                             <label class="form-label small fw-semibold">Mobile Number(s) *</label>
+                            <div class="small text-muted mb-1" style="font-size:9px;">SAME MOBILE NUMBER CAN BE USED FOR MULTIPLE FAMILY MEMBERS.</div>
                             <div id="mobile_wrapper">
                                 <?php 
-                                $saved_mobs = array_filter(array_map('trim', explode(',', $edit_data['mobile'] ?? '')));
+                                $saved_mobs = array_filter(array_map('trim', explode(',', $edit_data['mobile'] ?? ($appointment_prefill['master_mobile'] ?? ($appointment_prefill['mobile'] ?? '')))));
                                 if(empty($saved_mobs)) $saved_mobs = [''];
                                 $i = 0;
                                 foreach($saved_mobs as $mob): 
                                     $len = strlen($mob);
                                 ?>
                                 <div class="input-group input-group-sm mb-1 mob-row">
-                                    <input type="text" name="mobile[]" id="registration_mobile" class="form-control form-control-sm mob-input" value="<?= htmlspecialchars($mob) ?>" placeholder="Mobile No" maxlength="10" oninput="this.value = this.value.replace(/[^0-9]/g, ''); updateMobCount(this, <?= $i ?>)" <?= $i===0?'required':'' ?>>
+                                    <input type="text" name="mobile[]" class="form-control form-control-sm mob-input" value="<?= htmlspecialchars($mob) ?>" placeholder="Mobile No" maxlength="10" oninput="this.value = this.value.replace(/[^0-9]/g, ''); updateMobCount(this, <?= $i ?>)" <?= $i===0?'required':'' ?>>
                                     <span class="input-group-text <?= $len == 10 ? 'text-success fw-bold' : 'text-muted' ?>" id="mob_count_<?= $i ?>" style="font-size:0.7rem; min-width: 45px; text-align:center;"><?= $len ?>/10</span>
                                     <?php if($i === 0): ?>
                                         <button type="button" class="btn btn-outline-primary" onclick="addMobileField()"><i class="bi bi-plus-lg"></i></button>
@@ -725,9 +846,6 @@ input[inputmode="numeric"],
                                 <?php $i++; endforeach; ?>
                             </div>
                         </div>
-                                    <div id="registration_patient_status" class="small mt-1 text-muted"></div>
-                                    <input type="hidden" id="registration_patient_id" name="patient_id">
-                                    <input type="hidden" id="registration_patient_uhid" name="patient_uhid">
                     </div>
 
                     <!-- TARIFF & MASTERS ROW -->
@@ -739,7 +857,7 @@ input[inputmode="numeric"],
                                     <select name="department_id" id="department_id" class="form-select form-select-sm" onchange="filterDoctors()">
                                         <option value="">-- Select --</option>
                                         <?php foreach ($departments as $dept): ?>
-                                            <option value="<?= $dept['id'] ?>" <?= (isset($edit_data['department_id']) && $edit_data['department_id'] == $dept['id']) ? 'selected' : '' ?>><?= htmlspecialchars($dept['dept_name']) ?></option>
+                                            <option value="<?= $dept['id'] ?>" <?= ((string)($edit_data['department_id'] ?? ($appointment_prefill['department_id'] ?? '')) === (string)$dept['id']) ? 'selected' : '' ?>><?= htmlspecialchars($dept['dept_name']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
@@ -748,7 +866,7 @@ input[inputmode="numeric"],
                                     <select name="doctor_id" id="doctor_id" class="form-select form-select-sm" required onchange="calculateTariff()">
                                         <option value="">-- Select --</option>
                                         <?php foreach ($doctors as $doc): ?>
-                                            <option value="<?= $doc['id'] ?>" data-dept="<?= $doc['department_id'] ?>" <?= (isset($edit_data['doctor_id']) && $edit_data['doctor_id'] == $doc['id']) ? 'selected' : '' ?>><?= htmlspecialchars($doc['full_name']) ?></option>
+                                            <option value="<?= $doc['id'] ?>" data-dept="<?= $doc['department_id'] ?>" <?= ((string)($edit_data['doctor_id'] ?? ($appointment_prefill['doctor_id'] ?? '')) === (string)$doc['id']) ? 'selected' : '' ?>><?= htmlspecialchars($doc['full_name']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
@@ -1067,71 +1185,6 @@ input[inputmode="numeric"],
 </div>
 
 <script>
-let registrationLookupTimer = null;
-
-async function lookupRegistrationPatient() {
-    const mobileEl = document.getElementById('registration_mobile');
-    const nameEl = document.getElementById('registration_fullname');
-    const ageEl = document.getElementById('registration_age');
-    const genderEl = document.getElementById('gender');
-    const patientIdEl = document.getElementById('registration_patient_id');
-    const uhidEl = document.getElementById('registration_patient_uhid');
-    const statusEl = document.getElementById('registration_patient_status');
-
-    if (!mobileEl) return;
-
-    const mobile = mobileEl.value.replace(/\D/g, '');
-    if (mobile.length < 10) return;
-
-    statusEl.textContent = 'SEARCHING PATIENT...';
-    statusEl.className = 'small mt-1 text-muted';
-
-    try {
-        const response = await fetch(
-            'opd_registration.php?ajax=patient_lookup&mobile=' + encodeURIComponent(mobile),
-            { headers: { 'X-Requested-With': 'XMLHttpRequest' } }
-        );
-        const data = await response.json();
-
-        if (data.found && data.patient) {
-            nameEl.value = (data.patient.fullname || '').toUpperCase();
-            ageEl.value = data.patient.age || '';
-            genderEl.value = data.patient.gender || '';
-            patientIdEl.value = data.patient.patient_id || '';
-            uhidEl.value = data.patient.uhid || '';
-
-            statusEl.textContent = 'EXISTING PATIENT FOUND — ' + (data.patient.uhid || '');
-            statusEl.className = 'small mt-1 text-success fw-bold';
-        } else {
-            patientIdEl.value = '';
-            uhidEl.value = '';
-            statusEl.textContent = 'NEW PATIENT';
-            statusEl.className = 'small mt-1 text-primary fw-bold';
-        }
-    } catch (error) {
-        statusEl.textContent = '';
-        statusEl.className = 'small mt-1 text-muted';
-    }
-}
-
-function lookupRegistrationPatientDebounced() {
-    clearTimeout(registrationLookupTimer);
-    const mobileEl = document.getElementById('registration_mobile');
-    if (!mobileEl) return;
-
-    mobileEl.value = mobileEl.value.replace(/\D/g, '').slice(0, 10);
-
-    if (mobileEl.value.length === 10) {
-        registrationLookupTimer = setTimeout(lookupRegistrationPatient, 250);
-    }
-}
-
-document.addEventListener('DOMContentLoaded', function () {
-    const mobileEl = document.getElementById('registration_mobile');
-    if (mobileEl) mobileEl.addEventListener('blur', lookupRegistrationPatient);
-});
-
-<script>
 // =====================================================================
 // DATE UI STANDARD: ALWAYS DD-MM-YYYY (independent of Windows/browser locale)
 // Database / PHP continues to use ISO YYYY-MM-DD.
@@ -1248,12 +1301,14 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 function normalizeTypedTextToUppercase(root = document) {
+    // IMPORTANT: do NOT uppercase <select> values.
+    // The option values are "Male", "Female", "Other" and converting the
+    // selected value to "MALE" makes it invalid, so the select becomes blank.
     const fields = root.querySelectorAll(
-        'input[type="text"]:not(#visit_date_display), textarea, select'
+        'input[type="text"]:not(#visit_date_display), textarea'
     );
 
     fields.forEach(field => {
-        // Do not alter search/date/mobile numeric fields.
         if (
             field.id === 'searchParcheInput' ||
             field.id === 'visit_date_display' ||
@@ -1265,12 +1320,12 @@ function normalizeTypedTextToUppercase(root = document) {
             const start = this.selectionStart;
             const end = this.selectionEnd;
             this.value = this.value.toUpperCase();
+
             if (document.activeElement === this && start !== null && end !== null) {
                 try { this.setSelectionRange(start, end); } catch (e) {}
             }
         });
 
-        // Normalize values already loaded in edit mode.
         if (field.value) {
             field.value = field.value.toUpperCase();
         }
@@ -1279,6 +1334,30 @@ function normalizeTypedTextToUppercase(root = document) {
 
 document.addEventListener('DOMContentLoaded', function () {
     normalizeTypedTextToUppercase();
+
+    const gender = document.getElementById('gender');
+    if (gender && gender.value) {
+        const normalized = String(gender.value).trim().toLowerCase();
+        const map = {
+            male: 'Male',
+            female: 'Female',
+            other: 'Other'
+        };
+        if (map[normalized]) gender.value = map[normalized];
+    }
+
+    // Keep the selected gender value exactly as the <option> value.
+    if (gender) {
+        gender.addEventListener('change', function () {
+            const normalized = String(this.value || '').trim().toLowerCase();
+            const map = {
+                male: 'Male',
+                female: 'Female',
+                other: 'Other'
+            };
+            if (map[normalized]) this.value = map[normalized];
+        });
+    }
 });
 
 const dbTariffs = <?= json_encode($tariffs) ?>;
@@ -1516,6 +1595,32 @@ document.addEventListener('DOMContentLoaded', function() {
             if (typeof syncDiscountHiddenFields === 'function') {
                 syncDiscountHiddenFields();
             }
+
+            // Do not force/override a selected payment mode.
+            // Only when NOTHING is selected, make CASH the default automatically.
+            const selectedModes = document.querySelectorAll('.pay-check:checked');
+            if (selectedModes.length === 0) {
+                const fee = parseFloat(document.getElementById('consultation_fee')?.value) || 0;
+                const discount = parseFloat(document.getElementById('modal_discount_input')?.value) || 0;
+                const payable = Math.max(0, fee - discount);
+
+                const cashCheck = document.getElementById('check_cash');
+                const cashInput = document.getElementById('amt_cash');
+                const cashWrap = document.getElementById('div_input_cash');
+
+                if (cashCheck && cashInput && payable > 0) {
+                    cashCheck.checked = true;
+                    if (cashWrap) cashWrap.style.display = 'block';
+                    cashInput.value = payable.toFixed(2);
+
+                    document.getElementById('modal_total_paid').value = payable.toFixed(2);
+                    document.getElementById('modal_change_return').value = '0.00';
+                    document.getElementById('payment_breakdown_json').value = JSON.stringify({
+                        Cash: { amount: payable }
+                    });
+                    document.getElementById('summary_payment_mode').value = 'CASH: ₹' + payable.toFixed(2);
+                }
+            }
         });
     }
 
@@ -1647,6 +1752,23 @@ function applyModalPayment() {
     if (upi > 0) { let utr = document.getElementById('utr_upi').value; modes.push('UPI: ₹'+upi); breakdown.UPI = { amount: upi, utr: utr }; }
     if (card > 0) { let utr = document.getElementById('utr_card').value; modes.push('CARD: ₹'+card); breakdown.Card = { amount: card, utr: utr }; }
     if (net > 0) { let utr = document.getElementById('utr_net').value; modes.push('NET: ₹'+net); breakdown.NetBanking = { amount: net, utr: utr }; }
+
+    // If nothing is selected, default to CASH for the full payable amount.
+    if (modes.length === 0 && payable > 0) {
+        const cashCheck = document.getElementById('check_cash');
+        const cashWrap = document.getElementById('div_input_cash');
+        const cashInput = document.getElementById('amt_cash');
+
+        cashCheck.checked = true;
+        cashWrap.style.display = 'block';
+        cashInput.value = payable.toFixed(2);
+
+        cash = payable;
+        totalPaid = payable;
+        returnChange = 0;
+        modes.push('CASH: ₹' + cash.toFixed(2));
+        breakdown.Cash = { amount: cash };
+    }
 
     let summaryStr = modes.length > 0 ? modes.join(' | ') : 'Unpaid (₹0)';
 
