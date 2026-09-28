@@ -20,10 +20,11 @@ $is_opd_active = in_array($current_page, $opd_pages);
 $facility_pages = ['master_buildings.php', 'master_blocks.php', 'master_floors.php', 'master_room_categories.php', 'master_rooms.php'];
 $is_facility_active = in_array($current_page, $facility_pages);
 
-// General Masters (Includes all doctor, services, and tariff masters)
+// General Masters (Includes doctor, services, tariff and prescription modules)
 $general_master_pages = [
     'org_profile.php', 
-    'master_financial_year.php', // <--- Financial Year Master
+    'master_states.php',
+    'master_financial_year.php',
     'master_centers.php', 
     'users.php', 
     'master_doctors.php', 
@@ -39,8 +40,26 @@ $general_master_pages = [
     'master_tariffs.php'
 ];
 
+$prescription_pages = [
+    'master_medicines.php',
+    'master_routes.php',
+    'master_frequencies.php',
+    'master_timings.php',
+    'master_durations.php',
+    'master_prescription_instructions.php',
+    'master_symptoms.php',
+    'master_diagnoses.php',
+    'prescription_template_master.php'
+];
+
+$is_prescription_active = in_array($current_page, $prescription_pages);
+
 // NOTE: OPD is no longer merged into Master Active check!
-$is_master_active = in_array($current_page, array_merge($general_master_pages, $facility_pages));
+$is_master_active = in_array($current_page, array_merge(
+    $general_master_pages,
+    $facility_pages,
+    $prescription_pages
+));
 
 // User Menu Permissions (Dynamic Access Check)
 $user_menus = $_SESSION['menu_access'] ?? [];
@@ -370,6 +389,13 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
                         </a>
                     </li>
                     <?php endif; ?>
+                    
+                    
+                    <li>
+                        <a href="master_states.php" class="<?= ($current_page == 'master_states.php') ? 'active-child' : '' ?>">
+                            <i class="bi bi-map"></i> Master States
+                        </a>
+                    </li>
 
                     <li>
                         <a href="master_financial_year.php" class="<?= ($current_page == 'master_financial_year.php') ? 'active-child' : '' ?>">
@@ -438,6 +464,77 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
                         <a href="master_doctor_tariff.php" class="<?= ($current_page == 'master_doctor_tariff.php') ? 'active-child' : '' ?>">
                             <i class="bi bi-currency-rupee"></i> Doctor Tariff Master
                         </a>
+                    </li>
+
+                    <!-- Prescription Masters Submenu -->
+                    <li>
+                        <button
+                            class="nested-toggle-btn <?= $is_prescription_active ? 'text-warning fw-bold' : '' ?>"
+                            type="button"
+                            data-bs-toggle="collapse"
+                            data-bs-target="#nestedPrescriptionSubmenu"
+                            aria-expanded="<?= $is_prescription_active ? 'true' : 'false' ?>"
+                            aria-controls="nestedPrescriptionSubmenu"
+                        >
+                            <span>
+                                <i class="bi bi-prescription2 text-warning me-2"></i>
+                                Prescription Masters
+                            </span>
+                            <i class="bi bi-chevron-down nested-arrow"></i>
+                        </button>
+
+                        <div
+                            class="collapse <?= $is_prescription_active ? 'show' : '' ?>"
+                            id="nestedPrescriptionSubmenu"
+                        >
+                            <ul class="nested-submenu-items">
+                                <li>
+                                    <a href="master_medicines.php" class="<?= ($current_page == 'master_medicines.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-capsule"></i> Medicine Master
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="master_routes.php" class="<?= ($current_page == 'master_routes.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-arrow-left-right"></i> Route Master
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="master_frequencies.php" class="<?= ($current_page == 'master_frequencies.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-arrow-repeat"></i> Frequency Master
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="master_timings.php" class="<?= ($current_page == 'master_timings.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-clock"></i> Timing Master
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="master_durations.php" class="<?= ($current_page == 'master_durations.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-hourglass-split"></i> Duration Master
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="master_prescription_instructions.php" class="<?= ($current_page == 'master_prescription_instructions.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-chat-left-text"></i> Prescription Instructions
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="master_symptoms.php" class="<?= ($current_page == 'master_symptoms.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-activity"></i> Symptom Master
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="master_diagnoses.php" class="<?= ($current_page == 'master_diagnoses.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-clipboard2-pulse"></i> Diagnosis Master
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="prescription_template_master.php" class="<?= ($current_page == 'prescription_template_master.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-file-earmark-medical"></i> Prescription Template Master
+                                    </a>
+                                </li>
+                            </ul>
+                        </div>
                     </li>
 
                     <!-- Facility / Infrastructure Masters Submenu -->
