@@ -16,11 +16,29 @@ document.addEventListener("DOMContentLoaded", function() {
             sidebar.classList.toggle('show');
             backdrop.classList.toggle('show');
         });
+
         backdrop.addEventListener('click', () => {
             sidebar.classList.remove('show');
             backdrop.classList.remove('show');
         });
     }
+
+    // ==========================================================
+    // SIDEBAR: ONLY ONE MAIN MENU CAN STAY OPEN AT A TIME
+    // Example: OPENING OPD SERVICES WILL CLOSE MASTERS.
+    // Nested menus inside Masters remain independent.
+    // ==========================================================
+    const mainMenuCollapses = document.querySelectorAll('.sidebar-menu > li > .collapse');
+
+    mainMenuCollapses.forEach(function(collapseEl) {
+        collapseEl.addEventListener('show.bs.collapse', function() {
+            mainMenuCollapses.forEach(function(otherEl) {
+                if (otherEl !== collapseEl && otherEl.classList.contains('show')) {
+                    bootstrap.Collapse.getOrCreateInstance(otherEl, { toggle: false }).hide();
+                }
+            });
+        });
+    });
 });
 </script>
 </body>
