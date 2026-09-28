@@ -7,9 +7,40 @@ $page_title = "Days Master";
 $org_id = (int)($_SESSION['org_id'] ?? 1);
 $center_id = (int)($_SESSION['center_id'] ?? 1);
 
-// Save / Update
+// Auto-Seed All 7 Days
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['seed_days'])) {
+    $default_days = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY'];
+    
+    try {
+        // Fetch existing days to prevent duplicates
+        $existing_stmt = $tenant_pdo->prepare("SELECT UPPER(day_name) FROM master_days WHERE org_id = ? AND center_id = ?");
+        $existing_stmt->execute([$org_id, $center_id]);
+        $existing_days = $existing_stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+
+        $stmt = $tenant_pdo->prepare("INSERT INTO master_days (org_id, center_id, day_name, status) VALUES (?, ?, ?, 1)");
+        $added = 0;
+
+        foreach ($default_days as $day) {
+            if (!in_array($day, $existing_days)) {
+                $stmt->execute([$org_id, $center_id, $day]);
+                $added++;
+            }
+        }
+
+        if ($added > 0) {
+            set_flash_msg("{$added} days automatically added to the master.");
+        } else {
+            set_flash_msg("All 7 days are already present.");
+        }
+    } catch (PDOException $e) {
+        set_flash_err("Database Error: " . $e->getMessage());
+    }
+    header("Location: master_days.php");
+    exit;
+}
+
+// Save / Update Single Day
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_day'])) {
-    // FULL CAPITALIZATION - Text hamesha uppercase mein save hoga
     $day_name = strtoupper(trim($_POST['day_name'] ?? ''));
     $status   = isset($_POST['status']) ? 1 : 0;
     $edit_id  = (int)($_POST['edit_id'] ?? 0);
@@ -65,7 +96,6 @@ require_once __DIR__ . '/layout_header.php';
 
                     <div class="mb-3">
                         <label class="form-label small fw-semibold text-secondary mb-1">Day Name *</label>
-                        <!-- 'text-uppercase' for visual capitals and 'autofocus' for keeping the cursor ready -->
                         <input type="text" name="day_name" id="day_name" class="form-control form-control-sm text-uppercase" placeholder="e.g. MONDAY" required autofocus>
                     </div>
 
@@ -88,8 +118,19 @@ require_once __DIR__ . '/layout_header.php';
         <div class="card border shadow-sm">
             <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
                 <span class="fw-bold small text-dark"><i class="bi bi-calendar3 text-primary me-1"></i> Days List</span>
-                <span class="badge bg-light text-secondary border"><?= count($days) ?> Days</span>
+                
+                <!-- AUTO-ADD 7 DAYS BUTTON -->
+                <div class="d-flex gap-2 align-items-center">
+                    <form method="POST" action="" class="m-0">
+                        <input type="hidden" name="seed_days" value="1">
+                        <button type="submit" class="btn btn-sm btn-success py-0 px-2 fw-semibold" style="font-size: 0.8rem;">
+                            <i class="bi bi-magic me-1"></i> Auto-Add 7 Days
+                        </button>
+                    </form>
+                    <span class="badge bg-light text-secondary border"><?= count($days) ?> Days</span>
+                </div>
             </div>
+            
             <div class="card-body p-0">
                 <div class="table-responsive">
                     <table class="table table-hover align-middle mb-0 small">
@@ -103,7 +144,7 @@ require_once __DIR__ . '/layout_header.php';
                         </thead>
                         <tbody>
                             <?php if (empty($days)): ?>
-                                <tr><td colspan="4" class="text-center py-4 text-muted">No days configured.</td></tr>
+                                <tr><td colspan="4" class="text-center py-4 text-muted">No days configured. Click "Auto-Add 7 Days" to populate.</td></tr>
                             <?php else: ?>
                                 <?php foreach ($days as $d): ?>
                                     <?php $is_act = (int)$d['status'] === 1; ?>
@@ -136,13 +177,13 @@ function editRow(d) {
     document.getElementById('status').checked = (parseInt(d.status) === 1);
     document.getElementById('formTitle').innerHTML = '<i class="bi bi-pencil-square text-warning me-1"></i> Edit Day';
     document.getElementById('btnSubmit').innerText = 'Update Day';
-    document.getElementById('day_name').focus(); // Automatically focus when editing
+    document.getElementById('day_name').focus();
 }
 function resetForm() {
     document.getElementById('edit_id').value = '0';
     document.getElementById('formTitle').innerHTML = '<i class="bi bi-calendar-event text-primary me-1"></i> Add / Edit Day';
     document.getElementById('btnSubmit').innerText = 'Save Day';
-    document.getElementById('day_name').focus(); // Automatically focus when resetting
+    document.getElementById('day_name').focus();
 }
 </script>
 
