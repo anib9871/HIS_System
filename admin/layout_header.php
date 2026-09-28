@@ -13,7 +13,7 @@ if (!isset($_SESSION['user_id']) || (isset($_SESSION['user_type']) && $_SESSION[
 $current_page = basename($_SERVER['PHP_SELF']);
 
 // OPD Submenu Pages Check (Added opd_appointments.php here)
-$opd_pages = ['opd_appointments.php', 'opd_registration.php', 'opd_queue.php', 'opd_doctor.php', 'opd_billing.php'];
+$opd_pages = ['opd_appointments.php', 'opd_registration.php', 'opd_doctor.php', 'opd_billing.php'];
 $is_opd_active = in_array($current_page, $opd_pages);
 
 // Facility & Infrastructure Master Check
@@ -497,7 +497,7 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
                 <ul class="submenu-items">
                     
                     <?php if (has_access('opd_appt', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_appointments.php" class="<?= ($current_page == 'opd_appointments.php') ? 'active-child' : '' ?>"><i class="bi bi-calendar-check"></i> Appointments</a></li>
+                    <li><a href="opd_appointments.php" id="headerAppointmentsLink" class="<?= ($current_page == 'opd_appointments.php') ? 'active-child' : '' ?>"><i class="bi bi-calendar-check"></i> Appointments</a></li>
                     <?php endif; ?>
 
                     <?php if (has_access('opd_reg', $is_full_admin, $user_menus)): ?>
@@ -505,12 +505,10 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
                     <?php endif; ?>
 
                     <?php if (has_access('opd_queue', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_queue.php" class="<?= ($current_page == 'opd_queue.php') ? 'active-child' : '' ?>"><i class="bi bi-display"></i> Queue Display</a></li>
+                    <li><a href="opd_appointments.php#nav-queue" id="headerQueueDisplayLink" class="<?= ($current_page == 'opd_appointments.php') ? 'active-child' : '' ?>"><i class="bi bi-display"></i> Queue Display</a></li>
                     <?php endif; ?>
 
-                    <?php if (has_access('opd_doctor', $is_full_admin, $user_menus)): ?>
                     <li><a href="opd_doctor.php" class="<?= ($current_page == 'opd_doctor.php') ? 'active-child' : '' ?>"><i class="bi bi-prescription2"></i> Doctor Desk (Rx)</a></li>
-                    <?php endif; ?>
 
                     <?php if (has_access('opd_billing', $is_full_admin, $user_menus)): ?>
                     <li><a href="opd_billing.php" class="<?= ($current_page == 'opd_billing.php') ? 'active-child' : '' ?>"><i class="bi bi-receipt"></i> OPD Billing</a></li>
@@ -542,6 +540,10 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
 
             <div class="vr my-1 text-muted d-none d-sm-block" style="height: 20px;"></div>
 
+            <!-- <a href="opd_appointments.php#nav-queue" class="btn btn-sm btn-outline-primary d-flex align-items-center gap-1" title="Open OPD Queue">
+                <i class="bi bi-display"></i> <span class="d-none d-sm-inline">OPD QUEUE</span>
+            </a> -->
+
             <a href="../logout.php" class="btn-logout" title="Logout">
                 <i class="bi bi-box-arrow-right"></i> <span class="d-none d-sm-inline">Logout</span>
             </a>
@@ -549,3 +551,17 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
     </header>
     
     <main class="content">
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    if (window.location.hash === '#nav-queue') {
+        const queueLink = document.getElementById('headerQueueDisplayLink');
+        if (queueLink) queueLink.classList.add('active-child');
+
+        // If the Appointment page has the Live Queue Tracking tab, open it automatically.
+        const queueTab = document.querySelector('button[data-bs-target="#nav-queue"]');
+        if (queueTab && typeof bootstrap !== 'undefined') {
+            new bootstrap.Tab(queueTab).show();
+        }
+    }
+});
+</script>
