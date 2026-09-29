@@ -20,7 +20,7 @@ try {
             phone VARCHAR(30) NULL,
             address TEXT NULL,
             city VARCHAR(100) NULL,
-            state VARCHAR(100) NULL,
+            state_id INT NULL,
             pincode VARCHAR(20) NULL,
             gst_no VARCHAR(30) NULL,
             status TINYINT(1) DEFAULT 1,
@@ -29,6 +29,7 @@ try {
     ");
     $tenant_pdo->exec("ALTER TABLE org_profile ADD COLUMN IF NOT EXISTS mnemonic VARCHAR(4) NULL AFTER org_name;");
     $tenant_pdo->exec("ALTER TABLE org_profile ADD COLUMN IF NOT EXISTS gst_no VARCHAR(30) NULL AFTER pincode;");
+    $tenant_pdo->exec("ALTER TABLE org_profile ADD COLUMN IF NOT EXISTS state_id INT NULL AFTER city;");
 } catch (Exception $e) {}
 
 // 2. Handle Form Submission & Update
@@ -40,7 +41,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_org'])) {
     $phone    = trim($_POST['phone'] ?? '');
     $address  = trim($_POST['address'] ?? '');
     $city     = trim($_POST['city'] ?? '');
-    $state    = trim($_POST['state'] ?? '');
+    // Yahan dropdown se state_id integer format mein aayega
+    $state_id = !empty($_POST['state_id']) ? (int)$_POST['state_id'] : null; 
     $pincode  = trim($_POST['pincode'] ?? '');
     $gst_no   = trim($_POST['gst_no'] ?? '');
 
@@ -55,16 +57,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_org'])) {
             if ($chk > 0) {
                 $stmt = $tenant_pdo->prepare("
                     UPDATE org_profile 
-                    SET org_name = ?, mnemonic = ?, tagline = ?, email = ?, phone = ?, address = ?, city = ?, state = ?, pincode = ?, gst_no = ?
+                    SET org_name = ?, mnemonic = ?, tagline = ?, email = ?, phone = ?, address = ?, city = ?, state_id = ?, pincode = ?, gst_no = ?
                     WHERE id = 1
                 ");
-                $stmt->execute([$org_name, $mnemonic, $tagline, $email, $phone, $address, $city, $state, $pincode, $gst_no]);
+                $stmt->execute([$org_name, $mnemonic, $tagline, $email, $phone, $address, $city, $state_id, $pincode, $gst_no]);
             } else {
                 $stmt = $tenant_pdo->prepare("
-                    INSERT INTO org_profile (id, org_name, mnemonic, tagline, email, phone, address, city, state, pincode, gst_no)
+                    INSERT INTO org_profile (id, org_name, mnemonic, tagline, email, phone, address, city, state_id, pincode, gst_no)
                     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
-                $stmt->execute([$org_name, $mnemonic, $tagline, $email, $phone, $address, $city, $state, $pincode, $gst_no]);
+                $stmt->execute([$org_name, $mnemonic, $tagline, $email, $phone, $address, $city, $state_id, $pincode, $gst_no]);
             }
             
             $_SESSION['org_name'] = $org_name;
@@ -82,6 +84,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_org'])) {
 // 3. Fetch Current Tenant Profile Data
 $org = $tenant_pdo->query("SELECT * FROM org_profile WHERE id = 1")->fetch() ?: [];
 
+// 4. Fetch Active States from master_states for Dropdown
+$states = [];
+try {
+    // id aur state_name dono fetch kar rahe hain
+    $states = $tenant_pdo->query("SELECT id, state_name FROM master_states WHERE status = 1 ORDER BY state_name ASC")->fetchAll();
+} catch (Exception $e) {}
+
 $val_org_name = $org['org_name'] ?? ($_SESSION['org_name'] ?? '');
 $val_mnemonic = $org['mnemonic'] ?? ($_SESSION['mnemonic'] ?? '');
 
@@ -92,13 +101,10 @@ require_once __DIR__ . '/layout_header.php';
     <div class="col-xl-9 col-lg-10">
         <div class="card border-0 shadow-sm rounded-3">
             
-            <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
+            <div class="card-header bg-white py-2 px-3 border-bottom d-flex align-items-center">
                 <span class="fw-bold text-dark small d-flex align-items-center gap-2">
                     <i class="bi bi-hospital text-primary fs-6"></i>
                     <span>Hospital / Facility Master Configuration</span>
-                </span>
-                <span class="badge bg-light text-secondary border font-monospace" style="font-size: 0.75rem;">
-                    Config ID: #01
                 </span>
             </div>
 
@@ -127,7 +133,7 @@ require_once __DIR__ . '/layout_header.php';
                                 </label>
                                 <input type="text" name="mnemonic" id="mnemonic_input" class="form-control form-control-sm fw-bold text-primary font-monospace" 
                                        value="<?= htmlspecialchars($val_mnemonic) ?>" 
-                                       placeholder="e.g. MAX" oninput="checkMnemonicLength(this)">
+                                       placeholder="e.g. MAX" maxlength="4" oninput="checkMnemonicLength(this)">
                             </div>
                         </div>
                     </div>
@@ -163,18 +169,27 @@ require_once __DIR__ . '/layout_header.php';
                     </div>
 
                     <div class="row g-2 mb-3">
+                        <!-- State Dropdown -->
                         <div class="col-md-4">
+                            <label class="form-label small fw-semibold text-secondary mb-1">State</label>
+                            <select name="state_id" class="form-select form-select-sm">
+                                <option value="">-- Select State --</option>
+                                <?php foreach ($states as $s): ?>
+                                    <!-- Yahan value mein $s['id'] jaayega -->
+                                    <option value="<?= $s['id'] ?>" <?= (isset($org['state_id']) && $org['state_id'] == $s['id']) ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($s['state_name']) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        
+                        <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">City</label>
                             <input type="text" name="city" class="form-control form-control-sm" 
                                    value="<?= htmlspecialchars($org['city'] ?? '') ?>" 
                                    placeholder="e.g. Lucknow">
                         </div>
-                        <div class="col-md-3">
-                            <label class="form-label small fw-semibold text-secondary mb-1">State</label>
-                            <input type="text" name="state" class="form-control form-control-sm" 
-                                   value="<?= htmlspecialchars($org['state'] ?? '') ?>" 
-                                   placeholder="e.g. Uttar Pradesh">
-                        </div>
+                        
                         <div class="col-md-2">
                             <label class="form-label small fw-semibold text-secondary mb-1">Pincode</label>
                             <input type="text" name="pincode" class="form-control form-control-sm" 
