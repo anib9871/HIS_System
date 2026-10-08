@@ -30,6 +30,22 @@ function formatFYWithHyphen($fy_code) {
     return $fy_code;
 }
 
+// DOB is the source of truth for age.
+function calculateAgeFromDob($dob, $as_of_date = null) {
+    $dob = trim((string)$dob);
+    if ($dob === '') return null;
+
+    $dobObj = DateTime::createFromFormat('!Y-m-d', $dob);
+    if (!$dobObj || $dobObj->format('Y-m-d') !== $dob) return null;
+
+    $as_of_date = $as_of_date ?: date('Y-m-d');
+    $asOfObj = DateTime::createFromFormat('!Y-m-d', $as_of_date);
+    if (!$asOfObj || $asOfObj->format('Y-m-d') !== $as_of_date) $asOfObj = new DateTime('today');
+
+    if ($dobObj > $asOfObj) return null;
+    return (int)$dobObj->diff($asOfObj)->y;
+}
+
 // AUTO-ADD REQUIRED COLUMNS
 try {
     // SAME MOBILE NUMBER CAN BE SHARED BY MULTIPLE FAMILY MEMBERS.
@@ -56,6 +72,7 @@ try {
         // Do not block registration if an optional schema cleanup fails.
     }
 
+    $tenant_pdo->exec("ALTER TABLE patient_master ADD COLUMN IF NOT EXISTS dob DATE NULL AFTER fullname");
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS department_id INT NULL AFTER doctor_id");
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS service_id INT NULL AFTER department_id");
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS category_id INT NULL AFTER service_id");
@@ -110,6 +127,76 @@ $token_generated = null;
 $org_id = (int)($_SESSION['org_id'] ?? 1);
 $center_id = (int)($_SESSION['center_id'] ?? 1);
 $org_name = $_SESSION['org_name'] ?? 'City Care Multispeciality Hospital';
+
+
+// ============================================================
+// AJAX: FIND REGISTERED PATIENT BY MOBILE NUMBER
+// ============================================================
+// A mobile number is NOT a unique patient ID.
+// Multiple family members may share the same mobile number.
+if (isset($_GET['lookup_patient_mobile'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $lookup_mobile = preg_replace('/\D+/', '', (string)($_GET['lookup_patient_mobile'] ?? ''));
+
+    if (strlen($lookup_mobile) !== 10) {
+        echo json_encode([
+            'success' => false,
+            'patients' => []
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    try {
+        $lookup_stmt = $tenant_pdo->prepare("
+            SELECT
+                patient_id,
+                uhid,
+                fullname,
+                mobile,
+                dob,
+                age,
+                gender
+            FROM patient_master
+            WHERE org_id = ?
+              AND center_id = ?
+              AND status = 1
+              AND (
+                    mobile = ?
+                    OR FIND_IN_SET(?, REPLACE(mobile, ' ', '')) > 0
+                  )
+            ORDER BY patient_id DESC
+        ");
+
+        $lookup_stmt->execute([
+            $org_id,
+            $center_id,
+            $lookup_mobile,
+            $lookup_mobile
+        ]);
+
+        $patients = $lookup_stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($patients as &$lookupPatient) {
+            $calculatedAge = calculateAgeFromDob($lookupPatient['dob'] ?? '');
+            if ($calculatedAge !== null) $lookupPatient['age'] = $calculatedAge;
+        }
+        unset($lookupPatient);
+
+        echo json_encode([
+            'success' => true,
+            'patients' => $patients
+        ], JSON_UNESCAPED_UNICODE);
+    } catch (Exception $e) {
+        echo json_encode([
+            'success' => false,
+            'patients' => [],
+            'error' => $e->getMessage()
+        ], JSON_UNESCAPED_UNICODE);
+    }
+
+    exit;
+}
+
 
 // Fetch Center Address
 $center_name = "Main Branch";
@@ -171,6 +258,7 @@ if ($appointment_id > 0 && $edit_visit_id <= 0) {
                    p.uhid AS master_uhid,
                    p.fullname AS master_fullname,
                    p.mobile AS master_mobile,
+                   p.dob AS master_dob,
                    p.age AS master_age,
                    p.gender AS master_gender
             FROM opd_appointments a
@@ -188,7 +276,7 @@ if ($appointment_id > 0 && $edit_visit_id <= 0) {
 if ($edit_visit_id > 0) {
     try {
         $edit_stmt = $tenant_pdo->prepare("
-            SELECT v.*, p.uhid, p.fullname, p.mobile, p.age, p.gender 
+            SELECT v.*, p.uhid, p.fullname, p.mobile, p.dob, p.age, p.gender 
             FROM opd_visits v 
             JOIN patient_master p ON v.patient_id = p.patient_id 
             WHERE v.visit_id = ? AND v.org_id = ? AND v.center_id = ?
@@ -202,13 +290,45 @@ if ($edit_visit_id > 0) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) {
     $fullname = ucwords(strtolower(trim($_POST['fullname'] ?? '')));
     $gender   = $_POST['gender'] ?? 'Male';
-    $age      = (int)($_POST['age'] ?? 0);
+    $dob      = trim((string)($_POST['dob'] ?? ''));
     
+    $age_post = trim((string)($_POST['age'] ?? ''));
+
+    // If Age is entered directly, convert it to a DOB first.
+    // Only DOB is stored in patient_master, so age can be recalculated every year.
+    if ($dob === '' && $age_post !== '') {
+        if (!preg_match('/^\\d{1,3}$/', $age_post)) {
+            $err = "Please enter a valid age.";
+        } else {
+            $entered_age = (int)$age_post;
+
+            if ($entered_age < 0 || $entered_age > 150) {
+                $err = "Please enter a valid age between 0 and 150.";
+            } else {
+                $ageBaseDate = !empty($_POST['visit_date']) ? $_POST['visit_date'] : date('Y-m-d');
+                $ageBaseObj = DateTime::createFromFormat('!Y-m-d', $ageBaseDate);
+
+                if (!$ageBaseObj || $ageBaseObj->format('Y-m-d') !== $ageBaseDate) {
+                    $ageBaseObj = new DateTime('today');
+                }
+
+                $dob = $ageBaseObj->modify("-{$entered_age} years")->format('Y-m-d');
+            }
+        }
+    }
+
     // Multiple mobile numbers handle logic
     $mobile_post = $_POST['mobile'] ?? [];
     $mobile = is_array($mobile_post) ? implode(', ', array_filter(array_map('trim', $mobile_post), fn($v) => $v !== '')) : trim((string)$mobile_post);
     
     $visit_date    = !empty($_POST['visit_date']) ? $_POST['visit_date'] : date('Y-m-d');
+
+    // DOB remains the source of truth after Age is normalized into DOB.
+    $age = calculateAgeFromDob($dob, $visit_date);
+    if ($age === null) {
+        $err = "Please enter a valid Date of Birth or Age. DOB cannot be in the future.";
+    }
+
     $department_id = !empty($_POST['department_id']) ? (int)$_POST['department_id'] : null;
     $doctor_id     = !empty($_POST['doctor_id']) ? (int)$_POST['doctor_id'] : null;
     $service_id    = !empty($_POST['service_id']) ? (int)$_POST['service_id'] : null;
@@ -273,7 +393,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
     $current_fy_code = getCurrentFY($tenant_pdo, $org_id, $center_id, $visit_date);
     $display_fy = formatFYWithHyphen($current_fy_code);
 
-    if (!empty($fullname) && !empty($mobile)) {
+    if ($err === '' && !empty($fullname) && !empty($mobile) && $dob !== '') {
         try {
             $tenant_pdo->beginTransaction();
 
@@ -290,8 +410,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     throw new Exception("Patient UHID was not found.");
                 }
 
-                $tenant_pdo->prepare("UPDATE patient_master SET fullname = ?, gender = ?, age = ?, mobile = ? WHERE patient_id = ? AND org_id = ?")
-                           ->execute([$fullname, $gender, $age, $mobile, $patient_id, $org_id]);
+                $tenant_pdo->prepare("UPDATE patient_master SET fullname = ?, dob = ?, gender = ?, age = ?, mobile = ? WHERE patient_id = ? AND org_id = ?")
+                           ->execute([$fullname, $dob, $gender, $age, $mobile, $patient_id, $org_id]);
 
                 $tenant_pdo->prepare("
                     UPDATE opd_visits 
@@ -366,23 +486,86 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                         $uhid = generateSecureUHID($tenant_pdo, $center_id, $current_fy_code);
                         $stmt = $tenant_pdo->prepare("
                             INSERT INTO patient_master
-                                (org_id, center_id, uhid, fullname, gender, age, mobile, status)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                                (org_id, center_id, uhid, fullname, dob, gender, age, mobile, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                         ");
-                        $stmt->execute([$org_id, $center_id, $uhid, $fullname, $gender, $age, $mobile]);
+                        $stmt->execute([$org_id, $center_id, $uhid, $fullname, $dob, $gender, $age, $mobile]);
                         $patient_id = (int)$tenant_pdo->lastInsertId();
                     }
                 } else {
-                    // DIRECT REGISTRATION: always create a NEW patient record.
-                    // Same mobile may belong to many family members.
-                    $uhid = generateSecureUHID($tenant_pdo, $center_id, $current_fy_code);
-                    $stmt = $tenant_pdo->prepare("
-                        INSERT INTO patient_master
-                            (org_id, center_id, uhid, fullname, gender, age, mobile, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-                    ");
-                    $stmt->execute([$org_id, $center_id, $uhid, $fullname, $gender, $age, $mobile]);
-                    $patient_id = (int)$tenant_pdo->lastInsertId();
+                    // DIRECT REGISTRATION:
+                    // If a registered patient was selected/found by mobile lookup,
+                    // continue with that existing patient and keep the same UHID.
+                    // Otherwise create a new patient. This still allows multiple
+                    // family members to share one mobile number.
+
+                    $existing_patient_id = (int)($_POST['existing_patient_id'] ?? 0);
+
+                    if ($existing_patient_id > 0) {
+                        $existing_patient_stmt = $tenant_pdo->prepare("
+                            SELECT patient_id, uhid
+                            FROM patient_master
+                            WHERE patient_id = ?
+                              AND org_id = ?
+                              AND center_id = ?
+                              AND status = 1
+                            LIMIT 1
+                            FOR UPDATE
+                        ");
+                        $existing_patient_stmt->execute([
+                            $existing_patient_id,
+                            $org_id,
+                            $center_id
+                        ]);
+
+                        $existing_patient = $existing_patient_stmt->fetch(PDO::FETCH_ASSOC);
+
+                        if (!$existing_patient) {
+                            throw new Exception("Selected registered patient was not found.");
+                        }
+
+                        $patient_id = (int)$existing_patient['patient_id'];
+                        $uhid = (string)$existing_patient['uhid'];
+
+                        // Keep the master patient information updated with the
+                        // values currently shown on the registration screen.
+                        $tenant_pdo->prepare("
+                            UPDATE patient_master
+                            SET fullname = ?, dob = ?, gender = ?, age = ?, mobile = ?
+                            WHERE patient_id = ?
+                              AND org_id = ?
+                              AND center_id = ?
+                        ")->execute([
+                            $fullname,
+                            $dob,
+                            $gender,
+                            $age,
+                            $mobile,
+                            $patient_id,
+                            $org_id,
+                            $center_id
+                        ]);
+                    } else {
+                        // New patient / new family member.
+                        $uhid = generateSecureUHID($tenant_pdo, $center_id, $current_fy_code);
+
+                        $stmt = $tenant_pdo->prepare("
+                            INSERT INTO patient_master
+                                (org_id, center_id, uhid, fullname, dob, gender, age, mobile, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        ");
+                        $stmt->execute([
+                            $org_id,
+                            $center_id,
+                            $uhid,
+                            $fullname,
+                            $dob,
+                            $gender,
+                            $age,
+                            $mobile
+                        ]);
+                        $patient_id = (int)$tenant_pdo->lastInsertId();
+                    }
                 }
 
                 // ==========================================================
@@ -517,20 +700,73 @@ $tariffs = $tariffsStmt->fetchAll(PDO::FETCH_ASSOC);
 
 $today_date = date('Y-m-d');
 $today_visits = [];
+
 try {
-    // BILLING LIST: show every OPD bill for this organisation/center.
-    // New bills appear at the top; older bills remain available below.
-    $tv_stmt = $tenant_pdo->prepare("
-        SELECT v.*, p.uhid, p.fullname, p.mobile, p.age, p.gender, d.full_name as doctor_name
-        FROM opd_visits v
-        JOIN patient_master p ON v.patient_id = p.patient_id
-        LEFT JOIN master_doctors d ON v.doctor_id = d.id
-        WHERE v.org_id = ? AND v.center_id = ?
-        ORDER BY v.visit_id DESC
-    ");
-    $tv_stmt->execute([$org_id, $center_id]);
-    $today_visits = $tv_stmt->fetchAll() ?: [];
-} catch (Exception $e) {}
+    // BILLING LIST: show ALL OPD bills for this organisation/center.
+    // Never limit this list to today's date.
+    //
+    // DOB is used when available so the displayed age stays current.
+    // If the DOB column is unavailable on an older database, fall back to
+    // the existing age column so the billing list NEVER disappears.
+    try {
+        $tenant_pdo->exec("ALTER TABLE patient_master ADD COLUMN IF NOT EXISTS dob DATE NULL AFTER fullname");
+    } catch (Exception $schemaEx) {
+        // Older MySQL versions may not support ADD COLUMN IF NOT EXISTS.
+        // The SELECT below has a safe fallback in that case.
+    }
+
+    try {
+        $tv_stmt = $tenant_pdo->prepare("
+            SELECT v.*,
+                   p.uhid,
+                   p.fullname,
+                   p.mobile,
+                   p.dob,
+                   CASE
+                       WHEN p.dob IS NOT NULL AND p.dob <> ''
+                       THEN TIMESTAMPDIFF(YEAR, p.dob, CURDATE())
+                       ELSE p.age
+                   END AS age,
+                   p.gender,
+                   d.full_name AS doctor_name
+            FROM opd_visits v
+            JOIN patient_master p
+              ON v.patient_id = p.patient_id
+            LEFT JOIN master_doctors d
+              ON v.doctor_id = d.id
+            WHERE v.org_id = ?
+              AND v.center_id = ?
+            ORDER BY v.visit_id DESC
+        ");
+        $tv_stmt->execute([$org_id, $center_id]);
+        $today_visits = $tv_stmt->fetchAll() ?: [];
+    } catch (Exception $billingEx) {
+        // IMPORTANT: If the DOB column is not available for any reason,
+        // still show the complete existing billing list.
+        $tv_stmt = $tenant_pdo->prepare("
+            SELECT v.*,
+                   p.uhid,
+                   p.fullname,
+                   p.mobile,
+                   p.age,
+                   p.gender,
+                   d.full_name AS doctor_name
+            FROM opd_visits v
+            JOIN patient_master p
+              ON v.patient_id = p.patient_id
+            LEFT JOIN master_doctors d
+              ON v.doctor_id = d.id
+            WHERE v.org_id = ?
+              AND v.center_id = ?
+            ORDER BY v.visit_id DESC
+        ");
+        $tv_stmt->execute([$org_id, $center_id]);
+        $today_visits = $tv_stmt->fetchAll() ?: [];
+    }
+} catch (Exception $e) {
+    // Keep the page working even if the billing query has an unexpected issue.
+    $today_visits = [];
+}
 
 require_once __DIR__ . '/layout_header.php';
 ?>
@@ -611,6 +847,62 @@ input[inputmode="numeric"],
     .no-print { display: none !important; }
 }
 .tariff-box { background-color: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px; padding: 15px; text-align: center; }
+.patient-lookup-box {
+    font-size: 10px;
+    line-height: 1.25;
+}
+
+#patientSelectionModal .modal-content {
+    border: 0;
+    border-radius: 14px;
+    box-shadow: 0 15px 45px rgba(15, 23, 42, .22);
+}
+#patientSelectionModal .modal-header {
+    background: #eff6ff;
+    border-bottom: 1px solid #dbeafe;
+}
+.patient-popup-item {
+    width: 100%;
+    text-align: left;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #fff;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    transition: .15s ease;
+    cursor: pointer;
+}
+.patient-popup-item:hover {
+    border-color: #60a5fa;
+    background: #f8fbff;
+    transform: translateY(-1px);
+}
+.patient-popup-item .name {
+    font-weight: 900;
+    font-size: 12px;
+    color: #0f172a;
+}
+.patient-popup-item .meta {
+    font-size: 10px;
+    color: #64748b;
+    margin-top: 3px;
+}
+.patient-popup-item .uhid {
+    font-size: 10px;
+    color: #2563eb;
+    font-weight: 800;
+    margin-top: 4px;
+}
+.patient-lookup-box .patient-option {
+    cursor: pointer;
+}
+.patient-lookup-box .patient-option:hover {
+    background: #eef6ff;
+}
+#patient_lookup_result {
+    position: relative;
+    z-index: 20;
+}
 .modal-a5 {
     width: 158mm;
     max-width: calc(100vw - 24px);
@@ -686,11 +978,395 @@ input[inputmode="numeric"],
         /* The modal can scroll horizontally/vertically on smaller screens. */
     }
 }
+
+/* =========================================================
+   ACTION BUTTON ALIGNMENT
+   Keep PRINT and EDIT buttons perfectly centered in the Actions cell.
+   ========================================================= */
+.no-print #parcheTable td.text-end.pe-3 {
+    vertical-align: middle !important;
+    white-space: nowrap;
+}
+
+.no-print #parcheTable td.text-end.pe-3 > .btn,
+.no-print #parcheTable td.text-end.pe-3 > a.btn {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    vertical-align: middle !important;
+    position: relative !important;
+    top: 0 !important;
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    line-height: 1 !important;
+}
+
+.no-print #parcheTable td.text-end.pe-3 > a.btn {
+    margin-left: 4px !important;
+}
+
+/* =========================================================
+   COMPACT OPD UI OVERRIDES
+   Keeps existing functionality unchanged.
+   ========================================================= */
+.no-print .card {
+    border-radius: 8px !important;
+}
+
+.no-print .card-header,
+.no-print > .col-12 > .card > .py-2 {
+    min-height: 36px;
+    padding: 6px 10px !important;
+}
+
+.no-print .card-body {
+    padding: 10px !important;
+}
+
+/* tighter bootstrap gutters */
+.no-print .row.g-3 {
+    --bs-gutter-x: .65rem;
+    --bs-gutter-y: .55rem;
+}
+
+.no-print .row.g-2 {
+    --bs-gutter-x: .5rem;
+    --bs-gutter-y: .4rem;
+}
+
+.no-print .form-label {
+    font-size: 10px !important;
+    line-height: 1.15;
+    margin-bottom: 3px !important;
+}
+
+.no-print .form-control,
+.no-print .form-select,
+.no-print .input-group-text,
+.no-print .btn {
+    min-height: 30px;
+    height: 30px;
+    font-size: 11px !important;
+    padding-top: 3px;
+    padding-bottom: 3px;
+}
+
+.no-print .input-group-sm > .form-control,
+.no-print .input-group-sm > .form-select,
+.no-print .input-group-sm > .input-group-text,
+.no-print .input-group-sm > .btn {
+    min-height: 30px;
+    height: 30px;
+}
+
+.no-print .form-control::placeholder {
+    font-size: 10px;
+}
+
+.no-print .form-text,
+.no-print small {
+    line-height: 1.15;
+}
+
+.no-print #mobile_wrapper .mob-row {
+    margin-bottom: 3px !important;
+}
+
+.no-print #mobile_wrapper .input-group-text {
+    min-width: 40px !important;
+    font-size: 9px !important;
+}
+
+.no-print #patient_lookup_result {
+    font-size: 10px;
+}
+
+.no-print .border-bottom.pb-3 {
+    padding-bottom: 8px !important;
+    margin-bottom: 8px !important;
+}
+
+/* Fee / payment panel: compact instead of large box */
+.no-print .tariff-box {
+    padding: 8px 10px !important;
+    border-radius: 7px !important;
+}
+
+.no-print .tariff-box .text-secondary {
+    font-size: 9px !important;
+    line-height: 1.1;
+}
+
+.no-print #display_tariff_fee {
+    font-size: 1.45rem !important;
+    line-height: 1;
+    margin: 4px 0 8px !important;
+}
+
+.no-print .tariff-box .btn {
+    margin-bottom: 5px !important;
+}
+
+.no-print .tariff-box .btn-success {
+    padding-top: 5px !important;
+    padding-bottom: 5px !important;
+}
+
+/* OPD bills table */
+.no-print #parcheTable {
+    font-size: 10px !important;
+}
+
+.no-print #parcheTable th,
+.no-print #parcheTable td {
+    padding: 5px 6px !important;
+    line-height: 1.15;
+    white-space: nowrap;
+}
+
+.no-print #parcheTable th {
+    font-size: 9px !important;
+    font-weight: 700;
+}
+
+.no-print #parcheTable td .fs-6 {
+    font-size: 12px !important;
+}
+
+.no-print #parcheTable .btn {
+    min-width: 28px;
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+}
+
+.no-print #searchParcheInput {
+    max-width: 240px;
+}
+
+/* Registration section spacing */
+.no-print #opdForm > .row {
+    margin-bottom: 6px !important;
+}
+
+/* Registration top row alignment */
+.no-print #opdForm > .row:first-of-type {
+    align-items: flex-start;
+}
+
+.no-print #opdForm > .row:first-of-type > [class*="col-md-"] {
+    align-self: flex-start;
+}
+
+/* Keep UHID, Mobile and Gender controls on the same top baseline. */
+.no-print #patient_uhid,
+.no-print #gender,
+.no-print #primary_mobile {
+    margin-top: 0 !important;
+}
+
+.no-print #mobile_wrapper .mob-row {
+    margin-top: 0 !important;
+}
+
+/* Mobile gets extra horizontal space; helper text stays below the input. */
+.no-print #mobile_wrapper .mob-input {
+    min-width: 0;
+}
+
+.no-print #mobile_wrapper .input-group {
+    width: 100%;
+}
+
+.no-print #opdForm .mb-3 {
+    margin-bottom: 7px !important;
+}
+
+.no-print #opdForm .mb-2 {
+    margin-bottom: 5px !important;
+}
+
+/* Patient-selection popup */
+#patientSelectionModal .modal-header {
+    padding: 8px 10px !important;
+}
+
+#patientSelectionModal .modal-body {
+    padding: 10px !important;
+}
+
+#patientSelectionModal .patient-popup-item {
+    padding: 7px 9px;
+    margin-bottom: 5px;
+    border-radius: 7px;
+}
+
+#patientSelectionModal .patient-popup-item .name {
+    font-size: 11px;
+}
+
+#patientSelectionModal .patient-popup-item .meta,
+#patientSelectionModal .patient-popup-item .uhid {
+    font-size: 9px;
+}
+
+/* Payment modal compact */
+#paymentModal .modal-content {
+    border-radius: 8px !important;
+}
+
+#paymentModal .modal-header {
+    padding: 6px 10px !important;
+}
+
+#paymentModal .modal-body {
+    padding: 10px !important;
+}
+
+#paymentModal .row.g-2 {
+    --bs-gutter-x: .5rem;
+    --bs-gutter-y: .4rem;
+}
+
+#paymentModal .mb-3 {
+    margin-bottom: 7px !important;
+}
+
+#paymentModal .mb-2 {
+    margin-bottom: 5px !important;
+}
+
+#paymentModal .p-2 {
+    padding: 6px !important;
+}
+
+/* Success popup compact */
+#successPrintModal .modal-body {
+    padding: 14px !important;
+}
+
+#successPrintModal .mb-3 {
+    margin-bottom: 7px !important;
+}
+
+#successPrintModal .row.g-2 {
+    --bs-gutter-x: .4rem;
+    --bs-gutter-y: .4rem;
+}
+
+#successPrintModal .bg-light.rounded-3 {
+    padding: 6px !important;
+    border-radius: 6px !important;
+}
+
+#successPrintModal h4 {
+    font-size: 1.2rem !important;
+}
+
+#successPrintModal .btn {
+    min-height: 30px;
+    height: 30px;
+}
+
+
+/* EXTRA COMPACT DATE CONTROLS ONLY */
+.no-print #visit_date_display,
+.no-print #dob_display {
+    height: 25px !important;
+    min-height: 25px !important;
+    font-size: 9px !important;
+    padding: 1px 5px !important;
+}
+.no-print #visit_date_calendar_btn,
+.no-print #dob_calendar_btn {
+    height: 25px !important;
+    min-height: 25px !important;
+    width: 27px !important;
+    padding: 1px 4px !important;
+}
+.no-print #dob_display { text-transform: none !important; }
+
+/* DOB OR AGE: either can be entered; DOB remains the DB source of truth. */
+.no-print .dob-age-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    width: 100%;
+}
+.no-print .dob-age-row .dob-control {
+    width: 185px !important;
+    max-width: 185px !important;
+    flex: 0 0 185px !important;
+    min-width: 185px !important;
+}
+.no-print .dob-age-row .dob-control .input-group {
+    width: 185px !important;
+    max-width: 185px !important;
+}
+.no-print .dob-age-row .dob-control #dob_display {
+    width: 158px !important;
+    max-width: 158px !important;
+    flex: 0 0 158px !important;
+}
+.no-print .dob-age-row .age-control {
+    width: 92px;
+    flex: 0 0 92px;
+}
+.no-print .dob-age-row .age-entry-label {
+    display: none !important;
+}
+.no-print .dob-age-row .age-control {
+    width: 92px !important;
+    flex: 0 0 92px !important;
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+}
+.no-print .dob-age-row .age-control .input-group {
+    margin-top: 0 !important;
+    height: 31px !important;
+}
+.no-print .dob-age-row .age-control .form-control {
+    height: 31px !important;
+    min-height: 31px !important;
+}
+.no-print .dob-age-row .age-control .input-group-text {
+    font-size: 8px !important;
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    height: 31px !important;
+}
+
 </style>
 
 <?php if (!empty($err)): ?>
     <div class="alert alert-danger py-2 px-3 mb-3 fw-bold no-print"><i class="bi bi-exclamation-triangle-fill me-2"></i><?= htmlspecialchars($err) ?></div>
 <?php endif; ?>
+
+
+<!-- REGISTERED FAMILY MEMBER SELECTION POPUP -->
+<div class="modal fade" id="patientSelectionModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content overflow-hidden">
+            <div class="modal-header py-3">
+                <div>
+                    <div class="fw-bold text-primary">REGISTERED PATIENTS FOUND</div>
+                    <div class="small text-muted">THIS MOBILE NUMBER IS USED BY MULTIPLE FAMILY MEMBERS.</div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+
+            <div class="modal-body p-3">
+                <div class="small text-secondary fw-semibold mb-2">
+                    SELECT THE CORRECT FAMILY MEMBER TO CONTINUE WITH THEIR EXISTING UHID.
+                </div>
+                <div id="patientSelectionList"></div>
+            </div>
+
+            <div class="modal-footer py-2">
+                <button type="button" class="btn btn-sm btn-light border" data-bs-dismiss="modal">CANCEL</button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <?php if ($token_generated): ?>
     <!-- SUCCESS POPUP MODAL FOR NEW REGISTRATION -->
@@ -761,6 +1437,8 @@ input[inputmode="numeric"],
                     <input type="hidden" name="register_patient" value="1">
                     <input type="hidden" name="post_edit_id" value="<?= $edit_data['visit_id'] ?? 0 ?>">
                     <input type="hidden" name="appointment_id" value="<?= (int)($appointment_prefill['appointment_id'] ?? 0) ?>">
+                    <input type="hidden" name="existing_patient_id" id="existing_patient_id"
+                           value="<?= (int)($edit_data['patient_id'] ?? 0) ?>">
                     
                     <input type="hidden" name="consultation_fee" id="consultation_fee" value="<?= $edit_data['consultation_fee'] ?? 0 ?>">
                     <input type="hidden" name="modal_discount" id="modal_discount" value="<?= $edit_data['discount_amount'] ?? 0 ?>">
@@ -770,45 +1448,129 @@ input[inputmode="numeric"],
                     <input type="hidden" name="payment_breakdown_json" id="payment_breakdown_json" value="<?= htmlspecialchars($edit_data['payment_breakdown'] ?? '') ?>">
                     <input type="hidden" name="summary_payment_mode" id="summary_payment_mode" value="<?= htmlspecialchars($edit_data['payment_mode'] ?? 'CASH: ₹0') ?>">
 
-                    <!-- PATIENT INFO ROW -->
-                    <div class="row g-2 mb-3 border-bottom pb-3">
+                    <!-- PATIENT INFO -->
+
+                    <!-- TOP ROW: ONLY VISIT DATE + MOBILE -->
+                    <div class="row g-2 mb-2 border-bottom pb-2 patient-info-balanced">
+
                         <div class="col-md-2">
                             <label class="form-label small fw-semibold text-secondary">Visit Date *</label>
-                            <div class="visit-date-picker-wrap">
-                                <div class="input-group input-group-sm">
-                                    <input type="hidden" name="visit_date" id="visit_date"
+
+                            <div class="visit-date-picker-wrap" style="width:100%; max-width:145px;">
+                                <div class="input-group input-group-sm"
+                                     style="width:145px; max-width:145px; flex-wrap:nowrap;">
+
+                                    <input type="hidden"
+                                           name="visit_date"
+                                           id="visit_date"
                                            value="<?= htmlspecialchars($edit_data['visit_date'] ?? ($appointment_prefill['appointment_date'] ?? date('Y-m-d'))) ?>">
-                                    <input type="text" id="visit_date_display"
+
+                                    <input type="text"
+                                           id="visit_date_display"
                                            class="form-control text-dark fw-bold"
+                                           style="width:118px; max-width:118px; flex:0 0 118px; height:25px; min-height:25px; font-size:10px; padding:2px 5px;"
                                            value="<?= htmlspecialchars(!empty($edit_data['visit_date']) ? date('d-m-Y', strtotime($edit_data['visit_date'])) : date('d-m-Y')) ?>"
-                                           placeholder="DD-MM-YYYY" maxlength="10"
-                                           autocomplete="off" inputmode="numeric" required>
-                                    <button type="button" class="btn btn-outline-primary"
+                                           placeholder="DD-MM-YYYY"
+                                           maxlength="10"
+                                           autocomplete="off"
+                                           inputmode="text"
+                                           required>
+
+                                    <button type="button"
+                                            class="btn btn-outline-primary"
                                             id="visit_date_calendar_btn"
+                                            style="width:27px; min-width:27px; max-width:27px; height:25px; min-height:25px; padding:1px 3px;"
                                             title="Select Visit Date"
                                             onclick="openVisitDatePicker()">
                                         <i class="bi bi-calendar3"></i>
                                     </button>
                                 </div>
 
-                                <!-- Native calendar control. Its clickable area sits on the calendar icon. -->
-                                <input type="date" id="visit_date_picker"
+                                <input type="date"
+                                       id="visit_date_picker"
                                        class="native-date-picker"
-                                       value="<?= htmlspecialchars($edit_data['visit_date'] ?? date('Y-m-d')) ?>"
+                                       value="<?= htmlspecialchars($edit_data['visit_date'] ?? ($appointment_prefill['appointment_date'] ?? date('Y-m-d'))) ?>"
                                        aria-label="Select Visit Date">
                             </div>
-                            <small class="text-muted" style="font-size:10px;"></small>
                         </div>
-                        <div class="col-md-2">
-                            <label class="form-label small fw-semibold text-secondary">UHID</label>
-                            <input type="text" class="form-control form-control-sm bg-light font-monospace text-muted" value="<?= htmlspecialchars($edit_data['uhid'] ?? 'Auto Generated') ?>" readonly>
-                        </div>
+
                         <div class="col-md-3">
-                            <label class="form-label small fw-semibold">Patient Full Name *</label>
-                            <input type="text" name="fullname" class="form-control form-control-sm text-capitalize" value="<?= htmlspecialchars($edit_data['fullname'] ?? ($appointment_prefill['master_fullname'] ?? ($appointment_prefill['patient_name'] ?? ''))) ?>" placeholder="Patient Name" required autofocus>
+                            <label class="form-label small fw-semibold">Mobile Number(s) *</label>
+
+                            <div id="mobile_wrapper" style="width:100%;">
+                                <?php
+                                $saved_mobs = array_filter(
+                                    array_map('trim', explode(',', $edit_data['mobile']
+                                        ?? ($appointment_prefill['master_mobile']
+                                        ?? ($appointment_prefill['mobile'] ?? ''))))
+                                );
+                                if (empty($saved_mobs)) $saved_mobs = [''];
+                                $i = 0;
+                                foreach ($saved_mobs as $mob):
+                                    $len = strlen($mob);
+                                ?>
+                                    <div class="input-group input-group-sm mb-1 mob-row">
+                                        <input type="text" name="mobile[]"
+                                               id="<?= $i === 0 ? 'primary_mobile' : '' ?>"
+                                               class="form-control form-control-sm mob-input"
+                                               value="<?= htmlspecialchars($mob) ?>"
+                                               placeholder="Mobile No"
+                                               maxlength="10"
+                                               autocomplete="off"
+                                               oninput="this.value = this.value.replace(/[^0-9]/g, ''); updateMobCount(this, <?= $i ?>); <?= $i === 0 ? 'lookupPatientByMobile(this.value)' : '' ?>"
+                                               <?= $i === 0 ? 'required' : '' ?>>
+
+                                        <span class="input-group-text <?= $len == 10 ? 'text-success fw-bold' : 'text-muted' ?>"
+                                              id="mob_count_<?= $i ?>"
+                                              style="font-size:0.7rem; min-width:45px; text-align:center;">
+                                            <?= $len ?>/10
+                                        </span>
+
+                                        <?php if ($i === 0): ?>
+                                            <button type="button" class="btn btn-outline-primary"
+                                                    onclick="addMobileField()">
+                                                <i class="bi bi-plus-lg"></i>
+                                            </button>
+                                        <?php else: ?>
+                                            <button type="button" class="btn btn-outline-danger"
+                                                    onclick="this.closest('.mob-row').remove()">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        <?php endif; ?>
+                                    </div>
+                                <?php $i++; endforeach; ?>
+                            </div>
+
+                            <div id="patient_lookup_result" class="mt-1 d-none" aria-hidden="true"></div>
                         </div>
+                    </div>
+
+                    <!-- SECOND ROW: PATIENT NAME + UHID + GENDER + DOB/AGE -->
+                    <div class="row g-2 mb-3 border-bottom pb-2 patient-info-balanced">
+
+                        <div class="col-md-3">
+                            <label class="form-label small fw-semibold mt-1 mb-1">Patient Full Name *</label>
+                            <input type="text"
+                                   name="fullname"
+                                   class="form-control form-control-sm text-capitalize"
+                                   value="<?= htmlspecialchars($edit_data['fullname'] ?? ($appointment_prefill['master_fullname'] ?? ($appointment_prefill['patient_name'] ?? ''))) ?>"
+                                   placeholder="Patient Name"
+                                   required
+                                   autofocus>
+                        </div>
+
                         <div class="col-md-2">
-                            <label class="form-label small fw-semibold">Gender *</label>
+                            <label class="form-label small fw-semibold text-secondary mt-1">UHID</label>
+                            <input type="text"
+                                   id="patient_uhid"
+                                   class="form-control form-control-sm bg-light font-monospace text-muted"
+                                   value="<?= htmlspecialchars($edit_data['uhid'] ?? ($appointment_prefill['master_uhid'] ?? '')) ?>"
+                                   placeholder="Auto Generated"
+                                   readonly>
+                        </div>
+
+                        <div class="col-md-2">
+                            <label class="form-label small fw-semibold mt-1">Gender *</label>
                             <?php $current_gender = $edit_data['gender'] ?? ($appointment_prefill['master_gender'] ?? ($appointment_prefill['gender'] ?? '')); ?>
                             <select name="gender" id="gender" class="form-select form-select-sm" required>
                                 <option value="" disabled <?= $current_gender === '' ? 'selected' : '' ?>>-- Select Gender --</option>
@@ -817,33 +1579,73 @@ input[inputmode="numeric"],
                                 <option value="Other" <?= $current_gender === 'Other' ? 'selected' : '' ?>>Other</option>
                             </select>
                         </div>
-                        <div class="col-md-1">
-                            <label class="form-label small fw-semibold">Age *</label>
-                            <input type="number" name="age" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['age'] ?? ($appointment_prefill['master_age'] ?? ($appointment_prefill['age'] ?? ''))) ?>" placeholder="Age" required>
-                        </div>
-                        
-                        <!-- MOBILE NUMBERS SECTION -->
-                        <div class="col-md-2">
-                            <label class="form-label small fw-semibold">Mobile Number(s) *</label>
-                            <div class="small text-muted mb-1" style="font-size:9px;">SAME MOBILE NUMBER CAN BE USED FOR MULTIPLE FAMILY MEMBERS.</div>
-                            <div id="mobile_wrapper">
-                                <?php 
-                                $saved_mobs = array_filter(array_map('trim', explode(',', $edit_data['mobile'] ?? ($appointment_prefill['master_mobile'] ?? ($appointment_prefill['mobile'] ?? '')))));
-                                if(empty($saved_mobs)) $saved_mobs = [''];
-                                $i = 0;
-                                foreach($saved_mobs as $mob): 
-                                    $len = strlen($mob);
-                                ?>
-                                <div class="input-group input-group-sm mb-1 mob-row">
-                                    <input type="text" name="mobile[]" class="form-control form-control-sm mob-input" value="<?= htmlspecialchars($mob) ?>" placeholder="Mobile No" maxlength="10" oninput="this.value = this.value.replace(/[^0-9]/g, ''); updateMobCount(this, <?= $i ?>)" <?= $i===0?'required':'' ?>>
-                                    <span class="input-group-text <?= $len == 10 ? 'text-success fw-bold' : 'text-muted' ?>" id="mob_count_<?= $i ?>" style="font-size:0.7rem; min-width: 45px; text-align:center;"><?= $len ?>/10</span>
-                                    <?php if($i === 0): ?>
-                                        <button type="button" class="btn btn-outline-primary" onclick="addMobileField()"><i class="bi bi-plus-lg"></i></button>
-                                    <?php else: ?>
-                                        <button type="button" class="btn btn-outline-danger" onclick="this.closest('.mob-row').remove()"><i class="bi bi-trash"></i></button>
-                                    <?php endif; ?>
+
+                        <div class="col-md-5">
+                            <?php
+                            $current_dob = $edit_data['dob']
+                                ?? ($appointment_prefill['master_dob']
+                                ?? ($appointment_prefill['dob'] ?? ''));
+
+                            $current_age = $current_dob !== ''
+                                ? calculateAgeFromDob($current_dob)
+                                : ($edit_data['age']
+                                ?? ($appointment_prefill['master_age']
+                                ?? ($appointment_prefill['age'] ?? '')));
+                            ?>
+
+                            <label class="form-label small fw-semibold mt-1">Date of Birth / Age *</label>
+
+                            <div class="dob-age-row">
+                                <div class="visit-date-picker-wrap dob-control">
+                                    <div class="input-group input-group-sm">
+                                        <input type="hidden"
+                                               name="dob"
+                                               id="dob"
+                                               value="<?= htmlspecialchars($current_dob) ?>">
+
+                                        <input type="text"
+                                               id="dob_display"
+                                               class="form-control text-dark fw-bold"
+                                               value="<?= htmlspecialchars($current_dob ? date('d-m-Y', strtotime($current_dob)) : '') ?>"
+                                               placeholder="DD-MM-YYYY"
+                                               maxlength="10"
+                                               autocomplete="off"
+                                               inputmode="text">
+
+                                        <button type="button"
+                                                class="btn btn-outline-primary"
+                                                id="dob_calendar_btn"
+                                                title="Select Date of Birth"
+                                                onclick="openDobPicker()">
+                                            <i class="bi bi-calendar3"></i>
+                                        </button>
+                                    </div>
+
+                                    <input type="date"
+                                           id="dob_picker"
+                                           class="native-date-picker"
+                                           value="<?= htmlspecialchars($current_dob) ?>"
+                                           max="<?= date('Y-m-d') ?>"
+                                           aria-label="Select Date of Birth">
                                 </div>
-                                <?php $i++; endforeach; ?>
+
+                                <div class="age-control">
+                                    <label class="form-label age-entry-label mb-1">Age</label>
+                                    <div class="input-group input-group-sm">
+                                        <input type="number"
+                                               id="age"
+                                               name="age"
+                                               class="form-control form-control-sm"
+                                               value="<?= $current_age !== '' && $current_age !== null ? (int)$current_age : '' ?>"
+                                               min="0"
+                                               max="150"
+                                               step="1"
+                                               placeholder="Age"
+                                               inputmode="numeric"
+                                               autocomplete="off">
+                                        <span class="input-group-text">YRS</span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -954,7 +1756,10 @@ input[inputmode="numeric"],
                             <tr><td colspan="7" class="text-center py-4 text-muted">No OPD bills found.</td></tr>
                         <?php else: ?>
                             <?php foreach ($today_visits as $tv): ?>
-                                <?php 
+                                <?php
+                                    $list_age = !empty($tv['dob'])
+                                        ? calculateAgeFromDob($tv['dob'])
+                                        : ($tv['age'] ?? '');
                                     $list_fy = getCurrentFY($tenant_pdo, $org_id, $center_id, $tv['visit_date']);
                                     $list_fy_formatted = formatFYWithHyphen($list_fy);
                                     $list_token = $list_fy_formatted . '/' . str_pad($tv['token_no'], 2, '0', STR_PAD_LEFT);
@@ -974,7 +1779,7 @@ input[inputmode="numeric"],
                                     </td>
                                     <td>
                                         <div class="fw-bold text-dark text-capitalize"><?= htmlspecialchars($tv['fullname'] ?? '') ?></div>
-                                        <small class="text-muted"><?= $tv['age'] ?? '' ?> Yrs / <?= $tv['gender'] ?? '' ?></small>
+                                        <small class="text-muted"><?= htmlspecialchars((string)$list_age) ?> Yrs / <?= htmlspecialchars($tv['gender'] ?? '') ?></small>
                                     </td>
                                     <td>
                                         <div class="font-monospace text-secondary" style="font-size: 0.72rem;"><?= htmlspecialchars($tv['uhid'] ?? '') ?></div>
@@ -1027,7 +1832,7 @@ input[inputmode="numeric"],
 )" >
     <i class="bi bi-printer"></i>
                                         </button>
-                                        <a href="opd_registration.php?edit_visit=<?= $tv['visit_id'] ?>" class="btn btn-sm btn-outline-primary py-0 px-2 ms-1" title="Edit Registration">
+                                        <a href="opd_registration.php?edit_visit=<?= $tv['visit_id'] ?>" class="btn btn-sm btn-outline-primary py-0 px-2 ms-1 d-inline-flex align-items-center justify-content-center" title="Edit Registration">
                                             <i class="bi bi-pencil"></i>
                                         </a>
                                     </td>
@@ -1193,16 +1998,43 @@ function formatDisplayDateDMY(isoDate) {
     if (!isoDate) return '';
     const parts = String(isoDate).split('-');
     if (parts.length !== 3) return '';
-    return `${parts[2].padStart(2,'0')}-${parts[1].padStart(2,'0')}-${parts[0]}`;
+
+    const yyyy = parts[0];
+    const mm = parseInt(parts[1], 10);
+    const dd = parts[2].padStart(2, '0');
+
+    if (!mm || mm < 1 || mm > 12) return '';
+
+    return `${dd}-${String(mm).padStart(2, '0')}-${yyyy}`;
 }
 
 function formatIsoDate(dateText) {
-    const m = String(dateText || '').trim().match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
-    if (!m) return '';
+    const value = String(dateText || '').trim();
 
-    const dd = m[1].padStart(2,'0');
-    const mm = m[2].padStart(2,'0');
-    const yyyy = m[3];
+    // Accept both the displayed format DD-MMM-YYYY and old numeric DD-MM-YYYY.
+    let m = value.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+    let dd, mm, yyyy;
+
+    if (m) {
+        const months = {
+            jan: '01', feb: '02', mar: '03', apr: '04',
+            may: '05', jun: '06', jul: '07', aug: '08',
+            sep: '09', oct: '10', nov: '11', dec: '12'
+        };
+
+        dd = m[1].padStart(2, '0');
+        mm = months[m[2].toLowerCase()] || '';
+        yyyy = m[3];
+
+        if (!mm) return '';
+    } else {
+        m = value.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+        if (!m) return '';
+
+        dd = m[1].padStart(2, '0');
+        mm = m[2].padStart(2, '0');
+        yyyy = m[3];
+    }
 
     const d = new Date(`${yyyy}-${mm}-${dd}T00:00:00`);
     if (
@@ -1273,6 +2105,61 @@ function setupVisitDateField() {
     });
 }
 
+function setupDobField() {
+    const display = document.getElementById('dob_display');
+    const hidden = document.getElementById('dob');
+    const picker = document.getElementById('dob_picker');
+    if (!display || !hidden || !picker) return;
+
+    function syncFromIso(iso) {
+        hidden.value = iso || '';
+        picker.value = iso || '';
+        display.value = iso ? formatDisplayDateDMY(iso) : '';
+        display.classList.remove('is-invalid');
+        calculateAgeFromDobUI();
+    }
+
+    if (hidden.value) syncFromIso(hidden.value);
+
+    display.addEventListener('input', function () {
+        this.value = this.value.replace(/[^0-9-]/g, '').slice(0, 10);
+        const iso = formatIsoDate(this.value);
+        if (iso) {
+            hidden.value = iso;
+            picker.value = iso;
+            this.classList.remove('is-invalid');
+            calculateAgeFromDobUI();
+        } else {
+            hidden.value = '';
+            this.classList.add('is-invalid');
+            calculateAgeFromDobUI();
+        }
+    });
+
+    display.addEventListener('blur', function () {
+        const iso = formatIsoDate(this.value);
+        if (!iso) {
+            this.classList.add('is-invalid');
+            return;
+        }
+        syncFromIso(iso);
+    });
+
+    picker.addEventListener('change', function () {
+        if (this.value) syncFromIso(this.value);
+    });
+}
+
+function openDobPicker() {
+    const picker = document.getElementById('dob_picker');
+    if (!picker) return;
+    try { picker.focus({ preventScroll: true }); } catch (e) { picker.focus(); }
+    try {
+        if (typeof picker.showPicker === 'function') picker.showPicker();
+        else picker.click();
+    } catch (e) { picker.click(); }
+}
+
 function openVisitDatePicker() {
     const picker = document.getElementById('visit_date_picker');
     if (!picker) return;
@@ -1298,6 +2185,17 @@ function openVisitDatePicker() {
 
 document.addEventListener('DOMContentLoaded', function () {
     setupVisitDateField();
+    setupDobField();
+    setupAgeField();
+    calculateAgeFromDobUI();
+
+    const dobInput = document.getElementById('dob');
+    if (dobInput) {
+        dobInput.addEventListener('change', calculateAgeFromDobUI);
+        dobInput.addEventListener('input', calculateAgeFromDobUI);
+    }
+
+    setInterval(calculateAgeFromDobUI, 60 * 60 * 1000);
 });
 
 function normalizeTypedTextToUppercase(root = document) {
@@ -1305,13 +2203,14 @@ function normalizeTypedTextToUppercase(root = document) {
     // The option values are "Male", "Female", "Other" and converting the
     // selected value to "MALE" makes it invalid, so the select becomes blank.
     const fields = root.querySelectorAll(
-        'input[type="text"]:not(#visit_date_display), textarea'
+        'input[type="text"]:not(#visit_date_display):not(#dob_display), textarea'
     );
 
     fields.forEach(field => {
         if (
             field.id === 'searchParcheInput' ||
             field.id === 'visit_date_display' ||
+            field.id === 'dob_display' ||
             field.classList.contains('mob-input') ||
             field.inputMode === 'numeric'
         ) return;
@@ -1360,6 +2259,20 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 });
 
+document.addEventListener('DOMContentLoaded', function () {
+    const primaryMobile = document.getElementById('primary_mobile');
+
+    // For a direct registration with a prefilled mobile, perform the same
+    // lookup automatically. Appointment/edit records already show their UHID.
+    if (
+        primaryMobile &&
+        String(primaryMobile.value || '').replace(/\D/g, '').length === 10 &&
+        !document.getElementById('existing_patient_id')?.value
+    ) {
+        lookupPatientByMobile(primaryMobile.value);
+    }
+});
+
 const dbTariffs = <?= json_encode($tariffs) ?>;
 const orgName = <?= json_encode($org_name) ?>;
 const centerName = <?= json_encode($center_name) ?>;
@@ -1394,6 +2307,378 @@ function updateMobCount(input, index) {
             countSpan.classList.add('text-muted');
         }
     }
+}
+
+
+// ============================================================
+// REGISTERED PATIENT LOOKUP BY PRIMARY MOBILE
+// ============================================================
+let patientLookupTimer = null;
+let patientLookupCache = {};
+
+function escapePatientHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, function(c) {
+        return {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#039;'
+        }[c];
+    });
+}
+
+function clearPatientSelection(clearPatientInfo = true) {
+    const patientId = document.getElementById('existing_patient_id');
+    const uhid = document.getElementById('patient_uhid');
+    const resultBox = document.getElementById('patient_lookup_result');
+
+    if (patientId) patientId.value = '';
+
+    if (uhid) {
+        uhid.value = '';
+        uhid.classList.remove('text-success', 'fw-bold');
+        uhid.classList.add('text-muted');
+    }
+
+    if (resultBox && clearPatientInfo) {
+        resultBox.innerHTML = '';
+    }
+
+    if (clearPatientInfo) {
+        const name = document.querySelector('input[name="fullname"]');
+        const dob = document.getElementById('dob');
+        const dobDisplay = document.getElementById('dob_display');
+        const dobPicker = document.getElementById('dob_picker');
+        const age = document.getElementById('age');
+        const ageHint = document.getElementById('age_live_hint');
+        const gender = document.getElementById('gender');
+
+        if (name) name.value = '';
+        if (dob) dob.value = '';
+        if (dobDisplay) dobDisplay.value = '';
+        if (dobPicker) dobPicker.value = '';
+        if (age) {
+            age.value = '';
+            delete age.dataset.directEntry;
+        }
+        if (ageHint) ageHint.textContent = '--';
+        if (gender) gender.value = '';
+    }
+}
+
+function fillExistingPatient(patient) {
+    const patientId = document.getElementById('existing_patient_id');
+    const uhid = document.getElementById('patient_uhid');
+    const name = document.querySelector('input[name="fullname"]');
+    const dob = document.getElementById('dob');
+    const dobDisplay = document.getElementById('dob_display');
+    const dobPicker = document.getElementById('dob_picker');
+    const age = document.getElementById('age');
+    const ageHint = document.getElementById('age_live_hint');
+    const gender = document.getElementById('gender');
+
+    if (patientId) patientId.value = patient.patient_id || '';
+
+    if (uhid) {
+        uhid.value = patient.uhid || '';
+        uhid.classList.remove('text-muted');
+        uhid.classList.add('text-success', 'fw-bold');
+    }
+
+    if (name) {
+        name.value = patient.fullname || '';
+        name.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    if (dob) dob.value = patient.dob || '';
+    if (dobDisplay) dobDisplay.value = patient.dob ? formatDisplayDateDMY(patient.dob) : '';
+    if (dobPicker) dobPicker.value = patient.dob || '';
+
+    if (age) {
+        const calculatedAge = calculateAgeFromDobUI();
+        if (calculatedAge === null && patient.age !== undefined) {
+            age.value = patient.age || '';
+            if (ageHint) ageHint.textContent = patient.age ? patient.age + ' YRS' : '--';
+        }
+    }
+
+    if (gender) {
+        const g = String(patient.gender || '').trim().toLowerCase();
+        gender.value = g === 'male' ? 'Male' : (g === 'female' ? 'Female' : (g ? 'Other' : ''));
+    }
+
+    // If the master record contains multiple mobile numbers, keep them
+    // available in the existing mobile rows instead of replacing them blindly.
+    if (patient.mobile) {
+        const mobiles = String(patient.mobile)
+            .split(',')
+            .map(v => v.trim())
+            .filter(Boolean);
+
+        const rows = document.querySelectorAll('#mobile_wrapper .mob-row');
+
+        if (rows.length && mobiles.length) {
+            rows[0].querySelector('.mob-input').value = mobiles[0];
+            updateMobCount(rows[0].querySelector('.mob-input'), 0);
+
+            // Fill existing alternate rows where present.
+            for (let i = 1; i < rows.length && i < mobiles.length; i++) {
+                const input = rows[i].querySelector('.mob-input');
+                if (input) input.value = mobiles[i];
+            }
+        }
+    }
+}
+
+function renderPatientLookupResults(patients) {
+    const resultBox = document.getElementById('patient_lookup_result');
+    if (!resultBox) return;
+
+    patientLookupCache = {};
+
+    patients.forEach(patient => {
+        patientLookupCache[String(patient.patient_id)] = patient;
+    });
+
+    // No registered patient.
+    if (!patients.length) {
+        clearPatientSelection(false);
+
+        resultBox.innerHTML = '';
+        return;
+    }
+
+    // Exactly one registered patient -> automatically continue with that patient.
+    if (patients.length === 1) {
+        const patient = patients[0];
+        fillExistingPatient(patient);
+
+        resultBox.innerHTML = '';
+        return;
+    }
+
+    // Same mobile used by multiple family members.
+    // Open a proper popup instead of rendering the selection inside the form.
+    const list = document.getElementById('patientSelectionList');
+
+    if (list) {
+        list.innerHTML = patients.map(patient => `
+            <button type="button"
+                    class="patient-popup-item"
+                    data-patient-id="${escapePatientHtml(patient.patient_id)}">
+                <div class="name">${escapePatientHtml(patient.fullname)}</div>
+                <div class="meta">
+                    ${escapePatientHtml(patient.gender || '')}
+                    ${patient.age ? ' • ' + escapePatientHtml(patient.age) + ' YRS' : ''}
+                </div>
+                <div class="uhid">UHID: ${escapePatientHtml(patient.uhid || '')}</div>
+            </button>
+        `).join('');
+
+        list.querySelectorAll('.patient-popup-item').forEach(function(button) {
+            button.addEventListener('click', function() {
+                selectExistingPatientFromLookup(this.dataset.patientId);
+            });
+        });
+    }
+
+    const modal = document.getElementById('patientSelectionModal');
+    if (modal) {
+        bootstrap.Modal.getOrCreateInstance(modal).show();
+    }
+}
+
+function selectExistingPatientFromLookup(patientId) {
+    const patient = patientLookupCache[String(patientId)];
+    const resultBox = document.getElementById('patient_lookup_result');
+
+    if (!patient) {
+        clearPatientSelection(false);
+        return;
+    }
+
+    fillExistingPatient(patient);
+
+    if (resultBox) {
+        resultBox.innerHTML = '';
+    }
+
+    const modal = document.getElementById('patientSelectionModal');
+    if (modal) {
+        const instance = bootstrap.Modal.getInstance(modal);
+        if (instance) instance.hide();
+    }
+}
+
+function lookupPatientByMobile(mobile) {
+    clearTimeout(patientLookupTimer);
+
+    mobile = String(mobile || '').replace(/\D/g, '');
+
+    // The receptionist is changing the mobile, so the previously selected
+    // patient must not accidentally be submitted.
+    const existingPatientId = document.getElementById('existing_patient_id');
+    if (existingPatientId) existingPatientId.value = '';
+
+    const uhid = document.getElementById('patient_uhid');
+    if (uhid) {
+        uhid.value = '';
+        uhid.classList.remove('text-success', 'fw-bold');
+        uhid.classList.add('text-muted');
+    }
+
+    const resultBox = document.getElementById('patient_lookup_result');
+
+    if (!resultBox) return;
+
+    if (mobile.length < 10) {
+        resultBox.innerHTML = '';
+        return;
+    }
+
+    if (mobile.length !== 10) return;
+
+    resultBox.innerHTML = '';
+
+    patientLookupTimer = setTimeout(function() {
+        fetch(
+            'opd_registration.php?lookup_patient_mobile=' +
+            encodeURIComponent(mobile),
+            {
+                method: 'GET',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            }
+        )
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Patient lookup request failed.');
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (!data || !data.success) {
+                throw new Error(data && data.error ? data.error : 'Lookup failed.');
+            }
+
+            renderPatientLookupResults(data.patients || []);
+        })
+        .catch(error => {
+            console.error('Patient mobile lookup error:', error);
+
+            resultBox.innerHTML = '';
+        });
+    }, 300);
+}
+
+function calculateAgeFromDobUI() {
+    const dobInput = document.getElementById('dob');
+    const ageInput = document.getElementById('age');
+    if (!dobInput || !ageInput) return null;
+
+    const dobValue = String(dobInput.value || '').trim();
+
+    if (!dobValue) {
+        if (!ageInput.dataset.directEntry) ageInput.value = '';
+        return null;
+    }
+
+    const dob = new Date(dobValue + 'T00:00:00');
+    if (Number.isNaN(dob.getTime())) return null;
+
+    const today = new Date();
+    let age = today.getFullYear() - dob.getFullYear();
+    const monthDiff = today.getMonth() - dob.getMonth();
+
+    if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
+        age--;
+    }
+
+    if (age < 0 || age > 150) {
+        ageInput.value = '';
+        ageInput.classList.add('is-invalid');
+        return null;
+    }
+
+    ageInput.classList.remove('is-invalid');
+    ageInput.value = String(age);
+    delete ageInput.dataset.directEntry;
+
+    return age;
+}
+
+function setupAgeField() {
+    const ageInput = document.getElementById('age');
+    const dobInput = document.getElementById('dob');
+    const dobDisplay = document.getElementById('dob_display');
+    const dobPicker = document.getElementById('dob_picker');
+
+    if (!ageInput || !dobInput) return;
+
+    ageInput.addEventListener('input', function () {
+        this.value = this.value.replace(/[^0-9]/g, '').slice(0, 3);
+
+        if (this.value === '') {
+            this.dataset.directEntry = '1';
+            dobInput.value = '';
+            if (dobDisplay) dobDisplay.value = '';
+            if (dobPicker) dobPicker.value = '';
+            return;
+        }
+
+        const age = parseInt(this.value, 10);
+
+        if (Number.isNaN(age) || age < 0 || age > 150) {
+            this.classList.add('is-invalid');
+            return;
+        }
+
+        this.classList.remove('is-invalid');
+        this.dataset.directEntry = '1';
+
+        // Direct Age entry uses the Visit Date as the calculation date.
+        // Example: Visit Date 07-10-2026 + Age 25 => DOB 07-10-2001.
+        // Only DOB is stored, so the displayed age increases automatically.
+        const visitIso = document.getElementById('visit_date')?.value || '';
+        const base = visitIso ? new Date(visitIso + 'T00:00:00') : new Date();
+
+        if (Number.isNaN(base.getTime())) return;
+
+        const dob = new Date(
+            base.getFullYear() - age,
+            base.getMonth(),
+            base.getDate()
+        );
+
+        const iso = [
+            dob.getFullYear(),
+            String(dob.getMonth() + 1).padStart(2, '0'),
+            String(dob.getDate()).padStart(2, '0')
+        ].join('-');
+
+        dobInput.value = iso;
+        if (dobPicker) dobPicker.value = iso;
+        if (dobDisplay) dobDisplay.value = formatDisplayDateDMY(iso);
+    });
+
+    ageInput.addEventListener('blur', function () {
+        if (this.value === '') {
+            delete this.dataset.directEntry;
+            return;
+        }
+
+        const age = parseInt(this.value, 10);
+
+        if (Number.isNaN(age) || age < 0 || age > 150) {
+            this.classList.add('is-invalid');
+            return;
+        }
+
+        this.classList.remove('is-invalid');
+        this.dataset.directEntry = '1';
+    });
 }
 
 function filterDoctors() {
@@ -1942,6 +3227,208 @@ body{margin:0;font-family:Arial,sans-serif;color:#111;background:#fff;font-size:
 .grand td{font-weight:800;background:#f3f4f6}
 .billing-table small{color:#666;font-weight:400}
 .instructions{margin-top:12px;padding-top:7px;border-top:1px dashed #999;font-size:9px;line-height:1.45}
+
+/* EXTRA COMPACT REGISTRATION FIELDS */
+.no-print #opdForm .form-label {
+    font-size: 9px !important;
+    margin-bottom: 2px !important;
+    line-height: 1.1 !important;
+}
+
+.no-print #opdForm .form-control,
+.no-print #opdForm .form-select,
+.no-print #opdForm .input-group-text,
+.no-print #opdForm .btn {
+    height: 27px !important;
+    min-height: 27px !important;
+    font-size: 10px !important;
+    padding: 2px 7px !important;
+    border-radius: 4px !important;
+}
+
+.no-print #opdForm .input-group-sm > .form-control,
+.no-print #opdForm .input-group-sm > .form-select,
+.no-print #opdForm .input-group-sm > .input-group-text,
+.no-print #opdForm .input-group-sm > .btn {
+    height: 27px !important;
+    min-height: 27px !important;
+}
+
+.no-print #opdForm .input-group-text {
+    min-width: 34px !important;
+    padding: 2px 5px !important;
+    font-size: 8px !important;
+}
+
+.no-print #opdForm .form-control::placeholder,
+.no-print #opdForm .form-select {
+    font-size: 9px !important;
+}
+
+.no-print #opdForm .row.g-2 {
+    --bs-gutter-x: .45rem !important;
+    --bs-gutter-y: .3rem !important;
+}
+
+.no-print #opdForm .mb-3 {
+    margin-bottom: 5px !important;
+}
+
+.no-print #opdForm .mb-2 {
+    margin-bottom: 4px !important;
+}
+
+.no-print #opdForm .mt-2 {
+    margin-top: 5px !important;
+}
+
+.no-print #visit_date_calendar_btn {
+    width: 29px !important;
+    padding: 2px 5px !important;
+}
+
+.no-print #mobile_wrapper .btn {
+    width: 29px !important;
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+}
+
+.no-print .tariff-box {
+    padding: 6px 8px !important;
+}
+
+.no-print #display_tariff_fee {
+    font-size: 1.25rem !important;
+    margin: 2px 0 5px !important;
+}
+
+.no-print .tariff-box .btn {
+    height: 28px !important;
+    min-height: 28px !important;
+    margin-bottom: 4px !important;
+}
+
+.no-print #opdForm > .row:first-of-type {
+    padding-bottom: 6px !important;
+    margin-bottom: 6px !important;
+}
+
+
+/* =========================================================
+   VISIT DATE - COMPACT WIDTH ONLY
+   Do NOT change the column/layout or any billing logic.
+   ========================================================= */
+.no-print .visit-date-compact {
+    width: 150px !important;
+    max-width: 150px !important;
+}
+
+.no-print .visit-date-compact .input-group {
+    width: 150px !important;
+    max-width: 150px !important;
+    flex-wrap: nowrap !important;
+}
+
+.no-print .visit-date-compact #visit_date_display {
+    width: 123px !important;
+    max-width: 123px !important;
+    flex: 0 0 123px !important;
+    height: 25px !important;
+    min-height: 25px !important;
+    font-size: 9px !important;
+    padding: 1px 5px !important;
+}
+
+.no-print .visit-date-compact #visit_date_calendar_btn {
+    width: 27px !important;
+    min-width: 27px !important;
+    max-width: 27px !important;
+    height: 25px !important;
+    min-height: 25px !important;
+    padding: 1px 3px !important;
+}
+
+.no-print .visit-date-compact .native-date-picker {
+    right: 0 !important;
+    width: 27px !important;
+    height: 25px !important;
+}
+
+
+/* Balanced patient-info row: use the full available width without artificial gaps. */
+.no-print .patient-info-balanced {
+    --bs-gutter-x: .55rem !important;
+}
+.no-print .patient-info-balanced .form-control,
+.no-print .patient-info-balanced .form-select {
+    width: 100%;
+}
+
+
+/* FINAL DOB + AGE ALIGNMENT */
+.no-print .dob-age-row {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.no-print .dob-age-row .dob-control {
+    width: 185px !important;
+    max-width: 185px !important;
+    min-width: 185px !important;
+    flex: 0 0 185px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.no-print .dob-age-row .dob-control .input-group {
+    width: 185px !important;
+    max-width: 185px !important;
+    margin: 0 !important;
+}
+.no-print .dob-age-row .dob-control #dob_display {
+    width: 158px !important;
+    max-width: 158px !important;
+    flex: 0 0 158px !important;
+    height: 31px !important;
+    min-height: 31px !important;
+}
+.no-print .dob-age-row .dob-control #dob_calendar_btn {
+    height: 31px !important;
+    min-height: 31px !important;
+}
+.no-print .dob-age-row .age-control {
+    width: 92px !important;
+    max-width: 92px !important;
+    min-width: 92px !important;
+    flex: 0 0 92px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.no-print .dob-age-row .age-entry-label {
+    display: none !important;
+}
+.no-print .dob-age-row .age-control .input-group {
+    display: flex !important;
+    align-items: stretch !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    height: 31px !important;
+    min-height: 31px !important;
+}
+.no-print .dob-age-row .age-control .form-control,
+.no-print .dob-age-row .age-control .input-group-text {
+    height: 31px !important;
+    min-height: 31px !important;
+    box-sizing: border-box !important;
+}
+.no-print .dob-age-row .age-control .input-group-text {
+    font-size: 8px !important;
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+}
+
 </style></head><body>${currentReceiptHtml}</body></html>`);
     printWindow.document.close();
     printWindow.onload = function() {
