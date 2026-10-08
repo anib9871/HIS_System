@@ -136,7 +136,7 @@ require_once __DIR__ . '/layout_header.php';
                             name="duration_name"
                             id="duration_name"
                             class="form-control form-control-sm text-uppercase"
-                            placeholder="E.G. 5 DAYS"
+                            placeholder=""
                             maxlength="100"
                             required
                             autofocus
@@ -151,7 +151,7 @@ require_once __DIR__ . '/layout_header.php';
                                 name="duration_value"
                                 id="duration_value"
                                 class="form-control form-control-sm"
-                                placeholder="E.G. 5"
+                                placeholder=""
                                 min="1"
                                 step="1"
                             >
@@ -164,7 +164,7 @@ require_once __DIR__ . '/layout_header.php';
                                 name="duration_unit"
                                 id="duration_unit"
                                 class="form-control form-control-sm text-uppercase"
-                                placeholder="DAYS / WEEKS / MONTHS"
+                                placeholder=""
                                 maxlength="30"
                             >
                         </div>
@@ -177,7 +177,7 @@ require_once __DIR__ . '/layout_header.php';
                             id="description"
                             class="form-control form-control-sm"
                             rows="3"
-                            placeholder="E.G. CONTINUE MEDICINE FOR 5 DAYS"
+                            placeholder=""
                         ></textarea>
                     </div>
 
