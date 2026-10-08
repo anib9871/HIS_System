@@ -12,8 +12,8 @@ if (!isset($_SESSION['user_id']) || (isset($_SESSION['user_type']) && $_SESSION[
 
 $current_page = basename($_SERVER['PHP_SELF']);
 
-// OPD Submenu Pages Check (Added opd_appointments.php here)
-$opd_pages = ['opd_appointments.php', 'opd_registration.php', 'opd_doctor.php', 'opd_billing.php'];
+// OPD Submenu Pages Check
+$opd_pages = ['opd_appointments.php', 'opd_registration.php', 'opd_doctor.php'];
 $is_opd_active = in_array($current_page, $opd_pages);
 
 // Facility & Infrastructure Master Check
@@ -24,6 +24,7 @@ $is_facility_active = in_array($current_page, $facility_pages);
 $general_master_pages = [
     'org_profile.php', 
     'master_states.php',
+    'master_city.php',
     'master_financial_year.php',
     'master_centers.php', 
     'users.php', 
@@ -41,14 +42,15 @@ $general_master_pages = [
 ];
 
 $prescription_pages = [
-    'master_medicines.php',
-    'master_routes.php',
-    'master_frequencies.php',
-    'master_timings.php',
+    'master_units.php',
+    'frequency_master.php',
+    'master_meals.php',
     'master_durations.php',
-    'master_prescription_instructions.php',
+    'master_medicines.php',
     'master_symptoms.php',
     'master_diagnoses.php',
+    'master_investigations.php',
+    'master_vitals.php',
     'prescription_template_master.php'
 ];
 
@@ -398,6 +400,12 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
                     </li>
 
                     <li>
+                        <a href="master_city.php" class="<?= ($current_page == 'master_city.php') ? 'active-child' : '' ?>">
+                            <i class="bi bi-geo-alt"></i> City Master
+                        </a>
+                    </li>
+
+                    <li>
                         <a href="master_financial_year.php" class="<?= ($current_page == 'master_financial_year.php') ? 'active-child' : '' ?>">
                             <i class="bi bi-calendar-check"></i> Financial Year Master
                         </a>
@@ -489,23 +497,18 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
                         >
                             <ul class="nested-submenu-items">
                                 <li>
-                                    <a href="master_medicines.php" class="<?= ($current_page == 'master_medicines.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-capsule"></i> Medicine Master
+                                    <a href="master_units.php" class="<?= ($current_page == 'master_units.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-rulers"></i> Unit Master
                                     </a>
                                 </li>
                                 <li>
-                                    <a href="master_routes.php" class="<?= ($current_page == 'master_routes.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-arrow-left-right"></i> Route Master
-                                    </a>
-                                </li>
-                                <li>
-                                    <a href="master_frequencies.php" class="<?= ($current_page == 'master_frequencies.php') ? 'active-child' : '' ?>">
+                                    <a href="frequency_master.php" class="<?= ($current_page == 'frequency_master.php') ? 'active-child' : '' ?>">
                                         <i class="bi bi-arrow-repeat"></i> Frequency Master
                                     </a>
                                 </li>
                                 <li>
-                                    <a href="master_timings.php" class="<?= ($current_page == 'master_timings.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-clock"></i> Timing Master
+                                    <a href="master_meals.php" class="<?= ($current_page == 'master_meals.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-cup-hot"></i> Meal Master
                                     </a>
                                 </li>
                                 <li>
@@ -514,8 +517,8 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
                                     </a>
                                 </li>
                                 <li>
-                                    <a href="master_prescription_instructions.php" class="<?= ($current_page == 'master_prescription_instructions.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-chat-left-text"></i> Prescription Instructions
+                                    <a href="master_medicines.php" class="<?= ($current_page == 'master_medicines.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-capsule"></i> Medicine Master
                                     </a>
                                 </li>
                                 <li>
@@ -528,6 +531,23 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
                                         <i class="bi bi-clipboard2-pulse"></i> Diagnosis Master
                                     </a>
                                 </li>
+                                <li>
+                                    <a href="master_investigations.php" class="<?= ($current_page == 'master_investigations.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-clipboard2-check"></i> Investigation Master
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="master_vitals.php" class="<?= ($current_page == 'master_vitals.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-heart-pulse"></i> Vital Master
+                                    </a>
+                                </li>
+
+                                <li>
+                                    <a href="master_advices.php" class="<?= ($current_page == 'master_advices.php') ? 'active-child' : '' ?>">
+                                        <i class="bi bi-chat-left-text"></i> Advices Master
+                                    </a>
+                                </li>
+
                                 <li>
                                     <a href="prescription_template_master.php" class="<?= ($current_page == 'prescription_template_master.php') ? 'active-child' : '' ?>">
                                         <i class="bi bi-file-earmark-medical"></i> Prescription Template Master
@@ -606,10 +626,10 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
                     <?php endif; ?>
 
                     <li><a href="opd_doctor.php" class="<?= ($current_page == 'opd_doctor.php') ? 'active-child' : '' ?>"><i class="bi bi-prescription2"></i> Doctor Desk (Rx)</a></li>
+                    
+                    <li><a href="opd_visit_list.php" class="<?= ($current_page == 'opd_visit_list.php') ? 'active-child' : '' ?>"><i class="bi bi-prescription2"></i> OPD Vist List</a></li>
 
-                    <?php if (has_access('opd_billing', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_billing.php" class="<?= ($current_page == 'opd_billing.php') ? 'active-child' : '' ?>"><i class="bi bi-receipt"></i> OPD Billing</a></li>
-                    <?php endif; ?>
+            
                 </ul>
             </div>
         </li>
@@ -636,10 +656,6 @@ function has_access($menu_key, $is_full_admin, $user_menus) {
             </div>
 
             <div class="vr my-1 text-muted d-none d-sm-block" style="height: 20px;"></div>
-
-            <!-- <a href="opd_appointments.php#nav-queue" class="btn btn-sm btn-outline-primary d-flex align-items-center gap-1" title="Open OPD Queue">
-                <i class="bi bi-display"></i> <span class="d-none d-sm-inline">OPD QUEUE</span>
-            </a> -->
 
             <a href="../logout.php" class="btn-logout" title="Logout">
                 <i class="bi bi-box-arrow-right"></i> <span class="d-none d-sm-inline">Logout</span>
