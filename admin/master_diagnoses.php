@@ -130,7 +130,7 @@ require_once __DIR__ . '/layout_header.php';
                                 name="diagnosis_name"
                                 id="diagnosis_name"
                                 class="form-control form-control-sm text-uppercase"
-                                placeholder="E.G. ACUTE GASTRITIS"
+                                placeholder=""
                                 maxlength="200"
                                 required
                                 autofocus
@@ -146,7 +146,7 @@ require_once __DIR__ . '/layout_header.php';
                                 name="diagnosis_code"
                                 id="diagnosis_code"
                                 class="form-control form-control-sm font-monospace text-uppercase"
-                                placeholder="E.G. K29.7"
+                                placeholder=""
                                 maxlength="50"
                             >
                         </div>
@@ -162,7 +162,7 @@ require_once __DIR__ . '/layout_header.php';
                             class="form-control form-control-sm"
                             rows="3"
                             maxlength="255"
-                            placeholder="ENTER SHORT DESCRIPTION"
+                            placeholder=""
                         ></textarea>
                     </div>
 
