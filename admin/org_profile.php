@@ -30,6 +30,7 @@ try {
     $tenant_pdo->exec("ALTER TABLE org_profile ADD COLUMN IF NOT EXISTS mnemonic VARCHAR(4) NULL AFTER org_name;");
     $tenant_pdo->exec("ALTER TABLE org_profile ADD COLUMN IF NOT EXISTS gst_no VARCHAR(30) NULL AFTER pincode;");
     $tenant_pdo->exec("ALTER TABLE org_profile ADD COLUMN IF NOT EXISTS state_id INT NULL AFTER city;");
+    $tenant_pdo->exec("ALTER TABLE org_profile ADD COLUMN IF NOT EXISTS city_id INT NULL AFTER state_id;");
 } catch (Exception $e) {}
 
 // 2. Handle Form Submission & Update
@@ -40,9 +41,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_org'])) {
     $email    = trim($_POST['email'] ?? '');
     $phone    = trim($_POST['phone'] ?? '');
     $address  = trim($_POST['address'] ?? '');
-    $city     = trim($_POST['city'] ?? '');
-    // Yahan dropdown se state_id integer format mein aayega
+    
     $state_id = !empty($_POST['state_id']) ? (int)$_POST['state_id'] : null; 
+    $city_id  = !empty($_POST['city_id']) ? (int)$_POST['city_id'] : null; 
+    
     $pincode  = trim($_POST['pincode'] ?? '');
     $gst_no   = trim($_POST['gst_no'] ?? '');
 
@@ -52,25 +54,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_org'])) {
         set_flash_err("Mnemonic code cannot exceed 4 characters.");
     } else {
         try {
+            // A. Update in Tenant DB
             $chk = $tenant_pdo->query("SELECT COUNT(*) FROM org_profile WHERE id = 1")->fetchColumn();
             
             if ($chk > 0) {
                 $stmt = $tenant_pdo->prepare("
                     UPDATE org_profile 
-                    SET org_name = ?, mnemonic = ?, tagline = ?, email = ?, phone = ?, address = ?, city = ?, state_id = ?, pincode = ?, gst_no = ?
+                    SET org_name = ?, mnemonic = ?, tagline = ?, email = ?, phone = ?, address = ?, state_id = ?, city_id = ?, pincode = ?, gst_no = ?
                     WHERE id = 1
                 ");
-                $stmt->execute([$org_name, $mnemonic, $tagline, $email, $phone, $address, $city, $state_id, $pincode, $gst_no]);
+                $stmt->execute([$org_name, $mnemonic, $tagline, $email, $phone, $address, $state_id, $city_id, $pincode, $gst_no]);
             } else {
                 $stmt = $tenant_pdo->prepare("
-                    INSERT INTO org_profile (id, org_name, mnemonic, tagline, email, phone, address, city, state_id, pincode, gst_no)
+                    INSERT INTO org_profile (id, org_name, mnemonic, tagline, email, phone, address, state_id, city_id, pincode, gst_no)
                     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
-                $stmt->execute([$org_name, $mnemonic, $tagline, $email, $phone, $address, $city, $state_id, $pincode, $gst_no]);
+                $stmt->execute([$org_name, $mnemonic, $tagline, $email, $phone, $address, $state_id, $city_id, $pincode, $gst_no]);
             }
             
+            // B. UPDATE SESSION SO IT REFLECTS IN UI INSTANTLY (Header & Sidebar)
             $_SESSION['org_name'] = $org_name;
             $_SESSION['mnemonic'] = $mnemonic;
+
+            // C. SYNC WITH MASTER DB (Superadmin ko bhi updated naam dikhega)
+            try {
+                require_once __DIR__ . '/../config/master_db.php';
+                if (isset($master_pdo) && isset($_SESSION['org_id'])) {
+                    $master_stmt = $master_pdo->prepare("UPDATE master_organization SET org_name = ? WHERE org_id = ?");
+                    $master_stmt->execute([$org_name, $_SESSION['org_id']]);
+                }
+            } catch (Exception $em) {}
 
             set_flash_msg("Hospital profile details successfully updated!");
             header("Location: org_profile.php");
@@ -87,8 +100,13 @@ $org = $tenant_pdo->query("SELECT * FROM org_profile WHERE id = 1")->fetch() ?: 
 // 4. Fetch Active States from master_states for Dropdown
 $states = [];
 try {
-    // id aur state_name dono fetch kar rahe hain
     $states = $tenant_pdo->query("SELECT id, state_name FROM master_states WHERE status = 1 ORDER BY state_name ASC")->fetchAll();
+} catch (Exception $e) {}
+
+// 5. Fetch Active Cities from master_city to be filtered via JS
+$cities = [];
+try {
+    $cities = $tenant_pdo->query("SELECT id, state_id, city_name FROM master_city WHERE status = 1 ORDER BY city_name ASC")->fetchAll();
 } catch (Exception $e) {}
 
 $val_org_name = $org['org_name'] ?? ($_SESSION['org_name'] ?? '');
@@ -124,16 +142,14 @@ require_once __DIR__ . '/layout_header.php';
                                     Organization / Hospital Name <span class="text-danger">*</span>
                                 </label>
                                 <input type="text" name="org_name" class="form-control form-control-sm fw-bold" 
-                                       value="<?= htmlspecialchars($val_org_name) ?>" 
-                                       placeholder="e.g. City Care Multispeciality Hospital" required>
+                                       value="<?= htmlspecialchars($val_org_name) ?>" required>
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label small fw-semibold text-secondary mb-1">
                                     Mnemonic / Code <span class="text-muted font-monospace" style="font-size: 0.7rem;">(Max 4 Chars)</span>
                                 </label>
                                 <input type="text" name="mnemonic" id="mnemonic_input" class="form-control form-control-sm fw-bold text-primary font-monospace" 
-                                       value="<?= htmlspecialchars($val_mnemonic) ?>" 
-                                       placeholder="e.g. MAX" maxlength="4" oninput="checkMnemonicLength(this)">
+                                       value="<?= htmlspecialchars($val_mnemonic) ?>" maxlength="4" oninput="checkMnemonicLength(this)">
                             </div>
                         </div>
                     </div>
@@ -142,20 +158,17 @@ require_once __DIR__ . '/layout_header.php';
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold text-secondary mb-1">Tagline / Slogan</label>
                             <input type="text" name="tagline" class="form-control form-control-sm" 
-                                   value="<?= htmlspecialchars($org['tagline'] ?? '') ?>" 
-                                   placeholder="e.g. Caring for life, always">
+                                   value="<?= htmlspecialchars($org['tagline'] ?? '') ?>">
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Official Email</label>
                             <input type="email" name="email" class="form-control form-control-sm" 
-                                   value="<?= htmlspecialchars($org['email'] ?? '') ?>" 
-                                   placeholder="contact@hospital.com">
+                                   value="<?= htmlspecialchars($org['email'] ?? '') ?>">
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Emergency / Phone</label>
                             <input type="text" name="phone" class="form-control form-control-sm" 
-                                   value="<?= htmlspecialchars($org['phone'] ?? '') ?>" 
-                                   placeholder="+91 9876543210">
+                                   value="<?= htmlspecialchars($org['phone'] ?? '') ?>">
                         </div>
                     </div>
 
@@ -163,8 +176,7 @@ require_once __DIR__ . '/layout_header.php';
                         <div class="col-md-12">
                             <label class="form-label small fw-semibold text-secondary mb-1">Complete Facility Address</label>
                             <input type="text" name="address" class="form-control form-control-sm" 
-                                   value="<?= htmlspecialchars($org['address'] ?? '') ?>" 
-                                   placeholder="Building, Plot / Sector, Landmark, Street Area">
+                                   value="<?= htmlspecialchars($org['address'] ?? '') ?>">
                         </div>
                     </div>
 
@@ -172,10 +184,9 @@ require_once __DIR__ . '/layout_header.php';
                         <!-- State Dropdown -->
                         <div class="col-md-4">
                             <label class="form-label small fw-semibold text-secondary mb-1">State</label>
-                            <select name="state_id" class="form-select form-select-sm">
+                            <select name="state_id" id="state_id" class="form-select form-select-sm">
                                 <option value="">-- Select State --</option>
                                 <?php foreach ($states as $s): ?>
-                                    <!-- Yahan value mein $s['id'] jaayega -->
                                     <option value="<?= $s['id'] ?>" <?= (isset($org['state_id']) && $org['state_id'] == $s['id']) ? 'selected' : '' ?>>
                                         <?= htmlspecialchars($s['state_name']) ?>
                                     </option>
@@ -183,24 +194,23 @@ require_once __DIR__ . '/layout_header.php';
                             </select>
                         </div>
                         
+                        <!-- City Dropdown (Fetched via JS) -->
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">City</label>
-                            <input type="text" name="city" class="form-control form-control-sm" 
-                                   value="<?= htmlspecialchars($org['city'] ?? '') ?>" 
-                                   placeholder="e.g. Lucknow">
+                            <select name="city_id" id="city_id" class="form-select form-select-sm">
+                                <option value="">-- Select City --</option>
+                            </select>
                         </div>
                         
                         <div class="col-md-2">
                             <label class="form-label small fw-semibold text-secondary mb-1">Pincode</label>
                             <input type="text" name="pincode" class="form-control form-control-sm" 
-                                   value="<?= htmlspecialchars($org['pincode'] ?? '') ?>" 
-                                   placeholder="226001" maxlength="10">
+                                   value="<?= htmlspecialchars($org['pincode'] ?? '') ?>" maxlength="10">
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">GSTIN / Reg No. (Optional)</label>
                             <input type="text" name="gst_no" class="form-control form-control-sm font-monospace" 
-                                   value="<?= htmlspecialchars($org['gst_no'] ?? '') ?>" 
-                                   placeholder="09AAAAA0000A1Z5">
+                                   value="<?= htmlspecialchars($org['gst_no'] ?? '') ?>">
                         </div>
                     </div>
 
@@ -220,6 +230,7 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// Logic to limit Mnemonic field length
 function checkMnemonicLength(input) {
     input.value = input.value.toUpperCase();
     if (input.value.length > 4) {
@@ -236,6 +247,42 @@ function validateMnemonicForm() {
     }
     return true;
 }
+
+// Logic for Dynamic State -> City Dropdown
+const allCities = <?= json_encode($cities) ?>;
+const stateSelect = document.getElementById('state_id');
+const citySelect = document.getElementById('city_id');
+const preSelectedCityId = "<?= $org['city_id'] ?? '' ?>";
+
+function loadCities() {
+    const selectedStateId = stateSelect.value;
+    
+    // Clear old options
+    citySelect.innerHTML = '<option value="">-- Select City --</option>';
+    
+    if (selectedStateId) {
+        const filteredCities = allCities.filter(city => city.state_id == selectedStateId);
+        
+        filteredCities.forEach(city => {
+            const option = document.createElement('option');
+            option.value = city.id;
+            option.textContent = city.city_name;
+            
+            // Auto-select if matches the saved city
+            if (city.id == preSelectedCityId) {
+                option.selected = true;
+            }
+            
+            citySelect.appendChild(option);
+        });
+    }
+}
+
+// Event listener
+stateSelect.addEventListener('change', loadCities);
+
+// Call on page load to pre-fill cities if state is already selected
+document.addEventListener('DOMContentLoaded', loadCities);
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
