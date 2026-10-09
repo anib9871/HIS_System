@@ -11,6 +11,40 @@ $center_id = (int)($_SESSION['center_id'] ?? 1);
 $user_id   = (int)($_SESSION['user_id'] ?? 1);
 
 // =========================================================
+// AJAX: QUICK ADD MODALS (Doctor, Service, Category)
+// =========================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json');
+    try {
+        if ($_POST['ajax_action'] === 'add_category') {
+            $name = ucwords(strtolower(trim($_POST['category_name'] ?? '')));
+            $status = isset($_POST['status']) ? 1 : 0;
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_categories (org_id, center_id, category_name, status) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$org_id, $center_id, $name, $status]);
+            echo json_encode(['success' => true]); exit;
+        }
+        if ($_POST['ajax_action'] === 'add_service') {
+            $name = ucwords(strtolower(trim($_POST['service_name'] ?? '')));
+            $status = isset($_POST['status']) ? 1 : 0;
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_doctor_services (org_id, center_id, service_name, status) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$org_id, $center_id, $name, $status]);
+            echo json_encode(['success' => true]); exit;
+        }
+        if ($_POST['ajax_action'] === 'add_doctor') {
+            $name = ucwords(strtolower(trim($_POST['full_name'] ?? '')));
+            $reg = strtoupper(trim($_POST['registration_no'] ?? ''));
+            $doc_code = 'DOC-' . rand(1000, 9999);
+            $status = isset($_POST['status']) ? 1 : 0;
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_doctors (org_id, center_id, doc_code, registration_no, full_name, status) VALUES (?, ?, ?, ?, ?, ?)");
+            $stmt->execute([$org_id, $center_id, $doc_code, $reg, $name, $status]);
+            echo json_encode(['success' => true]); exit;
+        }
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]); exit;
+    }
+}
+
+// =========================================================
 // AJAX: FETCH LATEST TARIFF LIST / USED INSURANCES
 // =========================================================
 if (isset($_GET['ajax_tariffs'])) {
@@ -482,140 +516,89 @@ require_once __DIR__ . '/layout_header.php';
                     <input type="hidden" name="action_tariff" value="1">
                     <input type="hidden" name="edit_id" id="edit_id" value="0">
 
-                    <div class="row g-3">
+                    <div class="row g-3 align-items-end">
 
                         <!-- Doctor -->
                         <div class="col-lg-3 col-md-6">
-                            <label class="form-label small fw-semibold text-secondary mb-1">
-                                Select Doctor *
-                            </label>
-
-                            <select
-                                name="doctor_id"
-                                id="doctor_id"
-                                class="form-select form-select-sm"
-                                required
-                                autofocus
-                                onchange="onCategoryChange()"
-                            >
-                                <option value="">-- Choose Doctor --</option>
-
-                                <?php foreach ($doctors as $doc): ?>
-                                    <option value="<?= (int)$doc['id'] ?>">
-                                        <?= htmlspecialchars($doc['full_name']) ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
+                            <label class="form-label small fw-semibold text-secondary mb-1">Select Doctor *</label>
+                            <div class="input-group input-group-sm">
+                                <select name="doctor_id" id="doctor_id" class="form-select" required autofocus onchange="onCategoryChange()">
+                                    <option value="">-- Choose Doctor --</option>
+                                    <?php foreach ($doctors as $doc): ?>
+                                        <option value="<?= (int)$doc['id'] ?>"><?= htmlspecialchars($doc['full_name']) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <button type="button" class="btn btn-outline-primary px-2" data-bs-toggle="modal" data-bs-target="#addDocModal" title="Add New Doctor">
+                                    <i class="bi bi-plus-lg"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary px-2" onclick="refreshDropdownMasters()" title="Refresh Dropdown">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            </div>
                         </div>
-
 
                         <!-- Service -->
                         <div class="col-lg-3 col-md-6">
-                            <label class="form-label small fw-semibold text-secondary mb-1">
-                                Select Service *
-                            </label>
-
-                            <select
-                                name="service_id"
-                                id="service_id"
-                                class="form-select form-select-sm"
-                                required
-                                onchange="onCategoryChange()"
-                            >
-                                <option value="">-- Choose Service --</option>
-
-                                <?php foreach ($services as $srv): ?>
-                                    <option value="<?= (int)$srv['id'] ?>">
-                                        <?= htmlspecialchars($srv['service_name']) ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
+                            <label class="form-label small fw-semibold text-secondary mb-1">Select Service *</label>
+                            <div class="input-group input-group-sm">
+                                <select name="service_id" id="service_id" class="form-select" required onchange="onCategoryChange()">
+                                    <option value="">-- Choose Service --</option>
+                                    <?php foreach ($services as $srv): ?>
+                                        <option value="<?= (int)$srv['id'] ?>"><?= htmlspecialchars($srv['service_name']) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <button type="button" class="btn btn-outline-primary px-2" data-bs-toggle="modal" data-bs-target="#addSrvModal" title="Add New Service">
+                                    <i class="bi bi-plus-lg"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary px-2" onclick="refreshDropdownMasters()" title="Refresh Dropdown">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            </div>
                         </div>
-
 
                         <!-- Category -->
                         <div class="col-lg-3 col-md-6">
-                            <label class="form-label small fw-semibold text-secondary mb-1">
-                                Select Category *
-                            </label>
-
-                            <select
-                                name="category_id"
-                                id="category_id"
-                                class="form-select form-select-sm"
-                                required
-                                onchange="onCategoryChange()"
-                            >
-                                <option value="">-- Choose Category --</option>
-
-                                <?php foreach ($categories as $cat): ?>
-                                    <option value="<?= (int)$cat['id'] ?>">
-                                        <?= htmlspecialchars($cat['category_name']) ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
+                            <label class="form-label small fw-semibold text-secondary mb-1">Select Category *</label>
+                            <div class="input-group input-group-sm">
+                                <select name="category_id" id="category_id" class="form-select" required onchange="onCategoryChange()">
+                                    <option value="">-- Choose Category --</option>
+                                    <?php foreach ($categories as $cat): ?>
+                                        <option value="<?= (int)$cat['id'] ?>"><?= htmlspecialchars($cat['category_name']) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <button type="button" class="btn btn-outline-primary px-2" data-bs-toggle="modal" data-bs-target="#addCatModal" title="Add New Category">
+                                    <i class="bi bi-plus-lg"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary px-2" onclick="refreshDropdownMasters()" title="Refresh Dropdown">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            </div>
                         </div>
-
 
                         <!-- Rate -->
                         <div class="col-lg-2 col-md-4">
-                            <label class="form-label small fw-semibold text-secondary mb-1">
-                                Tariff Rate (₹) *
-                            </label>
-
-                            <input
-                                type="number"
-                                step="0.01"
-                                min="0"
-                                name="rate"
-                                id="rate"
-                                class="form-control form-control-sm"
-                                placeholder="0.00"
-                                required
-                            >
+                            <label class="form-label small fw-semibold text-secondary mb-1">Tariff Rate (₹) *</label>
+                            <input type="number" step="0.01" min="0" name="rate" id="rate" class="form-control form-control-sm" placeholder="0.00" required>
                         </div>
 
-
                         <!-- Status -->
-                        <div class="col-lg-1 col-md-2 d-flex align-items-end">
-                            <div class="form-check form-switch mb-1">
-                                <input
-                                    class="form-check-input"
-                                    type="checkbox"
-                                    name="status"
-                                    id="status"
-                                    checked
-                                >
-
-                                <label
-                                    class="form-check-label small fw-semibold text-secondary"
-                                    for="status"
-                                >
-                                    Active
-                                </label>
+                        <div class="col-lg-1 col-md-2 d-flex align-items-center mb-1">
+                            <div class="form-check form-switch m-0">
+                                <input class="form-check-input" type="checkbox" name="status" id="status" checked>
+                                <label class="form-check-label small fw-semibold text-secondary" for="status">Active</label>
                             </div>
                         </div>
 
-
-                        <!-- Insurance -->
-                        <div class="col-12">
-
-                            <div
-                                class="p-2 border rounded bg-light"
-                                id="insurance_container"
-                                style="display:none; max-height:200px; overflow-y:auto;"
-                            >
-
+                        <!-- Insurance Mappings Block -->
+                        <div class="col-12 mt-3">
+                            <div class="p-2 border rounded bg-light" id="insurance_container" style="display:none; max-height:200px; overflow-y:auto;">
                                 <span class="d-block small fw-bold text-dark mb-2 border-bottom pb-1">
                                     Map Insurances / Providers
                                 </span>
-
                                 <div id="insurance_list" class="row g-2">
                                     <!-- JS will generate insurance checkboxes -->
                                 </div>
-
                             </div>
-
                         </div>
 
                     </div>
@@ -846,8 +829,144 @@ require_once __DIR__ . '/layout_header.php';
 
 </div>
 
+<!-- =========================================================
+     AJAX MODALS FOR QUICK ADDING
+========================================================== -->
+<!-- Add Category Modal -->
+<div class="modal fade" id="addCatModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content shadow">
+            <div class="modal-header bg-light py-2 px-3 border-bottom">
+                <h6 class="modal-title fw-bold text-primary"><i class="bi bi-tags"></i> Add Category</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form onsubmit="submitAjaxForm(event, 'add_category')">
+                <div class="modal-body p-3">
+                    <div class="mb-3">
+                        <label class="form-label small text-secondary fw-semibold mb-1">Category Name *</label>
+                        <input type="text" name="category_name" class="form-control form-control-sm text-capitalize" required>
+                    </div>
+                    <div class="form-check form-switch m-0 pb-3 border-bottom">
+                        <input class="form-check-input" type="checkbox" name="status" id="catStatus" checked>
+                        <label class="form-check-label small fw-semibold text-secondary" for="catStatus">Active Status</label>
+                    </div>
+                </div>
+                <div class="modal-footer p-2 bg-light d-flex justify-content-between border-top-0">
+                    <button type="reset" class="btn btn-light border btn-sm">Reset</button>
+                    <button type="submit" class="btn btn-primary btn-sm fw-semibold">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add Service Modal -->
+<div class="modal fade" id="addSrvModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content shadow">
+            <div class="modal-header bg-light py-2 px-3 border-bottom">
+                <h6 class="modal-title fw-bold text-primary"><i class="bi bi-briefcase-medical"></i> Add Service</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form onsubmit="submitAjaxForm(event, 'add_service')">
+                <div class="modal-body p-3">
+                    <div class="mb-3">
+                        <label class="form-label small text-secondary fw-semibold mb-1">Service Name *</label>
+                        <input type="text" name="service_name" class="form-control form-control-sm text-capitalize" required>
+                    </div>
+                    <div class="form-check form-switch m-0 pb-3 border-bottom">
+                        <input class="form-check-input" type="checkbox" name="status" id="srvStatus" checked>
+                        <label class="form-check-label small fw-semibold text-secondary" for="srvStatus">Active Status</label>
+                    </div>
+                </div>
+                <div class="modal-footer p-2 bg-light d-flex justify-content-between border-top-0">
+                    <button type="reset" class="btn btn-light border btn-sm">Reset</button>
+                    <button type="submit" class="btn btn-primary btn-sm fw-semibold">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add Doctor Modal -->
+<div class="modal fade" id="addDocModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content shadow">
+            <div class="modal-header bg-light py-2 px-3 border-bottom">
+                <h6 class="modal-title fw-bold text-primary"><i class="bi bi-person-plus"></i> Add Doctor</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form onsubmit="submitAjaxForm(event, 'add_doctor')">
+                <div class="modal-body p-3">
+                    <div class="mb-2">
+                        <label class="form-label small text-secondary fw-semibold mb-1">Full Name *</label>
+                        <input type="text" name="full_name" class="form-control form-control-sm text-capitalize" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label small text-secondary fw-semibold mb-1">Reg No. *</label>
+                        <input type="text" name="registration_no" class="form-control form-control-sm text-uppercase" required>
+                    </div>
+                    <div class="form-check form-switch m-0 pb-3 border-bottom">
+                        <input class="form-check-input" type="checkbox" name="status" id="docStatus" checked>
+                        <label class="form-check-label small fw-semibold text-secondary" for="docStatus">Active Status</label>
+                    </div>
+                </div>
+                <div class="modal-footer p-2 bg-light d-flex justify-content-between border-top-0">
+                    <button type="reset" class="btn btn-light border btn-sm">Reset</button>
+                    <button type="submit" class="btn btn-primary btn-sm fw-semibold">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 
 <script>
+
+// =========================================================
+// AJAX FORM SUBMISSION FOR MODALS
+// =========================================================
+function submitAjaxForm(e, actionType) {
+    e.preventDefault();
+    let form = e.target;
+    let formData = new FormData(form);
+    formData.append('ajax_action', actionType);
+    
+    let btn = form.querySelector('button[type="submit"]');
+    let oldHtml = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
+    btn.disabled = true;
+
+    fetch(window.location.href, {
+        method: 'POST',
+        body: formData
+    })
+    .then(res => res.json())
+    .then(data => {
+        if(data.success) {
+            let modalInstance = bootstrap.Modal.getInstance(form.closest('.modal'));
+            modalInstance.hide();
+            form.reset();
+            
+            // Reload the dropdowns automatically
+            refreshDropdownMasters();
+            
+            if(typeof Swal !== 'undefined') {
+                Swal.fire({ icon: 'success', title: 'Added Successfully', toast: true, position: 'top-end', showConfirmButton: false, timer: 2000 });
+            } else {
+                alert("Added Successfully!");
+            }
+        } else {
+            alert('Error: ' + data.error);
+        }
+    })
+    .catch(err => alert('Something went wrong!'))
+    .finally(() => {
+        btn.innerHTML = oldHtml;
+        btn.disabled = false;
+    });
+}
+
 
 // =========================================================
 // LOAD INSURANCES FROM PHP
@@ -1752,10 +1871,4 @@ function resetForm() {
 
 </script>
 
-
-
-<?php
-
-require_once __DIR__ . '/layout_footer.php';
-
-?>
+<?php require_once __DIR__ . '/layout_footer.php'; ?>
