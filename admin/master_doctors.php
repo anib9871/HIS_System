@@ -10,6 +10,41 @@ $page_title = "Doctor & Availability Master";
 $org_id = (int)($_SESSION['org_id'] ?? 1);
 $center_id = (int)($_SESSION['center_id'] ?? 1);
 
+// --- 0. AJAX HANDLERS FOR QUICK ADD MODALS ---
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json');
+    try {
+        if ($_POST['ajax_action'] === 'add_dept') {
+            $dept_name = ucwords(strtolower(trim($_POST['dept_name'] ?? '')));
+            $dept_prefix = strtoupper(trim($_POST['dept_prefix'] ?? ''));
+            $status = isset($_POST['status']) ? 1 : 0;
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_departments (org_id, center_id, dept_name, dept_prefix, status) VALUES (?, ?, ?, ?, ?)");
+            $stmt->execute([$org_id, $center_id, $dept_name, $dept_prefix, $status]);
+            echo json_encode(['success' => true, 'id' => $tenant_pdo->lastInsertId(), 'name' => $dept_name]);
+            exit;
+        }
+        if ($_POST['ajax_action'] === 'add_qual') {
+            $qual_name = strtoupper(trim($_POST['qualification_name'] ?? ''));
+            $status = isset($_POST['status']) ? 1 : 0;
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_qualifications (org_id, center_id, qualification_name, status) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$org_id, $center_id, $qual_name, $status]);
+            echo json_encode(['success' => true, 'id' => $tenant_pdo->lastInsertId(), 'name' => $qual_name]);
+            exit;
+        }
+        if ($_POST['ajax_action'] === 'add_spec') {
+            $spec_name = ucwords(strtolower(trim($_POST['specialization_name'] ?? '')));
+            $status = isset($_POST['status']) ? 1 : 0;
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_specializations (org_id, center_id, specialization_name, status) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$org_id, $center_id, $spec_name, $status]);
+            echo json_encode(['success' => true, 'id' => $tenant_pdo->lastInsertId(), 'name' => $spec_name]);
+            exit;
+        }
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        exit;
+    }
+}
+
 $err = "";
 $msg = "";
 
@@ -64,7 +99,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_doctor'])) {
     }
 }
 
-// --- 2. HANDLE AVAILABILITY SCHEDULE ADD (WITH INSERT IGNORE) ---
+// --- 2. HANDLE AVAILABILITY SCHEDULE ADD & UPDATE ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_schedule'])) {
     $doctor_id    = (int)($_POST['doctor_id'] ?? 0);
     $days_selected= $_POST['days_of_week'] ?? [];
@@ -73,18 +108,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_schedule'])) {
     $end_time     = $_POST['end_time'] ?? '13:00:00';
     $consult_time = (int)($_POST['avg_consult_time_mins'] ?? 10);
     $max_tokens   = (int)($_POST['max_tokens'] ?? 50);
+    $edit_sch_id  = (int)($_POST['edit_sch_id'] ?? 0);
+
+    // FIX: Strict mapping array to correct typos like "THRUSDAY" automatically
+    $valid_days_map = [
+        'monday'    => 'Monday',
+        'tuesday'   => 'Tuesday',
+        'wednesday' => 'Wednesday',
+        'thursday'  => 'Thursday',
+        'thrusday'  => 'Thursday',
+        'friday'    => 'Friday',
+        'saturday'  => 'Saturday',
+        'sunday'    => 'Sunday'
+    ];
 
     if ($doctor_id > 0 && !empty($days_selected)) {
         try {
-            $stmt = $tenant_pdo->prepare("INSERT IGNORE INTO doctor_availability (org_id, center_id, doctor_id, day_of_week, shift_name, start_time, end_time, avg_consult_time_mins, max_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            $count = 0;
-            foreach ($days_selected as $day) {
-                $stmt->execute([$org_id, $center_id, $doctor_id, $day, $shift_name, $start_time, $end_time, $consult_time, $max_tokens]);
-                if ($stmt->rowCount() > 0) {
-                    $count++;
+            if ($edit_sch_id > 0) {
+                // UPDATE SPECIFIC SCHEDULE
+                $raw_day = strtolower(trim($days_selected[0]));
+                $day = $valid_days_map[$raw_day] ?? ucfirst($raw_day); 
+                
+                $stmt = $tenant_pdo->prepare("UPDATE doctor_availability SET doctor_id=?, day_of_week=?, shift_name=?, start_time=?, end_time=?, avg_consult_time_mins=?, max_tokens=? WHERE id=? AND org_id=? AND center_id=?");
+                $stmt->execute([$doctor_id, $day, $shift_name, $start_time, $end_time, $consult_time, $max_tokens, $edit_sch_id, $org_id, $center_id]);
+                if(function_exists('set_flash_msg')) set_flash_msg("Availability schedule updated successfully.");
+            } else {
+                // INSERT NEW SCHEDULES (MULTIPLE DAYS)
+                $stmt = $tenant_pdo->prepare("INSERT IGNORE INTO doctor_availability (org_id, center_id, doctor_id, day_of_week, shift_name, start_time, end_time, avg_consult_time_mins, max_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $count = 0;
+                foreach ($days_selected as $raw_day_input) {
+                    $raw_day = strtolower(trim($raw_day_input));
+                    $clean_day = $valid_days_map[$raw_day] ?? ucfirst($raw_day);
+                    
+                    $stmt->execute([$org_id, $center_id, $doctor_id, $clean_day, $shift_name, $start_time, $end_time, $consult_time, $max_tokens]);
+                    if ($stmt->rowCount() > 0) {
+                        $count++;
+                    }
                 }
+                if(function_exists('set_flash_msg')) set_flash_msg("{$count} new availability slot(s) added successfully.");
             }
-            if(function_exists('set_flash_msg')) set_flash_msg("{$count} new availability slot(s) added successfully.");
             header("Location: master_doctors.php?tab=schedules");
             exit;
         } catch (PDOException $e) {
@@ -234,33 +296,58 @@ require_once __DIR__ . '/layout_header.php';
                         </div>
                     </div>
 
+                    <!-- DROPDOWNS WITH POPUP MODAL BUTTONS & REFRESH BUTTONS -->
                     <div class="row g-2 mb-2">
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Department</label>
-                            <select name="department_id" id="department_id" class="form-select form-select-sm">
-                                <option value="">-- General / None --</option>
-                                <?php foreach ($departments_list as $dp): ?>
-                                    <option value="<?= $dp['id'] ?>"><?= htmlspecialchars($dp['dept_name']) ?></option>
-                                <?php endforeach; ?>
-                            </select>
+                            <div class="input-group input-group-sm">
+                                <select name="department_id" id="department_id" class="form-select form-select-sm">
+                                    <option value="">-- General / None --</option>
+                                    <?php foreach ($departments_list as $dp): ?>
+                                        <option value="<?= $dp['id'] ?>"><?= htmlspecialchars($dp['dept_name']) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <button type="button" class="btn btn-outline-primary px-2" data-bs-toggle="modal" data-bs-target="#addDeptModal" title="Add New Department">
+                                    <i class="bi bi-plus-lg"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary px-2" onclick="window.location.reload();" title="Refresh Dropdown">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            </div>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Qualification</label>
-                            <select name="qualification_id" id="qualification_id" class="form-select form-select-sm">
-                                <option value="">-- Optional --</option>
-                                <?php foreach ($qualifications_list as $q): ?>
-                                    <option value="<?= $q['id'] ?>"><?= htmlspecialchars($q['qualification_name']) ?></option>
-                                <?php endforeach; ?>
-                            </select>
+                            <div class="input-group input-group-sm">
+                                <select name="qualification_id" id="qualification_id" class="form-select form-select-sm">
+                                    <option value="">-- Optional --</option>
+                                    <?php foreach ($qualifications_list as $q): ?>
+                                        <option value="<?= $q['id'] ?>"><?= htmlspecialchars($q['qualification_name']) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <button type="button" class="btn btn-outline-primary px-2" data-bs-toggle="modal" data-bs-target="#addQualModal" title="Add New Qualification">
+                                    <i class="bi bi-plus-lg"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary px-2" onclick="window.location.reload();" title="Refresh Dropdown">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            </div>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Specialization</label>
-                            <select name="specialization_id" id="specialization_id" class="form-select form-select-sm">
-                                <option value="">-- Optional --</option>
-                                <?php foreach ($specializations_list as $s): ?>
-                                    <option value="<?= $s['id'] ?>"><?= htmlspecialchars($s['specialization_name']) ?></option>
-                                <?php endforeach; ?>
-                            </select>
+                            <div class="input-group input-group-sm">
+                                <select name="specialization_id" id="specialization_id" class="form-select form-select-sm">
+                                    <option value="">-- Optional --</option>
+                                    <?php foreach ($specializations_list as $s): ?>
+                                        <option value="<?= $s['id'] ?>"><?= htmlspecialchars($s['specialization_name']) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <button type="button" class="btn btn-outline-primary px-2" data-bs-toggle="modal" data-bs-target="#addSpecModal" title="Add New Specialization">
+                                    <i class="bi bi-plus-lg"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary px-2" onclick="window.location.reload();" title="Refresh Dropdown">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
+                            </div>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Mobile No.</label>
@@ -327,7 +414,6 @@ require_once __DIR__ . '/layout_header.php';
                                             <small class="d-block text-muted"><?= htmlspecialchars($d['mobile'] ?? '-') ?></small>
                                         </td>
                                         <td>
-                                            <!-- Modern Toggle Switch -->
                                             <div class="form-check form-switch m-0" title="Toggle Status (Active/Inactive)">
                                                 <input class="form-check-input" type="checkbox" role="switch" 
                                                        <?= $is_act ? 'checked' : '' ?> 
@@ -335,7 +421,6 @@ require_once __DIR__ . '/layout_header.php';
                                             </div>
                                         </td>
                                         <td class="text-center pe-3">
-                                            <!-- Modern Edit Button -->
                                             <a href="javascript:void(0);" class="btn-action-edit" title="Edit Doctor Profile" onclick='editDoc(<?= htmlspecialchars(json_encode($d), ENT_QUOTES, 'UTF-8') ?>)'>
                                                 <i class="bi bi-pencil-fill" style="font-size: 0.85rem;"></i>
                                             </a>
@@ -356,14 +441,15 @@ require_once __DIR__ . '/layout_header.php';
             <div class="col-xl-4 col-lg-5">
                 <div class="card border shadow-sm">
                     <div class="card-header bg-white py-2 px-3 border-bottom">
-                        <span class="fw-bold small text-dark"><i class="bi bi-clock-history text-primary me-1"></i> Map Availability Slot</span>
+                        <span class="fw-bold small text-dark" id="schFormTitle"><i class="bi bi-clock-history text-primary me-1"></i> Map Availability Slot</span>
                     </div>
                     <div class="card-body p-3">
                         <form method="POST" action="">
                             <input type="hidden" name="action_schedule" value="1">
+                            <input type="hidden" name="edit_sch_id" id="edit_sch_id" value="0">
                             <div class="mb-2">
                                 <label class="form-label small fw-semibold text-secondary mb-1">Select Doctor *</label>
-                                <select name="doctor_id" class="form-select form-select-sm" required>
+                                <select name="doctor_id" id="sch_doctor_id" class="form-select form-select-sm" required>
                                     <option value="">-- Choose Doctor --</option>
                                     <?php foreach ($active_doctors as $ad): ?>
                                         <option value="<?= $ad['id'] ?>"><?= htmlspecialchars($ad['full_name']) ?></option>
@@ -389,34 +475,37 @@ require_once __DIR__ . '/layout_header.php';
                             </div>
                             <div class="mb-2">
                                 <label class="form-label small fw-semibold text-secondary mb-1">Shift Name</label>
-                                <input type="text" name="shift_name" class="form-control form-control-sm text-capitalize" value="Morning">
+                                <input type="text" name="shift_name" id="shift_name" class="form-control form-control-sm text-capitalize" value="Morning">
                             </div>
                             <div class="row g-2 mb-2">
                                 <div class="col-6">
                                     <label class="form-label small fw-semibold text-secondary mb-1">Start Time</label>
-                                    <input type="time" name="start_time" class="form-control form-control-sm" value="09:00" required>
+                                    <input type="time" name="start_time" id="start_time" class="form-control form-control-sm" value="09:00" required>
                                 </div>
                                 <div class="col-6">
                                     <label class="form-label small fw-semibold text-secondary mb-1">End Time</label>
-                                    <input type="time" name="end_time" class="form-control form-control-sm" value="13:00" required>
+                                    <input type="time" name="end_time" id="end_time" class="form-control form-control-sm" value="13:00" required>
                                 </div>
                             </div>
                             <div class="row g-2 mb-3">
                                 <div class="col-6">
                                     <label class="form-label small fw-semibold text-secondary mb-1">Avg Min/Pt</label>
                                     <div class="input-group input-group-sm">
-                                        <input type="number" name="avg_consult_time_mins" class="form-control" value="10">
+                                        <input type="number" name="avg_consult_time_mins" id="avg_consult_time_mins" class="form-control" value="10">
                                         <span class="input-group-text">min</span>
                                     </div>
                                 </div>
                                 <div class="col-6">
                                     <label class="form-label small fw-semibold text-secondary mb-1">Max Token Cap</label>
-                                    <input type="number" name="max_tokens" class="form-control form-control-sm" value="50">
+                                    <input type="number" name="max_tokens" id="max_tokens" class="form-control form-control-sm" value="50">
                                 </div>
                             </div>
-                            <button type="submit" class="btn btn-primary btn-sm w-100 fw-semibold">
-                                <i class="bi bi-calendar-plus me-1"></i> Save Availability Slot(s)
-                            </button>
+                            <div class="d-flex gap-2">
+                                <button type="reset" class="btn btn-light btn-sm border flex-fill" onclick="resetSchForm()">Reset</button>
+                                <button type="submit" id="btnSchSubmit" class="btn btn-primary btn-sm flex-fill fw-semibold">
+                                    <i class="bi bi-calendar-plus me-1"></i> Save Availability Slot(s)
+                                </button>
+                            </div>
                         </form>
                     </div>
                 </div>
@@ -458,8 +547,9 @@ require_once __DIR__ . '/layout_header.php';
                                                     <span class="badge bg-dark"><?= $s['max_tokens'] ?> tokens</span>
                                                     <small class="text-muted d-block"><?= $s['avg_consult_time_mins'] ?> min/pt</small>
                                                 </td>
-                                                <td class="text-end pe-3">
-                                                    <a href="?del_sch=<?= $s['id'] ?>" onclick="return confirm('Delete this availability schedule?')" class="btn btn-outline-danger btn-sm py-0 px-2"><i class="bi bi-trash"></i></a>
+                                                <td class="text-end pe-3 text-nowrap">
+                                                    <a href="javascript:void(0);" onclick='editSchedule(<?= htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8') ?>)' class="btn btn-outline-primary btn-sm py-0 px-2 me-1" title="Edit Schedule"><i class="bi bi-pencil"></i></a>
+                                                    <a href="?del_sch=<?= $s['id'] ?>" onclick="return confirm('Delete this availability schedule?')" class="btn btn-outline-danger btn-sm py-0 px-2" title="Delete Schedule"><i class="bi bi-trash"></i></a>
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
@@ -474,7 +564,150 @@ require_once __DIR__ . '/layout_header.php';
     </div>
 </div>
 
+
+<!-- AJAX MODALS -->
+
+<!-- Add Department Modal -->
+<div class="modal fade" id="addDeptModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content shadow">
+            <div class="modal-header bg-light py-2 px-3 border-bottom">
+                <h6 class="modal-title fw-bold text-primary"><i class="bi bi-building"></i> Add Department</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form onsubmit="submitAjaxForm(event, 'add_dept', 'department_id')">
+                <div class="modal-body p-3">
+                    <div class="row g-2 mb-3">
+                        <div class="col-8">
+                            <label class="form-label small text-secondary fw-semibold mb-1">Department Name *</label>
+                            <input type="text" name="dept_name" class="form-control form-control-sm" placeholder="E.G. Cardiology" required>
+                        </div>
+                        <div class="col-4">
+                            <label class="form-label small text-secondary fw-semibold mb-1">Prefix *</label>
+                            <input type="text" name="dept_prefix" class="form-control form-control-sm text-uppercase" placeholder="CARD" required>
+                        </div>
+                    </div>
+                    <div class="form-check form-switch m-0 border-bottom pb-3">
+                        <input class="form-check-input" type="checkbox" name="status" id="deptStatus" checked>
+                        <label class="form-check-label small fw-semibold text-secondary" for="deptStatus">Active Status</label>
+                    </div>
+                </div>
+                <div class="modal-footer p-2 bg-light d-flex justify-content-between border-top-0">
+                    <button type="reset" class="btn btn-light border btn-sm">Reset</button>
+                    <button type="submit" class="btn btn-primary btn-sm fw-semibold">Save Department</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add Qualification Modal -->
+<div class="modal fade" id="addQualModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content shadow">
+            <div class="modal-header bg-light py-2 px-3 border-bottom">
+                <h6 class="modal-title fw-bold text-primary"><i class="bi bi-award"></i> Add Qualification</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form onsubmit="submitAjaxForm(event, 'add_qual', 'qualification_id')">
+                <div class="modal-body p-3">
+                    <div class="mb-3">
+                        <label class="form-label small text-secondary fw-semibold mb-1">Qualification Name *</label>
+                        <input type="text" name="qualification_name" class="form-control form-control-sm text-uppercase" placeholder="MBBS, MD" required>
+                    </div>
+                    <div class="form-check form-switch m-0 border-bottom pb-3">
+                        <input class="form-check-input" type="checkbox" name="status" id="qualStatus" checked>
+                        <label class="form-check-label small fw-semibold text-secondary" for="qualStatus">Active Status</label>
+                    </div>
+                </div>
+                <div class="modal-footer p-2 bg-light d-flex justify-content-between border-top-0">
+                    <button type="reset" class="btn btn-light border btn-sm">Reset</button>
+                    <button type="submit" class="btn btn-primary btn-sm fw-semibold">Save Qualification</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add Specialization Modal -->
+<div class="modal fade" id="addSpecModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content shadow">
+            <div class="modal-header bg-light py-2 px-3 border-bottom">
+                <h6 class="modal-title fw-bold text-primary"><i class="bi bi-star"></i> Add Specialization</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form onsubmit="submitAjaxForm(event, 'add_spec', 'specialization_id')">
+                <div class="modal-body p-3">
+                    <div class="mb-3">
+                        <label class="form-label small text-secondary fw-semibold mb-1">Specialization Name *</label>
+                        <input type="text" name="specialization_name" class="form-control form-control-sm text-capitalize" placeholder="Cardiologist" required>
+                    </div>
+                    <div class="form-check form-switch m-0 border-bottom pb-3">
+                        <input class="form-check-input" type="checkbox" name="status" id="specStatus" checked>
+                        <label class="form-check-label small fw-semibold text-secondary" for="specStatus">Active Status</label>
+                    </div>
+                </div>
+                <div class="modal-footer p-2 bg-light d-flex justify-content-between border-top-0">
+                    <button type="reset" class="btn btn-light border btn-sm">Reset</button>
+                    <button type="submit" class="btn btn-primary btn-sm fw-semibold">Save Specialization</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <script>
+// --- SCHEDULING FORM LOGIC ---
+function editSchedule(s) {
+    document.getElementById('edit_sch_id').value = s.id;
+    document.getElementById('sch_doctor_id').value = s.doctor_id;
+    
+    // Uncheck all checkboxes first
+    document.querySelectorAll('.day-checkbox').forEach(cb => cb.checked = false);
+    document.getElementById('selectAllDays').checked = false;
+    
+    // Check the specific day matching the selected schedule
+    document.querySelectorAll('.day-checkbox').forEach(cb => {
+        if(cb.value.toLowerCase() === s.day_of_week.toLowerCase()) {
+            cb.checked = true;
+        }
+    });
+
+    document.getElementById('shift_name').value = s.shift_name;
+    // Extracting just HH:mm for the time inputs if the DB returns HH:mm:ss
+    document.getElementById('start_time').value = s.start_time.substring(0, 5);
+    document.getElementById('end_time').value = s.end_time.substring(0, 5);
+    
+    document.getElementById('avg_consult_time_mins').value = s.avg_consult_time_mins;
+    document.getElementById('max_tokens').value = s.max_tokens;
+
+    document.getElementById('schFormTitle').innerHTML = '<i class="bi bi-pencil-square text-warning me-1"></i> Edit Availability Slot';
+    document.getElementById('btnSchSubmit').innerHTML = '<i class="bi bi-check2-circle me-1"></i> Update Slot';
+    
+    // Scroll to form smoothly
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function resetSchForm() {
+    document.getElementById('edit_sch_id').value = '0';
+    document.getElementById('sch_doctor_id').value = '';
+    
+    document.querySelectorAll('.day-checkbox').forEach(cb => cb.checked = false);
+    document.getElementById('selectAllDays').checked = false;
+    
+    document.getElementById('shift_name').value = 'Morning';
+    document.getElementById('start_time').value = '09:00';
+    document.getElementById('end_time').value = '13:00';
+    document.getElementById('avg_consult_time_mins').value = '10';
+    document.getElementById('max_tokens').value = '50';
+
+    document.getElementById('schFormTitle').innerHTML = '<i class="bi bi-clock-history text-primary me-1"></i> Map Availability Slot';
+    document.getElementById('btnSchSubmit').innerHTML = '<i class="bi bi-calendar-plus me-1"></i> Save Availability Slot(s)';
+}
+
+
+// --- OTHER EXISTING LOGIC ---
 function toggleAllDays(source) {
     document.querySelectorAll('.day-checkbox').forEach(cb => cb.checked = source.checked);
 }
@@ -492,6 +725,57 @@ document.getElementById('filterSchedules')?.addEventListener('keyup', function()
         r.style.display = r.innerText.toLowerCase().includes(q) ? '' : 'none';
     });
 });
+
+function submitAjaxForm(e, actionType, dropdownId) {
+    e.preventDefault();
+    let form = e.target;
+    let formData = new FormData(form);
+    formData.append('ajax_action', actionType);
+    
+    let btn = form.querySelector('button[type="submit"]');
+    let oldHtml = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
+    btn.disabled = true;
+
+    fetch(window.location.href, {
+        method: 'POST',
+        body: formData
+    })
+    .then(res => res.json())
+    .then(data => {
+        if(data.success) {
+            let select = document.getElementById(dropdownId);
+            let option = new Option(data.name, data.id, true, true);
+            select.appendChild(option);
+            
+            let modalInstance = bootstrap.Modal.getInstance(form.closest('.modal'));
+            modalInstance.hide();
+            form.reset();
+            
+            if(typeof Swal !== 'undefined') {
+                Swal.fire({
+                    icon: 'success',
+                    title: 'Added Successfully',
+                    toast: true,
+                    position: 'top-end',
+                    showConfirmButton: false,
+                    timer: 2000
+                });
+            } else {
+                alert("Added Successfully!");
+            }
+        } else {
+            alert('Error: ' + data.error);
+        }
+    })
+    .catch(err => {
+        alert('Something went wrong during submission!');
+    })
+    .finally(() => {
+        btn.innerHTML = oldHtml;
+        btn.disabled = false;
+    });
+}
 
 function editDoc(d) {
     document.getElementById('doc_edit_id').value = d.id;
