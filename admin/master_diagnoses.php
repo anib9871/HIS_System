@@ -107,6 +107,7 @@ require_once __DIR__ . '/layout_header.php';
 ?>
 
 <div class="row g-3">
+    <!-- ADD/EDIT DIAGNOSIS FORM -->
     <div class="col-lg-5">
         <div class="card border shadow-sm">
             <div class="card-header bg-white py-2 px-3 border-bottom">
@@ -187,6 +188,7 @@ require_once __DIR__ . '/layout_header.php';
         </div>
     </div>
 
+    <!-- DIAGNOSES LIST TABLE -->
     <div class="col-lg-7">
         <div class="card border shadow-sm">
             <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
@@ -194,14 +196,24 @@ require_once __DIR__ . '/layout_header.php';
                     <i class="bi bi-list-task text-primary me-1"></i> DIAGNOSES LIST
                 </span>
 
-                <span class="badge bg-light text-secondary border">
-                    <?= count($diagnoses) ?> RECORDS
-                </span>
+                <div class="d-flex align-items-center gap-2">
+                    <input 
+                        type="search" 
+                        id="searchDiagnosis" 
+                        class="form-control form-control-sm" 
+                        placeholder="Search diagnoses..." 
+                        style="width: 200px;"
+                        onkeyup="filterDiagnoses()"
+                    >
+                    <span class="badge bg-light text-secondary border">
+                        <?= count($diagnoses) ?> RECORDS
+                    </span>
+                </div>
             </div>
 
             <div class="card-body p-0">
                 <div class="table-responsive" style="max-height: 70vh; overflow-y: auto;">
-                    <table class="table table-hover align-middle mb-0 small">
+                    <table class="table table-hover align-middle mb-0 small" id="diagnosesTable">
                         <thead class="table-light sticky-top">
                             <tr>
                                 <th class="ps-3" style="width: 60px;">#</th>
@@ -213,9 +225,9 @@ require_once __DIR__ . '/layout_header.php';
                             </tr>
                         </thead>
 
-                        <tbody>
+                        <tbody id="diagnosesTableBody">
                             <?php if (empty($diagnoses)): ?>
-                                <tr>
+                                <tr id="noRecordsRow">
                                     <td colspan="6" class="text-center py-4 text-muted">
                                         NO DIAGNOSES FOUND.
                                     </td>
@@ -277,6 +289,41 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// Real-time table search filter
+function filterDiagnoses() {
+    let input = document.getElementById('searchDiagnosis');
+    let filter = input.value.toUpperCase();
+    let tbody = document.getElementById('diagnosesTableBody');
+    let tr = tbody.getElementsByTagName('tr');
+
+    for (let i = 0; i < tr.length; i++) {
+        // Skip the "No Records" placeholder if it exists
+        if (tr[i].id === 'noRecordsRow') continue;
+
+        // Columns for Diagnosis Name, Code, and Description
+        let tdName = tr[i].getElementsByTagName('td')[1];
+        let tdCode = tr[i].getElementsByTagName('td')[2];
+        let tdDesc = tr[i].getElementsByTagName('td')[3];
+
+        if (tdName || tdCode || tdDesc) {
+            let txtName = tdName.textContent || tdName.innerText;
+            let txtCode = tdCode.textContent || tdCode.innerText;
+            let txtDesc = tdDesc.textContent || tdDesc.innerText;
+
+            if (
+                txtName.toUpperCase().indexOf(filter) > -1 || 
+                txtCode.toUpperCase().indexOf(filter) > -1 || 
+                txtDesc.toUpperCase().indexOf(filter) > -1
+            ) {
+                tr[i].style.display = "";
+            } else {
+                tr[i].style.display = "none";
+            }
+        }       
+    }
+}
+
+// Populate form for editing
 function editRow(d) {
     document.getElementById('edit_id').value = d.id;
     document.getElementById('diagnosis_name').value = d.diagnosis_name || '';
@@ -291,6 +338,7 @@ function editRow(d) {
     document.getElementById('diagnosis_name').focus();
 }
 
+// Reset form to Add mode
 function resetForm() {
     document.getElementById('edit_id').value = '0';
 
