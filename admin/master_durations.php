@@ -102,7 +102,7 @@ if (isset($_GET['toggle_status'])) {
     exit;
 }
 
-// List
+// List - Fetching all records for instant JS filtering
 $durations = $tenant_pdo->prepare("
     SELECT *
     FROM master_durations
@@ -199,19 +199,21 @@ require_once __DIR__ . '/layout_header.php';
 
     <div class="col-lg-7">
         <div class="card border shadow-sm">
-            <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
+            <div class="card-header bg-white py-2 px-3 border-bottom d-flex flex-wrap justify-content-between align-items-center gap-2">
                 <span class="fw-bold small text-dark">
                     <i class="bi bi-list-task text-primary me-1"></i> DURATIONS LIST
                 </span>
 
-                <span class="badge bg-light text-secondary border">
-                    <?= count($durations) ?> RECORDS
-                </span>
+                <!-- Instant Search Bar -->
+                <div class="input-group input-group-sm" style="max-width: 250px;">
+                    <span class="input-group-text bg-light border"><i class="bi bi-search"></i></span>
+                    <input type="text" id="liveSearch" class="form-control" placeholder="Type to search instantly...">
+                </div>
             </div>
 
             <div class="card-body p-0">
                 <div class="table-responsive" style="max-height: 70vh; overflow-y: auto;">
-                    <table class="table table-hover align-middle mb-0 small">
+                    <table class="table table-hover align-middle mb-0 small" id="durationTable">
                         <thead class="table-light sticky-top">
                             <tr>
                                 <th class="ps-3" style="width: 60px;">#</th>
@@ -223,7 +225,7 @@ require_once __DIR__ . '/layout_header.php';
                             </tr>
                         </thead>
 
-                        <tbody>
+                        <tbody id="durationTbody">
                             <?php if (empty($durations)): ?>
                                 <tr>
                                     <td colspan="6" class="text-center py-4 text-muted">
@@ -233,8 +235,8 @@ require_once __DIR__ . '/layout_header.php';
                             <?php else: ?>
                                 <?php foreach ($durations as $d): ?>
                                     <?php $is_act = (int)$d['status'] === 1; ?>
-
-                                    <tr>
+                                    <!-- Added 'searchable-row' class for JS filtering -->
+                                    <tr class="searchable-row">
                                         <td class="ps-3 font-monospace">#<?= (int)$d['id'] ?></td>
 
                                         <td class="fw-bold text-dark text-uppercase">
@@ -279,6 +281,13 @@ require_once __DIR__ . '/layout_header.php';
                                     </tr>
                                 <?php endforeach; ?>
                             <?php endif; ?>
+                            
+                            <!-- Row to show when JS search yields no results -->
+                            <tr id="noResultsJs" style="display: none;">
+                                <td colspan="6" class="text-center py-4 text-muted">
+                                    NO MATCHING RECORDS FOUND.
+                                </td>
+                            </tr>
                         </tbody>
                     </table>
                 </div>
@@ -288,6 +297,34 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// Live Search Logic
+document.getElementById('liveSearch').addEventListener('input', function() {
+    let filter = this.value.toLowerCase();
+    let rows = document.querySelectorAll('.searchable-row');
+    let hasVisible = false;
+
+    rows.forEach(row => {
+        let text = row.innerText.toLowerCase();
+        if (text.includes(filter)) {
+            row.style.display = '';
+            hasVisible = true;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+
+    // Toggle 'No records found' message if needed
+    let noResultsJs = document.getElementById('noResultsJs');
+    if(noResultsJs) {
+        if(!hasVisible && rows.length > 0) {
+            noResultsJs.style.display = '';
+        } else {
+            noResultsJs.style.display = 'none';
+        }
+    }
+});
+
+// Edit Form Logic
 function editRow(d) {
     document.getElementById('edit_id').value = d.id;
     document.getElementById('duration_name').value = d.duration_name || '';
