@@ -77,13 +77,16 @@ $rx_diagnoses = [];
 $rx_investigations = [];
 $rx_advices = [];
 $rx_vitals = [];
+$rx_frequencies = [];
+$rx_units = [];
+$rx_meals = [];
 
 try {
     $st = $tenant_pdo->prepare("
         SELECT
             template_id, template_name, department_id, specialization_id, doctor_id,
             default_symptoms, default_diagnosis, default_investigations, default_advice,
-            follow_up_days, vital_id, custom_fields_schema
+            follow_up_days, default_vitals, custom_fields_schema
         FROM prescription_template_master
         WHERE org_id = ? AND center_id = ? AND status = 1
         ORDER BY template_name
@@ -158,6 +161,24 @@ try {
     $rx_vitals = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
 } catch (Throwable $e) {}
 
+try {
+    $st = $tenant_pdo->prepare("SELECT id, frequency_name FROM frequency_master WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY frequency_name");
+    $st->execute([$org_id, $center_id]);
+    $rx_frequencies = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (Throwable $e) {}
+
+try {
+    $st = $tenant_pdo->prepare("SELECT id, unit_name FROM master_units WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY unit_name");
+    $st->execute([$org_id, $center_id]);
+    $rx_units = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (Throwable $e) {}
+
+try {
+    $st = $tenant_pdo->prepare("SELECT id, meal_name FROM master_meals WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY meal_name");
+    $st->execute([$org_id, $center_id]);
+    $rx_meals = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (Throwable $e) {}
+
 /* ==========================================================
    AJAX: ADD MASTER VALUE DIRECTLY FROM DOCTOR DESK
    ========================================================== */
@@ -166,7 +187,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $_POST['aj
 
     $master_type = trim((string)($_POST['master_type'] ?? ''));
     $value       = strtoupper(trim((string)($_POST['value'] ?? '')));
-    $strength    = strtoupper(trim((string)($_POST['strength'] ?? '')));
+
+    if ($master_type === 'medicine_full') {
+        $name = trim(strtoupper($_POST['name'] ?? ''));
+        $strength = trim($_POST['strength'] ?? '');
+        $generic = trim($_POST['generic'] ?? '');
+        $frequency_id = !empty($_POST['frequency_id']) ? (int)$_POST['frequency_id'] : null;
+        $unit_id = !empty($_POST['unit_id']) ? (int)$_POST['unit_id'] : null;
+        $meal_id = !empty($_POST['meal_id']) ? (int)$_POST['meal_id'] : null;
+        $duration_id = !empty($_POST['duration_id']) ? (int)$_POST['duration_id'] : null;
+        $qty = trim($_POST['qty'] ?? '');
+        $manufacturer = trim($_POST['manufacturer'] ?? '');
+        $category = trim($_POST['category'] ?? '');
+        $status = (isset($_POST['status']) && $_POST['status'] === '1') ? 1 : 0;
+
+        if ($name === '') {
+            echo json_encode(['ok' => false, 'message' => 'Medicine Name is required.']);
+            exit;
+        }
+
+        try {
+            $st = $tenant_pdo->prepare("
+                INSERT INTO master_medicines 
+                (org_id, center_id, medicine_name, generic_name, strength, frequency_id, unit_id, meal_id, default_qty, default_duration_id, manufacturer, category, status, created_by) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ");
+            $st->execute([$org_id, $center_id, $name, $generic, $strength, $frequency_id, $unit_id, $meal_id, $qty, $duration_id, $manufacturer, $category, $status, $user_id]);
+            echo json_encode(['ok' => true, 'message' => 'Added successfully!']);
+        } catch (Throwable $e) {
+            echo json_encode(['ok' => false, 'message' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    if (in_array($master_type, ['frequency', 'unit', 'meal', 'duration', 'vital'])) {
+        try {
+            if ($value === '') throw new Exception('Name cannot be empty.');
+            if ($master_type === 'frequency') {
+                $st = $tenant_pdo->prepare("INSERT INTO frequency_master (org_id, center_id, frequency_name, status, created_by) VALUES (?, ?, ?, 1, ?)");
+                $st->execute([$org_id, $center_id, $value, $user_id]);
+            } elseif ($master_type === 'unit') {
+                $st = $tenant_pdo->prepare("INSERT INTO master_units (org_id, center_id, unit_name, status, created_by) VALUES (?, ?, ?, 1, ?)");
+                $st->execute([$org_id, $center_id, $value, $user_id]);
+            } elseif ($master_type === 'meal') {
+                $st = $tenant_pdo->prepare("INSERT INTO master_meals (org_id, center_id, meal_name, status, created_by) VALUES (?, ?, ?, 1, ?)");
+                $st->execute([$org_id, $center_id, $value, $user_id]);
+            } elseif ($master_type === 'duration') {
+                $st = $tenant_pdo->prepare("INSERT INTO master_durations (org_id, center_id, duration_name, status, created_by) VALUES (?, ?, ?, 1, ?)");
+                $st->execute([$org_id, $center_id, $value, $user_id]);
+            } elseif ($master_type === 'vital') {
+                $key = strtolower(preg_replace('/[^a-z0-9]+/i', '_', $value));
+                $key = trim($key, '_');
+                $st = $tenant_pdo->prepare("INSERT INTO master_vitals (org_id, center_id, vital_name, vital_key, status, created_by) VALUES (?, ?, ?, ?, 1, ?)");
+                $st->execute([$org_id, $center_id, $value, $key, $user_id]);
+            }
+            echo json_encode(['ok' => true, 'message' => 'Added successfully!']);
+        } catch (Throwable $e) {
+            echo json_encode(['ok' => false, 'message' => $e->getMessage()]);
+        }
+        exit;
+    }
 
     $allowed = [
         'symptom'       => 'master_symptoms',
@@ -200,7 +280,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $_POST['aj
             exit;
         }
 
-        // MEDICINE MASTER
+        // MEDICINE MASTER (LEGACY BACKUP)
+        $strength    = strtoupper(trim((string)($_POST['strength'] ?? '')));
         $find = $tenant_pdo->prepare("SELECT id, medicine_name, strength, unit_id, meal_id, default_qty, default_duration_id FROM {$table} WHERE org_id = ? AND center_id = ? AND LOWER(medicine_name) = LOWER(?) LIMIT 1");
         $find->execute([$org_id, $center_id, $value]);
         $existing = $find->fetch(PDO::FETCH_ASSOC);
@@ -226,7 +307,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $_POST['aj
 }
 
 /* ==========================================================
-   AJAX: TEMPLATE DETAILS
+   AJAX: GET TEMPLATE
    ========================================================== */
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_prescription_template') {
     header('Content-Type: application/json; charset=utf-8');
@@ -234,7 +315,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_prescription_template') {
 
     try {
         $st = $tenant_pdo->prepare("
-            SELECT template_id, template_name, default_symptoms, default_diagnosis, default_investigations, default_advice, follow_up_days, vital_id, custom_fields_schema
+            SELECT template_id, template_name, default_symptoms, default_diagnosis, default_investigations, default_advice, follow_up_days, default_vitals, custom_fields_schema
             FROM prescription_template_master
             WHERE template_id = ? AND org_id = ? AND center_id = ? AND status = 1 LIMIT 1
         ");
@@ -282,6 +363,82 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_prescription_template') {
         $template['items'] = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
         echo json_encode(['ok' => true, 'template' => $template], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        echo json_encode(['ok' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
+}
+
+/* ==========================================================
+   AJAX: REFRESH MASTERS
+   ========================================================== */
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_masters') {
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        $st_sym = $tenant_pdo->prepare("SELECT id, symptom_name FROM master_symptoms WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY symptom_name");
+        $st_sym->execute([$org_id, $center_id]);
+        $symptoms = $st_sym->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $st_diag = $tenant_pdo->prepare("SELECT id, diagnosis_name FROM master_diagnoses WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY diagnosis_name");
+        $st_diag->execute([$org_id, $center_id]);
+        $diagnoses = $st_diag->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $st_inv = $tenant_pdo->prepare("SELECT id, investigation_name FROM master_investigations WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY investigation_name");
+        $st_inv->execute([$org_id, $center_id]);
+        $investigations = $st_inv->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $st_adv = $tenant_pdo->prepare("SELECT id, advice_name FROM master_advices WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY advice_name");
+        $st_adv->execute([$org_id, $center_id]);
+        $advices = $st_adv->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $st_vit = $tenant_pdo->prepare("SELECT id, vital_name, vital_key, unit, placeholder, sort_order FROM master_vitals WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY sort_order ASC, vital_name ASC");
+        $st_vit->execute([$org_id, $center_id]);
+        $vitals = $st_vit->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $st_freq = $tenant_pdo->prepare("SELECT id, frequency_name FROM frequency_master WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY frequency_name");
+        $st_freq->execute([$org_id, $center_id]);
+        $frequencies = $st_freq->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $st_unit = $tenant_pdo->prepare("SELECT id, unit_name FROM master_units WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY unit_name");
+        $st_unit->execute([$org_id, $center_id]);
+        $units = $st_unit->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $st_meal = $tenant_pdo->prepare("SELECT id, meal_name FROM master_meals WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY meal_name");
+        $st_meal->execute([$org_id, $center_id]);
+        $meals = $st_meal->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $st_dur = $tenant_pdo->prepare("SELECT id, duration_name FROM master_durations WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY duration_name");
+        $st_dur->execute([$org_id, $center_id]);
+        $durations = $st_dur->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $st_med = $tenant_pdo->prepare("
+            SELECT mm.id, mm.medicine_name, mm.generic_name, mm.strength, mm.frequency_id, mm.unit_id, mm.meal_id, 
+                   mm.default_qty, mm.default_duration_id, mm.dosage_form, mm.manufacturer, mm.category, 
+                   mu.unit_name, meal.meal_name, md.duration_name, fm.frequency_name, fm.frequency_code, mm.status AS medicine_status
+            FROM master_medicines mm
+            LEFT JOIN master_units mu ON mu.id = mm.unit_id
+            LEFT JOIN master_meals meal ON meal.id = mm.meal_id
+            LEFT JOIN master_durations md ON md.id = mm.default_duration_id
+            LEFT JOIN frequency_master fm ON fm.id = mm.frequency_id
+            WHERE mm.org_id = ? AND mm.center_id = ? AND mm.status = 1
+            ORDER BY mm.medicine_name
+        ");
+        $st_med->execute([$org_id, $center_id]);
+        $medicines = $st_med->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        echo json_encode([
+            'ok' => true,
+            'symptoms' => $symptoms,
+            'diagnoses' => $diagnoses,
+            'investigations' => $investigations,
+            'advices' => $advices,
+            'vitals' => $vitals,
+            'frequencies' => $frequencies,
+            'units' => $units,
+            'meals' => $meals,
+            'durations' => $durations,
+            'medicines' => $medicines
+        ], JSON_UNESCAPED_UNICODE);
     } catch (Throwable $e) {
         echo json_encode(['ok' => false, 'message' => $e->getMessage()]);
     }
@@ -558,7 +715,7 @@ if ($selected_visit_id > 0) {
             $selected_template_vital_id = '';
             try {
                 $schemaStmt = $tenant_pdo->prepare("
-                    SELECT custom_fields_schema, vital_id
+                    SELECT custom_fields_schema, default_vitals
                     FROM prescription_template_master
                     WHERE org_id = ? AND center_id = ? AND status = 1
                       AND (doctor_id = ? OR department_id = ? OR (doctor_id IS NULL AND department_id IS NULL))
@@ -569,7 +726,7 @@ if ($selected_visit_id > 0) {
                 $schemaRow = $schemaStmt->fetch(PDO::FETCH_ASSOC) ?: [];
                 $schemaRaw = $schemaRow['custom_fields_schema'] ?? '';
                 $selected_custom_fields_schema = json_decode((string)$schemaRaw, true) ?: [];
-                $selected_template_vital_id = (string)($schemaRow['vital_id'] ?? '');
+                $selected_template_vital_id = (string)($schemaRow['default_vitals'] ?? '');
             } catch (Throwable $e) {}
 
             $rxSource = !empty($selected['prescription_json']) ? $selected['prescription_json'] : ($selected['prescription'] ?? '');
@@ -1021,7 +1178,7 @@ input[type="number"], textarea { text-transform: none; }
                                     </div>
                                     <div class="master-search-row mb-2">
                                         <input type="text" id="symptomSearch" class="form-control form-control-sm" list="symptomMasterList" placeholder="SEARCH / SELECT SYMPTOM" autocomplete="off" onkeydown="masterSearchKey(event,'symptom')" onchange="selectMasterFromSearch('symptom')">
-                                        <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="openMasterAddModal('symptom')">+ ADD</button>
+                                        <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="openQuickAdd('symptom', 'ADD SYMPTOM')">+ ADD</button>
                                     </div>
                                     <div id="symptomSelected" class="master-chip-wrap"></div>
                                     <datalist id="symptomMasterList">
@@ -1038,7 +1195,7 @@ input[type="number"], textarea { text-transform: none; }
                                     </div>
                                     <div class="master-search-row mb-2">
                                         <input type="text" id="diagnosisSearch" class="form-control form-control-sm" list="diagnosisMasterList" placeholder="SEARCH / SELECT DIAGNOSIS" autocomplete="off" onkeydown="masterSearchKey(event,'diagnosis')" onchange="selectMasterFromSearch('diagnosis')">
-                                        <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="openMasterAddModal('diagnosis')">+ ADD</button>
+                                        <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="openQuickAdd('diagnosis', 'ADD DIAGNOSIS')">+ ADD</button>
                                     </div>
                                     <div id="diagnosisSelected" class="master-chip-wrap"></div>
                                     <datalist id="diagnosisMasterList">
@@ -1057,7 +1214,7 @@ input[type="number"], textarea { text-transform: none; }
                                     </div>
                                     <div class="master-search-row mb-2">
                                         <input type="text" id="investigationSearch" class="form-control form-control-sm" list="investigationMasterList" placeholder="SEARCH / SELECT INVESTIGATION" autocomplete="off" onkeydown="masterSearchKey(event,'investigation')" onchange="selectMasterFromSearch('investigation')">
-                                        <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="openMasterAddModal('investigation')">+ ADD</button>
+                                        <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="openQuickAdd('investigation', 'ADD INVESTIGATION')">+ ADD</button>
                                     </div>
                                     <div id="investigationSelected" class="master-chip-wrap"></div>
                                     <datalist id="investigationMasterList">
@@ -1074,7 +1231,7 @@ input[type="number"], textarea { text-transform: none; }
                                     </div>
                                     <div class="master-search-row mb-2">
                                         <input type="text" id="adviceSearch" class="form-control form-control-sm" list="adviceMasterList" placeholder="SEARCH / SELECT ADVICE" autocomplete="off" onkeydown="masterSearchKey(event,'advice')" onchange="selectMasterFromSearch('advice')">
-                                        <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="openMasterAddModal('advice')">+ ADD</button>
+                                        <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="openQuickAdd('advice', 'ADD ADVICE')">+ ADD</button>
                                     </div>
                                     <div id="adviceSelected" class="master-chip-wrap"></div>
                                     <datalist id="adviceMasterList">
@@ -1099,9 +1256,17 @@ input[type="number"], textarea { text-transform: none; }
                     <div class="tab-pane fade" id="meds-pane" role="tabpanel">
                         <div class="d-flex justify-content-between align-items-center mb-3">
                             <div class="dd-section-title mb-0">MEDICINE LIST</div>
-                            <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="addMedicine({})">
-                                <i class="bi bi-plus-lg me-1"></i>ADD MEDICINE ROW
-                            </button>
+                            <div>
+                                <button type="button" class="btn btn-sm btn-outline-secondary fw-bold me-1" onclick="refreshMasterData()" title="Refresh Masters">
+                                    <i class="bi bi-arrow-clockwise"></i> REFRESH
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-success fw-bold me-1" onclick="openAddMedicineModal()" title="Add New Medicine">
+                                    <i class="bi bi-plus-circle"></i> NEW
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-primary fw-bold" onclick="addMedicine({})">
+                                    <i class="bi bi-plus-lg me-1"></i> ADD MEDICINE
+                                </button>
+                            </div>
                         </div>
                         
                         <!-- UPDATED MEDICINE HEADERS FOR SINGLE LINE WIDE LAYOUT -->
@@ -1143,6 +1308,128 @@ input[type="number"], textarea { text-transform: none; }
 
                     </form>
                 <?php endif; ?>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- NEW ADVANCED MEDICINE ADD MODAL -->
+<!-- Removed tabindex="-1" to prevent focus trapping issues when Quick Add Modal opens on top -->
+<div class="modal fade" id="addMedicineModal" aria-hidden="true" style="z-index: 1060;">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header py-2 bg-light">
+                <h6 class="modal-title fw-bold text-primary"><i class="bi bi-capsule me-2"></i>ADD MEDICINE</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="newMedicineForm">
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            <label class="form-label small fw-bold">MEDICINE NAME *</label>
+                            <input type="text" class="form-control form-control-sm border-primary text-uppercase" id="new_med_name" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-bold">STRENGTH</label>
+                            <input type="text" class="form-control form-control-sm text-uppercase" id="new_med_strength">
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">GENERIC / SALT</label>
+                            <input type="text" class="form-control form-control-sm text-uppercase" id="new_med_generic">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">FREQUENCY</label>
+                            <div class="input-group input-group-sm">
+                                <select class="form-select" id="new_med_freq">
+                                    <option value="">SELECT</option>
+                                    <?php foreach ($rx_frequencies as $f): ?><option value="<?= $f['id'] ?>"><?= htmlspecialchars($f['frequency_name']) ?></option><?php endforeach; ?>
+                                </select>
+                                <button class="btn btn-outline-secondary px-2" type="button" onclick="refreshMasterData()" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+                                <button class="btn btn-outline-secondary px-2" type="button" onclick="openQuickAdd('frequency', 'ADD FREQUENCY')" title="Add New"><i class="bi bi-plus-lg"></i></button>
+                            </div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">UNIT / FORM</label>
+                            <div class="input-group input-group-sm">
+                                <select class="form-select" id="new_med_unit">
+                                    <option value="">SELECT</option>
+                                    <?php foreach ($rx_units as $u): ?><option value="<?= $u['id'] ?>"><?= htmlspecialchars($u['unit_name']) ?></option><?php endforeach; ?>
+                                </select>
+                                <button class="btn btn-outline-secondary px-2" type="button" onclick="refreshMasterData()" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+                                <button class="btn btn-outline-secondary px-2" type="button" onclick="openQuickAdd('unit', 'ADD UNIT / FORM')" title="Add New"><i class="bi bi-plus-lg"></i></button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">MEAL TIMING</label>
+                            <div class="input-group input-group-sm">
+                                <select class="form-select" id="new_med_meal">
+                                    <option value="">SELECT</option>
+                                    <?php foreach ($rx_meals as $m): ?><option value="<?= $m['id'] ?>"><?= htmlspecialchars($m['meal_name']) ?></option><?php endforeach; ?>
+                                </select>
+                                <button class="btn btn-outline-secondary px-2" type="button" onclick="refreshMasterData()" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+                                <button class="btn btn-outline-secondary px-2" type="button" onclick="openQuickAdd('meal', 'ADD MEAL TIMING')" title="Add New"><i class="bi bi-plus-lg"></i></button>
+                            </div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">DEFAULT QTY</label>
+                            <input type="text" class="form-control form-control-sm text-uppercase" id="new_med_qty" placeholder="E.G. 1">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">DURATION</label>
+                            <div class="input-group input-group-sm">
+                                <select class="form-select" id="new_med_duration">
+                                    <option value="">SELECT</option>
+                                    <?php foreach ($rx_durations as $d): ?><option value="<?= $d['id'] ?>"><?= htmlspecialchars($d['duration_name']) ?></option><?php endforeach; ?>
+                                </select>
+                                <button class="btn btn-outline-secondary px-2" type="button" onclick="refreshMasterData()" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+                                <button class="btn btn-outline-secondary px-2" type="button" onclick="openQuickAdd('duration', 'ADD DURATION')" title="Add New"><i class="bi bi-plus-lg"></i></button>
+                            </div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">MANUFACTURER</label>
+                            <input type="text" class="form-control form-control-sm text-uppercase" id="new_med_manufacturer">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">CATEGORY</label>
+                            <input type="text" class="form-control form-control-sm text-uppercase" id="new_med_category">
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer py-2 d-flex justify-content-between">
+                <div class="form-check form-switch mt-1">
+                    <input class="form-check-input" type="checkbox" id="new_med_active" checked>
+                    <label class="form-check-label small fw-bold" for="new_med_active">ACTIVE</label>
+                </div>
+                <div>
+                    <button type="button" class="btn btn-sm btn-light border fw-bold me-1" onclick="document.getElementById('newMedicineForm').reset();">RESET</button>
+                    <button type="button" class="btn btn-sm btn-primary fw-bold" onclick="saveMedicineFull()">SAVE</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- QUICK ADD NATIVE MODAL (UNIVERSAL) -->
+<!-- Removed tabindex="-1" to prevent focus freezing -->
+<div class="modal fade" id="quickAddModal" aria-hidden="true" style="z-index: 1070;">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header py-2 bg-light">
+                <h6 class="modal-title fw-bold" id="quickAddTitle">ADD NEW</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="quick_add_type">
+                <label class="form-label small fw-bold">NAME *</label>
+                <input type="text" class="form-control form-control-sm text-uppercase" id="quick_add_name" required>
+            </div>
+            <div class="modal-footer py-1">
+                <button type="button" class="btn btn-sm btn-primary fw-bold w-100" onclick="saveQuickAdd()">SAVE</button>
             </div>
         </div>
     </div>
@@ -1246,35 +1533,6 @@ input[type="number"], textarea { text-transform: none; }
 </div>
 <?php endif; ?>
 
-<!-- MASTER ADD MODAL -->
-<div class="modal fade" id="masterAddModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered modal-sm">
-        <div class="modal-content">
-            <div class="modal-header py-2">
-                <h6 class="modal-title fw-bold" id="masterAddModalTitle">ADD MASTER VALUE</h6>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body p-3">
-                <div class="mb-2">
-                    <label class="form-label small fw-bold" id="masterAddValueLabel">VALUE</label>
-                    <input type="text" id="masterAddValue" class="form-control form-control-sm text-uppercase" autocomplete="off">
-                </div>
-
-                <div class="mb-2" id="masterAddStrengthWrap" style="display:none;">
-                    <label class="form-label small fw-bold">STRENGTH</label>
-                    <input type="text" id="masterAddStrength" class="form-control form-control-sm text-uppercase" placeholder="E.G. 500 MG">
-                </div>
-            </div>
-            <div class="modal-footer py-2">
-                <button type="button" class="btn btn-sm btn-light" data-bs-dismiss="modal">CANCEL</button>
-                <button type="button" class="btn btn-sm btn-primary fw-bold" onclick="submitMasterAddModal()">
-                    <i class="bi bi-plus-lg me-1"></i>ADD
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
 <script>
 function triggerIframePrint() {
     const iframe = document.getElementById('printIframe');
@@ -1282,6 +1540,198 @@ function triggerIframePrint() {
         iframe.contentWindow.focus();
         iframe.contentWindow.print();
     }
+}
+
+function openAddMedicineModal() {
+    document.getElementById('newMedicineForm').reset();
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('addMedicineModal')).show();
+    setTimeout(() => {
+        document.getElementById('new_med_name').focus();
+    }, 300);
+}
+
+async function saveMedicineFull() {
+    const name = document.getElementById('new_med_name').value.trim();
+    if(!name) {
+        alert('Please enter a medicine name.');
+        document.getElementById('new_med_name').focus();
+        return;
+    }
+
+    const formData = new URLSearchParams();
+    formData.append('ajax', 'add_master');
+    formData.append('master_type', 'medicine_full');
+    formData.append('name', name);
+    formData.append('strength', document.getElementById('new_med_strength').value.trim());
+    formData.append('generic', document.getElementById('new_med_generic').value.trim());
+    formData.append('frequency_id', document.getElementById('new_med_freq').value);
+    formData.append('unit_id', document.getElementById('new_med_unit').value);
+    formData.append('meal_id', document.getElementById('new_med_meal').value);
+    formData.append('qty', document.getElementById('new_med_qty').value.trim());
+    formData.append('duration_id', document.getElementById('new_med_duration').value);
+    formData.append('manufacturer', document.getElementById('new_med_manufacturer').value.trim());
+    formData.append('category', document.getElementById('new_med_category').value.trim());
+    formData.append('status', document.getElementById('new_med_active').checked ? '1' : '0');
+
+    try {
+        const response = await fetch('opd_doctor.php', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: formData.toString() });
+        const data = await response.json();
+        if(data.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('addMedicineModal')).hide();
+            document.getElementById('newMedicineForm').reset();
+            refreshMasterData(); 
+            Swal.fire({ icon: 'success', title: 'Added', text: 'MEDICINE ADDED TO MASTER.', timer: 1500, showConfirmButton: false });
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch(e) {
+        console.error(e);
+        alert('Error saving medicine.');
+    }
+}
+
+// UNIVERSAL QUICK ADD - Replaces both old masterAddModal and quickAddModal
+function openQuickAdd(type, title) {
+    document.getElementById('quickAddTitle').textContent = title;
+    document.getElementById('quick_add_type').value = type;
+    document.getElementById('quick_add_name').value = '';
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('quickAddModal')).show();
+    setTimeout(() => {
+        document.getElementById('quick_add_name').focus();
+    }, 300);
+}
+
+async function saveQuickAdd() {
+    const type = document.getElementById('quick_add_type').value;
+    const nameInput = document.getElementById('quick_add_name');
+    const name = nameInput.value.trim();
+
+    if(!name) {
+        alert('Please enter a name.');
+        nameInput.focus();
+        return;
+    }
+
+    const formData = new URLSearchParams();
+    formData.append('ajax', 'add_master');
+    formData.append('master_type', type);
+    formData.append('value', name);
+
+    try {
+        const response = await fetch('opd_doctor.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: formData.toString()
+        });
+        const data = await response.json();
+        if(data.ok) {
+            nameInput.value = '';
+            bootstrap.Modal.getInstance(document.getElementById('quickAddModal')).hide();
+            refreshMasterData();
+            Swal.fire({ icon: 'success', title: 'Added', text: 'ADDED TO MASTER.', timer: 1500, showConfirmButton: false });
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch(e) {
+        console.error(e);
+        alert('Error saving data.');
+    }
+}
+
+async function refreshMasterData() {
+    try {
+        const response = await fetch('opd_doctor.php?ajax=get_masters');
+        const data = await response.json();
+        if (data.ok) {
+            MASTER_SYMPTOMS.length = 0; MASTER_SYMPTOMS.push(...data.symptoms.map(s => s.symptom_name));
+            MASTER_DIAGNOSES.length = 0; MASTER_DIAGNOSES.push(...data.diagnoses.map(d => d.diagnosis_name));
+            MASTER_INVESTIGATIONS.length = 0; MASTER_INVESTIGATIONS.push(...data.investigations.map(i => i.investigation_name));
+            MASTER_ADVICES.length = 0; MASTER_ADVICES.push(...data.advices.map(a => a.advice_name));
+            
+            MASTER_VITALS.length = 0; MASTER_VITALS.push(...data.vitals);
+            MASTER_MEDICINES.length = 0; MASTER_MEDICINES.push(...data.medicines);
+            MASTER_DURATIONS.length = 0; MASTER_DURATIONS.push(...data.durations);
+
+            refreshMasterDatalist('symptom');
+            refreshMasterDatalist('diagnosis');
+            refreshMasterDatalist('investigation');
+            refreshMasterDatalist('advice');
+            
+            updateSelectOptions('new_med_freq', data.frequencies, 'frequency_name', null, 'id');
+            updateSelectOptions('new_med_unit', data.units, 'unit_name', null, 'id');
+            updateSelectOptions('new_med_meal', data.meals, 'meal_name', null, 'id');
+            updateSelectOptions('new_med_duration', data.durations, 'duration_name', null, 'id');
+
+            const vWrap = document.getElementById('vitalsContainer');
+            if(data.vitals && data.vitals.length > 0) {
+                let vHtml = '';
+                const selectedVitals = getSelectedVitals();
+                data.vitals.forEach(vital => {
+                    let vitalKey = (vital.vital_key || '').trim();
+                    let vitalName = (vital.vital_name || '').trim();
+                    let vitalUnit = (vital.unit || '').trim();
+                    let vitalPlaceholder = (vital.placeholder || '').trim();
+                    if (!vitalKey) {
+                        vitalKey = vitalName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+                    }
+                    
+                    const isChecked = selectedVitals.includes(vitalKey) ? 'checked' : '';
+                    
+                    vHtml += `<div class="col-6 col-md-3 col-lg-2">
+                        <div class="form-check vital-option border rounded h-100">
+                            <input class="form-check-input template-vital-check" type="checkbox" value="${esc(vitalKey)}" id="vital_${esc(vitalKey)}" ${isChecked}>
+                            <label class="form-check-label fw-bold small" for="vital_${esc(vitalKey)}">
+                                ${esc(vitalName)}
+                                ${vitalUnit || vitalPlaceholder ? `<span class="text-muted d-block" style="font-size:9px; font-weight:600;">${esc(vitalUnit)} ${vitalUnit && vitalPlaceholder ? ' • ' : ''} ${esc(vitalPlaceholder)}</span>` : ''}
+                            </label>
+                        </div>
+                    </div>`;
+                });
+                vWrap.innerHTML = vHtml;
+            } else {
+                vWrap.innerHTML = '<div class="text-muted small fw-semibold py-2 w-100">NO ACTIVE VITALS FOUND.</div>';
+            }
+
+            document.querySelectorAll('.medicine-select').forEach(sel => {
+                const currentVal = sel.value;
+                sel.innerHTML = medicineOptionsHtml(currentVal);
+            });
+            
+            medicineOptionsDataList();
+
+        } else {
+            alert('Failed to refresh: ' + data.message);
+        }
+    } catch (e) {
+        console.error(e);
+        alert('Error refreshing masters.');
+    }
+}
+
+function updateSelectOptions(selectId, dataArray, nameField, codeField = null, valueField = null) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    
+    const selected = Array.from(sel.selectedOptions).map(o => o.value);
+    sel.innerHTML = '';
+    
+    if(['new_med_freq','new_med_unit','new_med_meal','new_med_duration'].includes(selectId)) {
+         sel.innerHTML = '<option value="">SELECT</option>';
+    }
+    
+    dataArray.forEach(item => {
+        const opt = document.createElement('option');
+        opt.value = valueField ? item[valueField] : item[nameField];
+        let text = item[nameField];
+        if (codeField && item[codeField]) {
+            text += ' (' + item[codeField] + ')';
+        }
+        opt.textContent = text;
+        if (selected.includes(String(opt.value))) {
+            opt.selected = true;
+        }
+        sel.appendChild(opt);
+    });
 }
 
 function openClinicalNotesModal(section) {
@@ -1310,6 +1760,10 @@ function openPrescriptionModal() {
     bootstrap.Modal.getOrCreateInstance(modal).show();
 }
 
+function openCustomFieldsModal() {
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('customFieldsModal')).show();
+}
+
 function copyPastMedicines(items) {
     if(Array.isArray(items) && items.length > 0) {
         items.forEach(item => addMedicine(item));
@@ -1329,18 +1783,16 @@ const MASTER_VITALS = <?= json_encode($rx_vitals, JSON_UNESCAPED_UNICODE | JSON_
 const SELECTED_CUSTOM_FIELDS = <?= json_encode($selected_custom_fields, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
 const SELECTED_VITALS = <?= json_encode(json_decode((string)($selected['vitals_json'] ?? '{}'), true) ?: [], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
 
-// IS OBJECT MEIN TEMPLATE OPTIONS SAVE HONGE JAB 'LOAD TEMPLATE' CLICK HOGA YA AUTO LOAD HOGA
 let TEMPLATE_OPTIONS = { symptom: null, diagnosis: null, investigation: null, advice: null };
 
-function normalizeVitalIds(value) {
-    if (Array.isArray(value)) return value.map(v => parseInt(v, 10)).filter(v => v > 0);
+function normalizeVitalKeys(value) {
     const raw = String(value ?? '').trim();
     if (!raw) return [];
     try {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed.map(v => parseInt(v, 10)).filter(v => v > 0);
+        if (Array.isArray(parsed)) return parsed.map(v => String(v).trim().toLowerCase()).filter(Boolean);
     } catch (e) {}
-    return raw.split(/[\n,]+/).map(v => parseInt(v.trim(), 10)).filter(v => v > 0);
+    return raw.split(/[\n,]+/).map(v => String(v).trim().toLowerCase()).filter(Boolean);
 }
 
 function renderVitals(vitalValue, values = {}) {
@@ -1348,12 +1800,22 @@ function renderVitals(vitalValue, values = {}) {
     const wrap = document.getElementById('vitalsContainer');
     if (!section || !wrap) return;
 
-    const vitalIds = normalizeVitalIds(vitalValue);
-    let selectedVitals = vitalIds.map(id => MASTER_VITALS.find(v => Number(v.id) === id)).filter(Boolean);
+    const vitalKeys = normalizeVitalKeys(vitalValue);
+    
+    let selectedVitals = vitalKeys.map(k => MASTER_VITALS.find(v => {
+        let vk = String(v.vital_key || ('vital_' + v.id)).trim().toLowerCase();
+        if (!v.vital_key) {
+            vk = String(v.vital_name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+        }
+        return vk === k;
+    })).filter(Boolean);
 
     if (!selectedVitals.length && values && typeof values === 'object' && Object.keys(values).length) {
         selectedVitals = MASTER_VITALS.filter(function(vital) {
-            const key = String(vital.vital_key || ('vital_' + vital.id)).trim().toLowerCase();
+            let key = String(vital.vital_key || ('vital_' + vital.id)).trim().toLowerCase();
+            if (!vital.vital_key) {
+                key = String(vital.vital_name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+            }
             return Object.prototype.hasOwnProperty.call(values, key);
         });
     }
@@ -1366,7 +1828,10 @@ function renderVitals(vitalValue, values = {}) {
     section.style.display = '';
 
     wrap.innerHTML = selectedVitals.map(function(vital) {
-        const key = String(vital.vital_key || ('vital_' + vital.id)).trim().toLowerCase();
+        let key = String(vital.vital_key || ('vital_' + vital.id)).trim().toLowerCase();
+        if (!vital.vital_key) {
+            key = String(vital.vital_name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+        }
         const label = String(vital.vital_name || '').trim();
         const unit = String(vital.unit || '').trim();
         const placeholder = String(vital.placeholder || '').trim();
@@ -1591,12 +2056,6 @@ function medicineKey(event, input) {
     }
 }
 
-async function addMedicineMaster(button) {
-    const row = button.closest('.dd-medicine-row');
-    const select = row?.querySelector('.medicine-select');
-    if (select) select.focus();
-}
-
 const SELECTED_MASTERS = { symptom: [], diagnosis: [], investigation: [], advice: [] };
 const MANUAL_CLINICAL_SELECTION = { symptom: false, diagnosis: false, investigation: false, advice: false };
 
@@ -1679,7 +2138,6 @@ function selectMasterFromSearch(type) {
     const value = String(input.value || '').trim();
     if (!value) return;
 
-    // Aab hume search master list ke alawa TEMPLATE_OPTIONS me bhi karni hogi, kyuki option unme se bhi ho sakta hai
     let sourceArray = [];
     if (typeof TEMPLATE_OPTIONS !== 'undefined' && TEMPLATE_OPTIONS[type] !== null) {
         sourceArray = TEMPLATE_OPTIONS[type];
@@ -1693,111 +2151,6 @@ function selectMasterFromSearch(type) {
     addSelectedMaster(type, match);
     input.value = '';
     input.focus();
-}
-
-let MASTER_ADD_TARGET_TYPE = '';
-let MASTER_ADD_TARGET_ROW = null;
-
-function openMasterAddModal(type) {
-    MASTER_ADD_TARGET_TYPE = type;
-    MASTER_ADD_TARGET_ROW = null;
-    const modal = document.getElementById('masterAddModal');
-    document.getElementById('masterAddModalTitle').textContent = { symptom: 'ADD SYMPTOM', diagnosis: 'ADD DIAGNOSIS', investigation: 'ADD INVESTIGATION', advice: 'ADD ADVICE' }[type] || 'ADD MASTER VALUE';
-    document.getElementById('masterAddValueLabel').textContent = `${String(type || 'VALUE').toUpperCase()} NAME`;
-    document.getElementById('masterAddValue').value = '';
-    document.getElementById('masterAddStrength').value = '';
-    document.getElementById('masterAddStrengthWrap').style.display = 'none';
-    bootstrap.Modal.getOrCreateInstance(modal).show();
-    setTimeout(() => { document.getElementById('masterAddValue').focus(); document.getElementById('masterAddValue').select(); }, 250);
-}
-
-function openMedicineModal() {
-    MASTER_ADD_TARGET_TYPE = 'medicine';
-    MASTER_ADD_TARGET_ROW = null;
-    const modal = document.getElementById('masterAddModal');
-    document.getElementById('masterAddModalTitle').textContent = 'ADD MEDICINE';
-    document.getElementById('masterAddValueLabel').textContent = 'MEDICINE NAME';
-    document.getElementById('masterAddValue').value = '';
-    document.getElementById('masterAddStrength').value = '';
-    document.getElementById('masterAddStrengthWrap').style.display = '';
-    bootstrap.Modal.getOrCreateInstance(modal).show();
-    setTimeout(() => document.getElementById('masterAddValue').focus(), 250);
-}
-
-function openMedicineMasterModal(button) {
-    MASTER_ADD_TARGET_TYPE = 'medicine';
-    MASTER_ADD_TARGET_ROW = button?.closest('.dd-medicine-row') || null;
-    const input = MASTER_ADD_TARGET_ROW?.querySelector('.medicine-search-input');
-    document.getElementById('masterAddModalTitle').textContent = 'ADD MEDICINE TO MASTER';
-    document.getElementById('masterAddValueLabel').textContent = 'MEDICINE NAME';
-    document.getElementById('masterAddValue').value = input?.value?.trim() || '';
-    document.getElementById('masterAddStrength').value = '';
-    document.getElementById('masterAddStrengthWrap').style.display = '';
-    bootstrap.Modal.getOrCreateInstance(document.getElementById('masterAddModal')).show();
-    setTimeout(() => { document.getElementById('masterAddValue').focus(); document.getElementById('masterAddValue').select(); }, 250);
-}
-
-async function submitMasterAddModal() {
-    const type = MASTER_ADD_TARGET_TYPE;
-    const value = document.getElementById('masterAddValue')?.value?.trim() || '';
-    const strength = document.getElementById('masterAddStrength')?.value?.trim() || '';
-
-    if (!type || !value) { Swal.fire({ icon: 'warning', title: 'Required', text: 'PLEASE ENTER A VALUE.' }); return; }
-
-    const existingLists = { symptom: MASTER_SYMPTOMS, diagnosis: MASTER_DIAGNOSES, investigation: MASTER_INVESTIGATIONS, advice: MASTER_ADVICES };
-    if (existingLists[type]) {
-        const existing = existingLists[type].find(v => String(v).trim().toLowerCase() === value.toLowerCase());
-        if (existing) {
-            addSelectedMaster(type, existing);
-            document.getElementById('masterAddValue').value = '';
-            bootstrap.Modal.getOrCreateInstance(document.getElementById('masterAddModal')).hide();
-            return;
-        }
-    }
-
-    const result = await addMasterValue(type, value, strength);
-    if (!result?.ok) return;
-
-    if (['symptom', 'diagnosis', 'investigation', 'advice'].includes(type)) {
-        const name = result.name || value;
-        if (type === 'symptom' && !MASTER_SYMPTOMS.some(v => String(v).toLowerCase() === name.toLowerCase())) MASTER_SYMPTOMS.push(name);
-        else if (type === 'diagnosis' && !MASTER_DIAGNOSES.some(v => String(v).toLowerCase() === name.toLowerCase())) MASTER_DIAGNOSES.push(name);
-        else if (type === 'investigation' && !MASTER_INVESTIGATIONS.some(v => String(v).toLowerCase() === name.toLowerCase())) MASTER_INVESTIGATIONS.push(name);
-        else if (type === 'advice' && !MASTER_ADVICES.some(v => String(v).toLowerCase() === name.toLowerCase())) MASTER_ADVICES.push(name);
-
-        if (TEMPLATE_OPTIONS[type] !== null) {
-            if (!TEMPLATE_OPTIONS[type].some(v => String(v).toLowerCase() === name.toLowerCase())) {
-                TEMPLATE_OPTIONS[type].push(name);
-            }
-        }
-
-        refreshMasterDatalist(type);
-        addSelectedMaster(type, name);
-        const sourceInput = getSearchInput(type);
-        if (sourceInput) sourceInput.value = '';
-    } else if (type === 'medicine') {
-        let medicine = findMedicine(value) || result.medicine;
-        if (result.created && medicine) { MASTER_MEDICINES.push(medicine); medicineOptionsDataList(); }
-        if (MASTER_ADD_TARGET_ROW) {
-            const medicineInput = MASTER_ADD_TARGET_ROW.querySelector('.medicine-search-input');
-            if (medicineInput) { medicineInput.value = medicine?.medicine_name || value.toUpperCase(); applyMedicineDefaultsFromInput(medicineInput); }
-        } else {
-            addMedicine(medicine || { medicine_name: value.toUpperCase(), dose: '', unit: medicine?.unit_name || '', meal: medicine?.meal_name || '', quantity: medicine?.default_qty || '', duration: medicine?.duration_name || '' });
-        }
-        syncPrescription();
-    }
-    bootstrap.Modal.getOrCreateInstance(document.getElementById('masterAddModal')).hide();
-}
-
-async function addMasterValue(type, value, strength = '') {
-    try {
-        const body = new URLSearchParams();
-        body.append('ajax', 'add_master'); body.append('master_type', type); body.append('value', value); body.append('strength', strength);
-        const res = await fetch('opd_doctor.php', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'Accept': 'application/json' }, body: body.toString() });
-        const data = await res.json();
-        if (!data.ok) Swal.fire({ icon: 'error', title: 'Error', text: data.message || 'MASTER VALUE COULD NOT BE ADDED.' });
-        return data;
-    } catch (e) { Swal.fire({ icon: 'error', title: 'Error', text: 'MASTER VALUE COULD NOT BE ADDED.' }); return null; }
 }
 
 function refreshMasterDatalist(type) {
@@ -1959,7 +2312,6 @@ async function applyPrescriptionTemplate(isAutoLoad = false) {
         }
         const t = data.template || {};
 
-        // Helper to parse strings cleanly
         const parseTemplateData = (dataString) => {
             if (!dataString) return [];
             let str = String(dataString).trim();
@@ -1973,7 +2325,6 @@ async function applyPrescriptionTemplate(isAutoLoad = false) {
             return [str];
         };
 
-        // YEH DROPDOWN KO SIRF TEMPLATE ITEMS SE FILTER KAREGA
         TEMPLATE_OPTIONS.symptom = parseTemplateData(t.default_symptoms);
         TEMPLATE_OPTIONS.diagnosis = parseTemplateData(t.default_diagnosis);
         TEMPLATE_OPTIONS.investigation = parseTemplateData(t.default_investigations);
@@ -1985,7 +2336,7 @@ async function applyPrescriptionTemplate(isAutoLoad = false) {
         refreshMasterDatalist('advice');
 
         if (!isAutoLoad) {
-            renderVitals(t.vital_id || '', {});
+            renderVitals(t.default_vitals || '', {});
 
             let customSchema = []; try { customSchema = JSON.parse(t.custom_fields_schema || '[]'); } catch (e) { customSchema = []; }
             renderCustomFields(customSchema, {});
@@ -2015,7 +2366,6 @@ async function applyPrescriptionTemplate(isAutoLoad = false) {
 
 document.addEventListener('input', function(e) { if (e.target.matches('#doctor_notes, #follow_up_date, #medicineList input, #customFieldsContainer input, #customFieldsContainer textarea, #vitalsContainer input')) syncPrescription(); });
 document.addEventListener('change', function(e) { if (e.target.matches('#medicineList select, #customFieldsContainer select')) syncPrescription(); });
-document.addEventListener('keydown', function(e) { if (e.key === 'Enter' && document.getElementById('masterAddModal')?.classList.contains('show')) { const active = document.activeElement; if (active && (active.id === 'masterAddValue' || active.id === 'masterAddStrength')) { e.preventDefault(); submitMasterAddModal(); } } });
 
 document.addEventListener('DOMContentLoaded', function() {
     MANUAL_CLINICAL_SELECTION.symptom = false; MANUAL_CLINICAL_SELECTION.diagnosis = false; MANUAL_CLINICAL_SELECTION.investigation = false; MANUAL_CLINICAL_SELECTION.advice = false;
@@ -2077,7 +2427,6 @@ document.addEventListener('DOMContentLoaded', function() {
     syncPrescription();
 });
 </script>
-
 
 <script>
 /* ==========================================================
