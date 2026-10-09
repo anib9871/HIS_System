@@ -4,39 +4,115 @@ $page_title = "Staff Users & Access Control";
 require_once __DIR__ . '/../config/tenant_db.php';
 require_once __DIR__ . '/../config/alerts.php';
 
-// Hierarchical Modules / Sub-menus Matrix (Sidebar Structure jaisa)
+// Hierarchical Modules / Sub-menus Matrix (Header & Sidebar ke according group-wise)
 $module_hierarchy = [
-    'masters' => [
-        'title'    => 'Hospital Masters',
+    'general_masters' => [
+        'title'    => 'Hospital & General Masters',
         'icon'     => 'bi-gear-wide-connected',
         'submenus' => [
-            'masters_org'     => ['name' => 'Hospital Profile Setup', 'desc' => 'View & edit clinic info'],
-            'masters_centers' => ['name' => 'Centers & Branches', 'desc' => 'Manage hospital branches/wings'],
-            'masters_users'   => ['name' => 'Staff & Access Control', 'desc' => 'Manage staff accounts & rights']
+            'masters_org'                  => ['name' => 'Hospital Profile Setup',    'desc' => 'Clinic / Hospital details'],
+            'masters_states'               => ['name' => 'State Master',              'desc' => 'State list configuration'],
+            'masters_city'                 => ['name' => 'City Master',               'desc' => 'City list configuration'],
+            'masters_financial_year'       => ['name' => 'Financial Year Master',     'desc' => 'Accounting financial year'],
+            'masters_centers'              => ['name' => 'Centers & Branches',        'desc' => 'Manage hospital branches/wings'],
+            'masters_users'                => ['name' => 'Staff & Access Control',    'desc' => 'Manage staff accounts & rights'],
+            'masters_payment_modes'        => ['name' => 'Payment Modes',             'desc' => 'Cash, UPI, Card, Net Banking'],
+            'masters_insurance_categories' => ['name' => 'Category & Insurance',      'desc' => 'TPA & patient categories']
+        ]
+    ],
+    'doctor_masters' => [
+        'title'    => 'Doctors & Department Masters',
+        'icon'     => 'bi-person-badge',
+        'submenus' => [
+            'masters_doctors'         => ['name' => 'Doctors & Schedules',     'desc' => 'Doctor profiles & consultation slots'],
+            'masters_departments'     => ['name' => 'Departments',             'desc' => 'Hospital medical departments'],
+            'masters_qualifications'  => ['name' => 'Qualifications',           'desc' => 'Degrees & qualifications list'],
+            'masters_specializations' => ['name' => 'Specializations',          'desc' => 'Medical specializations list'],
+            'masters_days'            => ['name' => 'Working Days',            'desc' => 'OPD consultation working days'],
+            'masters_doctor_services' => ['name' => 'Doctor Service Master',   'desc' => 'Services mapped to doctors'],
+            'masters_doctor_tariff'   => ['name' => 'Doctor Tariff Master',    'desc' => 'Doctor consultation charges & rates']
+        ]
+    ],
+    'prescription_masters' => [
+        'title'    => 'Prescription Masters (Rx)',
+        'icon'     => 'bi-prescription2',
+        'submenus' => [
+            'rx_units'          => ['name' => 'Unit Master',                'desc' => 'Dosage units (mg, ml, tabs)'],
+            'rx_frequency'      => ['name' => 'Frequency Master',           'desc' => 'Dosing schedule (OD, BD, TDS)'],
+            'rx_meals'          => ['name' => 'Meal Master',                'desc' => 'Before/after meal instructions'],
+            'rx_durations'      => ['name' => 'Duration Master',            'desc' => 'Course duration (3 days, 1 week)'],
+            'rx_medicines'      => ['name' => 'Medicine Master',            'desc' => 'Drug formulations & brands'],
+            'rx_symptoms'       => ['name' => 'Symptom Master',             'desc' => 'Clinical patient symptoms'],
+            'rx_diagnoses'      => ['name' => 'Diagnosis Master',           'desc' => 'Clinical diagnosis & ICD list'],
+            'rx_investigations' => ['name' => 'Investigation Master',       'desc' => 'Lab, X-Ray & pathology tests'],
+            'rx_vitals'         => ['name' => 'Vital Master',               'desc' => 'BP, Pulse, Temperature, SpO2'],
+            'rx_advices'        => ['name' => 'Advices Master',             'desc' => 'Standard doctor advice notes'],
+            'rx_templates'      => ['name' => 'Prescription Templates',     'desc' => 'Pre-saved Rx diagnosis templates']
+        ]
+    ],
+    'facility_masters' => [
+        'title'    => 'Facilities & Infrastructure',
+        'icon'     => 'bi-buildings',
+        'submenus' => [
+            'fac_buildings'       => ['name' => 'Buildings',          'desc' => 'Hospital premises & buildings'],
+            'fac_blocks'          => ['name' => 'Blocks',             'desc' => 'Hospital blocks/wings'],
+            'fac_floors'          => ['name' => 'Floors',             'desc' => 'Floor levels structure'],
+            'fac_room_categories' => ['name' => 'Room Categories',    'desc' => 'General, Deluxe, ICU, Private'],
+            'fac_rooms'           => ['name' => 'Rooms Master',       'desc' => 'Room numbers & bed configurations']
         ]
     ],
     'opd' => [
         'title'    => 'OPD Services Module',
         'icon'     => 'bi-person-wheelchair',
         'submenus' => [
-            'opd_reg'     => ['name' => 'OPD Registration & Token', 'desc' => 'Patient entry & token generation'],
-            'opd_queue'   => ['name' => 'Patient Live Queue', 'desc' => 'Real-time token display screen'],
-            'opd_doctor'  => ['name' => 'Doctor Desk (Consultation & Rx)', 'desc' => 'Doctor diagnosis & prescription'],
-            'opd_billing' => ['name' => 'OPD Billing & Invoices', 'desc' => 'Counter fee receipt & print']
+            'opd_appt'       => ['name' => 'Appointments',             'desc' => 'Book & manage patient appointments'],
+            'opd_reg'        => ['name' => 'OPD Registration & Token', 'desc' => 'Patient entry & token generation'],
+            'opd_queue'      => ['name' => 'Patient Live Queue',       'desc' => 'Real-time token display screen'],
+            'opd_doctor'     => ['name' => 'Doctor Desk (Rx)',         'desc' => 'Doctor diagnosis & prescription'],
+            'opd_visit_list' => ['name' => 'OPD Visit List',           'desc' => 'Daily patient visits & case sheets']
         ]
     ]
 ];
 
-// Flat key-to-name lookup for directory table
+// Flat key-to-name lookup for directory table badges
 $flat_submenus = [
-    'dashboard'       => 'Dashboard',
-    'masters_org'     => 'Hospital Profile',
-    'masters_centers' => 'Branches',
-    'masters_users'   => 'Staff Control',
-    'opd_reg'         => 'OPD Reg',
-    'opd_queue'       => 'OPD Queue',
-    'opd_doctor'      => 'Doctor Desk',
-    'opd_billing'     => 'OPD Billing'
+    'dashboard'                    => 'Dashboard',
+    'masters_org'                  => 'Hospital Profile',
+    'masters_states'               => 'States',
+    'masters_city'                 => 'Cities',
+    'masters_financial_year'       => 'Financial Year',
+    'masters_centers'              => 'Branches',
+    'masters_users'                => 'Staff Control',
+    'masters_payment_modes'        => 'Payment Modes',
+    'masters_insurance_categories' => 'Insurance',
+    'masters_doctors'              => 'Doctors',
+    'masters_departments'          => 'Departments',
+    'masters_qualifications'       => 'Qualifications',
+    'masters_specializations'      => 'Specializations',
+    'masters_days'                 => 'Working Days',
+    'masters_doctor_services'      => 'Doc Services',
+    'masters_doctor_tariff'        => 'Doc Tariff',
+    'rx_units'                     => 'Rx Units',
+    'rx_frequency'                 => 'Rx Frequency',
+    'rx_meals'                     => 'Rx Meals',
+    'rx_durations'                 => 'Rx Durations',
+    'rx_medicines'                 => 'Rx Medicines',
+    'rx_symptoms'                  => 'Rx Symptoms',
+    'rx_diagnoses'                 => 'Rx Diagnoses',
+    'rx_investigations'            => 'Rx Investigations',
+    'rx_vitals'                    => 'Rx Vitals',
+    'rx_advices'                   => 'Rx Advices',
+    'rx_templates'                 => 'Rx Templates',
+    'fac_buildings'                => 'Buildings',
+    'fac_blocks'                   => 'Blocks',
+    'fac_floors'                   => 'Floors',
+    'fac_room_categories'          => 'Room Categories',
+    'fac_rooms'                    => 'Rooms',
+    'opd_appt'                     => 'OPD Appt',
+    'opd_reg'                      => 'OPD Reg',
+    'opd_queue'                    => 'OPD Queue',
+    'opd_doctor'                   => 'Doctor Desk',
+    'opd_visit_list'               => 'OPD Visits'
 ];
 
 // 1. Status Toggle via URL
@@ -153,9 +229,8 @@ require_once __DIR__ . '/layout_header.php';
 .form-switch .form-check-input { width: 2.2em; height: 1.15em; cursor: pointer; }
 .btn-action-edit { background-color: #e0f2fe; color: #0284c7; border: none; width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; transition: 0.2s; text-decoration: none; }
 .btn-action-edit:hover { background-color: #0284c7; color: #fff; }
-.badge-axis { font-size: 0.72rem; padding: 3px 6px; margin: 2px; border-radius: 4px; background-color: #f1f5f9; color: #334155; border: 1px solid #cbd5e1; display: inline-block; }
+.badge-axis { font-size: 0.72rem; padding: 2px 6px; margin: 1px; border-radius: 4px; background-color: #f1f5f9; color: #334155; border: 1px solid #cbd5e1; display: inline-block; }
 
-/* Accordion Sidebar-style Cards */
 .accordion-module-card {
     border: 1px solid #e2e8f0;
     border-radius: 8px;
@@ -179,7 +254,7 @@ require_once __DIR__ . '/layout_header.php';
 }
 .accordion-module-header.active {
     border-bottom-color: #e2e8f0;
-    background: #eef2ff;
+    background: #f0fdf4;
 }
 .accordion-arrow {
     transition: transform 0.2s ease;
@@ -188,7 +263,7 @@ require_once __DIR__ . '/layout_header.php';
     transform: rotate(180deg);
 }
 .sub-menu-row {
-    padding: 9px 14px;
+    padding: 8px 14px;
     border-bottom: 1px dashed #e2e8f0;
     display: flex;
     align-items: center;
@@ -201,6 +276,7 @@ require_once __DIR__ . '/layout_header.php';
 
 <div class="container-fluid p-0">
     <div class="row g-4">
+        <!-- FORM COLUMN -->
         <div class="col-xl-5 col-lg-5">
             <div class="card border-0 shadow-sm rounded-3">
                 <div class="card-header bg-white py-3">
@@ -270,6 +346,7 @@ require_once __DIR__ . '/layout_header.php';
                             </div>
                         </div>
 
+                        <!-- Full Admin Override -->
                         <div class="p-2 mb-3 bg-danger bg-opacity-10 border border-danger-subtle rounded-3 d-flex align-items-center justify-content-between">
                             <div>
                                 <span class="small fw-bold text-danger"><i class="bi bi-shield-check me-1"></i> Full Hospital Admin Axis</span>
@@ -280,6 +357,7 @@ require_once __DIR__ . '/layout_header.php';
                             </div>
                         </div>
 
+                        <!-- Hierarchical Menu Permissions -->
                         <div class="mb-3">
                             <div class="d-flex justify-content-between align-items-center mb-2">
                                 <label class="form-label small fw-bold text-dark m-0">
@@ -291,7 +369,7 @@ require_once __DIR__ . '/layout_header.php';
                                 </div>
                             </div>
 
-                            <div class="p-2 bg-light border rounded-3" style="max-height: 320px; overflow-y: auto;">
+                            <div class="p-2 bg-light border rounded-3" style="max-height: 380px; overflow-y: auto;">
                                 <?php foreach ($module_hierarchy as $parent_key => $parent_val): ?>
                                     <div class="accordion-module-card">
                                         <div class="accordion-module-header active" onclick="toggleAccordion('<?= $parent_key ?>_body', '<?= $parent_key ?>_arrow', this)">
@@ -312,7 +390,7 @@ require_once __DIR__ . '/layout_header.php';
                                                     if ($edit_data) {
                                                         $checked = in_array($sub_key, $user_assigned_menus);
                                                     } else {
-                                                        $checked = in_array($sub_key, ['opd_reg']);
+                                                        $checked = in_array($sub_key, ['opd_reg', 'opd_queue']);
                                                     }
                                                 ?>
                                                 <div class="sub-menu-row">
@@ -346,6 +424,7 @@ require_once __DIR__ . '/layout_header.php';
             </div>
         </div>
 
+        <!-- DIRECTORY TABLE COLUMN -->
         <div class="col-xl-7 col-lg-7">
             <div class="card border-0 shadow-sm rounded-3">
                 <div class="p-3 border-bottom d-flex justify-content-between align-items-center gap-3 bg-white rounded-top-3">
@@ -384,9 +463,11 @@ require_once __DIR__ . '/layout_header.php';
                                             <?php if ($u['is_admin'] == 1): ?>
                                                 <span class="badge bg-danger">Full Admin Axis</span>
                                             <?php else: ?>
-                                                <div style="max-width: 250px;">
+                                                <div style="max-width: 250px; max-height: 80px; overflow-y: auto;">
                                                     <?php foreach ($u_menus as $m_key): ?>
-                                                        <span class="badge-axis"><?= $flat_submenus[$m_key] ?? $m_key ?></span>
+                                                        <?php if ($m_key !== 'dashboard'): ?>
+                                                            <span class="badge-axis"><?= $flat_submenus[$m_key] ?? $m_key ?></span>
+                                                        <?php endif; ?>
                                                     <?php endforeach; ?>
                                                 </div>
                                             <?php endif; ?>
@@ -429,7 +510,7 @@ document.getElementById('searchUserInput').addEventListener('keyup', function() 
     });
 });
 
-// Accordion Click Toggle (Opens/Closes Submenus like Sidebar)
+// Accordion Click Toggle
 function toggleAccordion(bodyId, arrowId, headerElem) {
     const body = document.getElementById(bodyId);
     const arrow = document.getElementById(arrowId);
