@@ -158,7 +158,7 @@ require_once __DIR__ . '/layout_header.php';
 
 <style>
     body, .card, .form-label, .form-control, .btn, .badge, .table, th, td, .form-select { text-transform: uppercase; }
-    input[type="number"] { text-transform: none; }
+    input[type="number"], input[type="search"] { text-transform: none; }
     .mv-card { border:0; border-radius:12px; box-shadow:0 3px 18px rgba(15,23,42,.07); }
     .mv-card .card-header { background:#fff; border-bottom:1px solid #e5e7eb; }
     .mv-form-label { font-size:10px; font-weight:800; color:#64748b; margin-bottom:4px; }
@@ -233,12 +233,15 @@ require_once __DIR__ . '/layout_header.php';
 
     <div class="col-lg-8">
         <div class="card mv-card">
-            <div class="card-header py-3 d-flex justify-content-between align-items-center">
+            <div class="card-header py-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
                 <div class="fw-bold"><i class="bi bi-list-ul text-primary me-2"></i>VITALS LIST</div>
-                <span class="badge bg-primary-subtle text-primary border border-primary-subtle"><?= count($vitals) ?> RECORDS</span>
+                <div class="d-flex align-items-center gap-2">
+                    <input type="search" id="vitalSearch" class="form-control form-control-sm" placeholder="SEARCH VITALS..." style="width: 200px;">
+                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle" id="recordCount"><?= count($vitals) ?> RECORDS</span>
+                </div>
             </div>
             <div class="table-responsive">
-                <table class="table table-hover mb-0 mv-table">
+                <table class="table table-hover mb-0 mv-table" id="vitalsTable">
                     <thead class="table-light">
                         <tr>
                             <th>#</th>
@@ -252,12 +255,12 @@ require_once __DIR__ . '/layout_header.php';
                     </thead>
                     <tbody>
                     <?php if (!$vitals): ?>
-                        <tr><td colspan="7" class="mv-empty">NO VITALS FOUND.</td></tr>
+                        <tr class="empty-row"><td colspan="7" class="mv-empty">NO VITALS FOUND.</td></tr>
                     <?php else: foreach ($vitals as $v): ?>
-                        <tr>
+                        <tr class="vital-row">
                             <td><?= (int)$v['id'] ?></td>
                             <td>
-                                <div class="fw-bold"><?= htmlspecialchars($v['vital_name']) ?></div>
+                                <div class="fw-bold vital-name"><?= htmlspecialchars($v['vital_name']) ?></div>
                             </td>
                             <td><?= htmlspecialchars($v['unit'] ?? '') ?: '—' ?></td>
                             <td><?= htmlspecialchars($v['placeholder'] ?? '') ?: '—' ?></td>
@@ -287,5 +290,35 @@ require_once __DIR__ . '/layout_header.php';
         </div>
     </div>
 </div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    const searchInput = document.getElementById("vitalSearch");
+    const rows = document.querySelectorAll(".vital-row");
+    const recordCount = document.getElementById("recordCount");
+
+    if (searchInput) {
+        searchInput.addEventListener("keyup", function() {
+            let filter = this.value.toUpperCase();
+            let visibleCount = 0;
+
+            rows.forEach(row => {
+                let vitalName = row.querySelector(".vital-name").textContent.toUpperCase();
+                
+                if (vitalName.indexOf(filter) > -1) {
+                    row.style.display = "";
+                    visibleCount++;
+                } else {
+                    row.style.display = "none";
+                }
+            });
+
+            if (recordCount) {
+                recordCount.textContent = visibleCount + " RECORDS";
+            }
+        });
+    }
+});
+</script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
