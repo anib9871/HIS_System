@@ -187,14 +187,22 @@ require_once __DIR__ . '/layout_header.php';
                     <i class="bi bi-list-task text-primary me-1"></i>
                     UNITS LIST
                 </span>
-                <span class="badge bg-light text-secondary border">
-                    <?= count($units) ?> RECORDS
-                </span>
+                <div class="d-flex align-items-center gap-2">
+                    <!-- Search Bar -->
+                    <div class="input-group input-group-sm" style="width: 200px;">
+                        <span class="input-group-text bg-light text-secondary"><i class="bi bi-search"></i></span>
+                        <input type="text" id="searchUnit" class="form-control" placeholder="Search unit...">
+                    </div>
+                    <!-- Record Count -->
+                    <span class="badge bg-light text-secondary border" id="recordCount">
+                        <?= count($units) ?> RECORDS
+                    </span>
+                </div>
             </div>
 
             <div class="card-body p-0">
                 <div class="table-responsive" style="max-height:70vh; overflow-y:auto;">
-                    <table class="table table-hover align-middle mb-0 small">
+                    <table class="table table-hover align-middle mb-0 small" id="unitsTable">
                         <thead class="table-light sticky-top">
                             <tr>
                                 <th class="ps-3" style="width:60px;">#</th>
@@ -276,6 +284,34 @@ function resetForm() {
     document.getElementById('btnSubmit').innerText = 'SAVE UNIT';
     document.getElementById('unit_name').focus();
 }
+
+// Search Filter Logic
+document.getElementById('searchUnit').addEventListener('keyup', function() {
+    let filter = this.value.toUpperCase();
+    let rows = document.querySelectorAll('#unitsTable tbody tr');
+    let visibleCount = 0;
+
+    rows.forEach(row => {
+        // Skip filtering if it's the "NO UNITS FOUND" empty state row
+        if (row.cells.length === 1 && row.cells[0].colSpan === 4) return;
+
+        // Target the second column (UNIT NAME)
+        let unitNameCell = row.querySelector('td:nth-child(2)');
+        
+        if (unitNameCell) {
+            let textValue = unitNameCell.textContent || unitNameCell.innerText;
+            if (textValue.toUpperCase().indexOf(filter) > -1) {
+                row.style.display = "";
+                visibleCount++;
+            } else {
+                row.style.display = "none";
+            }
+        }
+    });
+
+    // Dynamically update the record count badge
+    document.getElementById('recordCount').innerText = visibleCount + ' RECORDS';
+});
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
