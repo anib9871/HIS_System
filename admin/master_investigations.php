@@ -258,15 +258,22 @@ require_once __DIR__ . '/layout_header.php';
                     <i class="bi bi-list-task text-primary me-1"></i>
                     INVESTIGATIONS LIST
                 </span>
-
-                <span class="badge bg-light text-secondary border">
-                    <?= count($investigations) ?> RECORDS
-                </span>
+                
+                <!-- Search Bar added here -->
+                <div class="d-flex align-items-center gap-2">
+                    <div class="input-group input-group-sm" style="width: 250px;">
+                        <span class="input-group-text bg-light"><i class="bi bi-search"></i></span>
+                        <input type="text" id="searchInvestigation" class="form-control" placeholder="Search records..." onkeyup="filterInvestigations()">
+                    </div>
+                    <span class="badge bg-light text-secondary border">
+                        <?= count($investigations) ?> RECORDS
+                    </span>
+                </div>
             </div>
 
             <div class="card-body p-0">
                 <div class="table-responsive" style="max-height:70vh; overflow-y:auto;">
-                    <table class="table table-hover align-middle mb-0 small">
+                    <table class="table table-hover align-middle mb-0 small" id="investigationTable">
 
                         <thead class="table-light sticky-top">
                             <tr>
@@ -281,7 +288,7 @@ require_once __DIR__ . '/layout_header.php';
 
                         <tbody>
                         <?php if (empty($investigations)): ?>
-                            <tr>
+                            <tr class="no-records">
                                 <td colspan="6" class="text-center py-4 text-muted">
                                     NO INVESTIGATIONS FOUND.
                                 </td>
@@ -349,6 +356,34 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// Filter / Search function
+function filterInvestigations() {
+    const input = document.getElementById("searchInvestigation");
+    const filter = input.value.toUpperCase();
+    const table = document.getElementById("investigationTable");
+    const tr = table.getElementsByTagName("tr");
+
+    for (let i = 1; i < tr.length; i++) { // Start from 1 to skip table header
+        if (tr[i].classList.contains("no-records")) continue; 
+        
+        let tds = tr[i].getElementsByTagName("td");
+        let match = false;
+        
+        // Loop through Investigation Name (1), Code (2), and Type (3) columns
+        for (let j = 1; j <= 3; j++) {
+            if (tds[j]) {
+                const txtValue = tds[j].textContent || tds[j].innerText;
+                if (txtValue.toUpperCase().indexOf(filter) > -1) {
+                    match = true;
+                    break;
+                }
+            }
+        }
+        
+        tr[i].style.display = match ? "" : "none";
+    }
+}
+
 function editRow(d) {
     document.getElementById('edit_id').value = d.id || '0';
     document.getElementById('investigation_name').value = d.investigation_name || '';
