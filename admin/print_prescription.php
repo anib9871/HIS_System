@@ -173,6 +173,27 @@ try {
         $vitals = json_decode($visit['vitals_json'], true) ?: [];
     }
 
+    // Get Active Vitals (Remove empty ones)
+    $active_vitals = array_filter($vitals, function($v) {
+        return trim((string)$v) !== '';
+    });
+
+    // Fetch Vitals Master to get correct names and units
+    $vitals_master = [];
+    try {
+        $vtStmt = $tenant_pdo->prepare("SELECT vital_name, vital_key, unit FROM master_vitals WHERE org_id = ? AND center_id = ?");
+        $vtStmt->execute([$org_id, $center_id]);
+        $vitals_master_rows = $vtStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        foreach ($vitals_master_rows as $row) {
+            $vKey = trim((string)$row['vital_key']);
+            if ($vKey === '') {
+                $vKey = strtolower(preg_replace('/[^a-z0-9]+/i', '_', $row['vital_name']));
+                $vKey = trim($vKey, '_');
+            }
+            $vitals_master[$vKey] = $row;
+        }
+    } catch (Throwable $e) {}
+
     // Decode saved custom clinical fields.
     $customFields = [];
     if (!empty($visit['custom_fields_json'])) {
@@ -211,7 +232,7 @@ try {
         : '';
 
     // Check if the sidebar needs to be displayed based on clinical content
-    $has_sidebar = !empty($vitals) || !empty(trim((string)$visit['symptoms'])) || !empty(trim((string)$visit['diagnosis'])) || !empty(trim((string)$visit['investigations']));
+    $has_sidebar = !empty($active_vitals) || !empty(trim((string)$visit['symptoms'])) || !empty(trim((string)$visit['diagnosis'])) || !empty(trim((string)$visit['investigations']));
 
 } catch (Exception $e) {
     die("Error loading prescription: " . e($e->getMessage()));
@@ -733,17 +754,22 @@ function downloadPrescriptionPDF(){
         <!-- LEFT -->
         <aside class="sidebar">
 
-            <?php if (!empty($vitals)): ?>
+            <?php if (!empty($active_vitals)): ?>
                 <div class="section">
                     <div class="section-title">Vitals</div>
-                    <?php foreach ($vitals as $key => $val): ?>
-                        <?php if (trim((string)$val) === '') continue; ?>
+                    <?php foreach ($active_vitals as $key => $val): ?>
+                        <?php 
+                            $lookupKey = strtolower(trim((string)$key));
+                            $masterInfo = $vitals_master[$lookupKey] ?? null;
+                            $label = $masterInfo ? $masterInfo['vital_name'] : ucwords(str_replace('_', ' ', $key));
+                            $unit = $masterInfo ? trim($masterInfo['unit']) : '';
+                        ?>
                         <div class="vital-row">
                             <span class="vital-key">
-                                <?= e(str_replace('_', ' ', $key)) ?>
+                                <?= e($label) ?>
                             </span>
                             <span class="vital-val">
-                                <?= e($val) ?>
+                                <?= e($val) ?> <?= $unit ? '<small style="font-size:7.5px;color:#8a95a5;">'.e($unit).'</small>' : '' ?>
                             </span>
                         </div>
                     <?php endforeach; ?>
