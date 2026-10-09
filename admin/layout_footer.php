@@ -1,803 +1,360 @@
+
 <?php
-// admin/layout_header.php
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-// 1. Check Tenant / Hospital Admin Authentication
-if (!isset($_SESSION['user_id']) || (isset($_SESSION['user_type']) && $_SESSION['user_type'] === 'superadmin')) {
-    header("Location: ../login.php");
-    exit;
-}
-
-$current_page = basename($_SERVER['PHP_SELF']);
-
-// OPD Submenu Pages Check
-$opd_pages = [
-    'opd_appointments.php',
-    'opd_registration.php',
-    'opd_doctor.php',
-    'opd_visit_list.php'
-];
-$is_opd_active = in_array($current_page, $opd_pages);
-
-// Facility & Infrastructure Master Check
-$facility_pages = [
-    'master_buildings.php',
-    'master_blocks.php',
-    'master_floors.php',
-    'master_room_categories.php',
-    'master_rooms.php'
-];
-$is_facility_active = in_array($current_page, $facility_pages);
-
-// General & Doctor Masters
-$general_master_pages = [
-    'org_profile.php', 
-    'master_states.php',
-    'master_city.php',
-    'master_financial_year.php',
-    'master_centers.php', 
-    'users.php', 
-    'master_doctors.php', 
-    'master_departments.php',
-    'master_qualifications.php', 
-    'master_specializations.php',
-    'master_days.php',
-    'master_payment_modes.php',
-    'master_insurance_categories.php', 
-    'master_doctor_services.php',
-    'master_doctor_tariff.php'
-];
-
-// Prescription Masters Check
-$prescription_pages = [
-    'master_units.php',
-    'frequency_master.php',
-    'master_meals.php',
-    'master_durations.php',
-    'master_medicines.php',
-    'master_symptoms.php',
-    'master_diagnoses.php',
-    'master_investigations.php',
-    'master_vitals.php',
-    'master_advices.php',
-    'prescription_template_master.php'
-];
-
-$is_prescription_active = in_array($current_page, $prescription_pages);
-
-$is_master_active = in_array($current_page, array_merge(
-    $general_master_pages,
-    $facility_pages,
-    $prescription_pages
-));
-
-// 2. User Menu Permissions (Dynamic Access Check)
-$user_menus = $_SESSION['menu_access'] ?? [];
-if (is_string($user_menus)) {
-    $user_menus = json_decode($user_menus, true) ?: [];
-}
-$is_full_admin = !empty($_SESSION['is_admin']) && (int)$_SESSION['is_admin'] === 1;
-
-function has_access($menu_key, $is_full_admin, $user_menus) {
-    if ($is_full_admin) return true;
-    return in_array($menu_key, $user_menus);
-}
-
-function has_any_access($keys, $is_full_admin, $user_menus) {
-    if ($is_full_admin) return true;
-    foreach ($keys as $k) {
-        if (in_array($k, $user_menus)) return true;
-    }
-    return false;
-}
-
-// Group Key Arrays for Submenu Visibility
-$rx_keys = [
-    'rx_units', 'rx_frequency', 'rx_meals', 'rx_durations', 'rx_medicines',
-    'rx_symptoms', 'rx_diagnoses', 'rx_investigations', 'rx_vitals', 'rx_advices', 'rx_templates'
-];
-
-$fac_keys = [
-    'fac_buildings', 'fac_blocks', 'fac_floors', 'fac_room_categories', 'fac_rooms'
-];
-
-$master_keys = array_merge([
-    'masters_org', 'masters_states', 'masters_city', 'masters_financial_year',
-    'masters_centers', 'masters_users', 'masters_doctors', 'masters_departments',
-    'masters_qualifications', 'masters_specializations', 'masters_days',
-    'masters_payment_modes', 'masters_insurance_categories', 'masters_doctor_services',
-    'masters_doctor_tariff'
-], $rx_keys, $fac_keys);
-
-$opd_keys = ['opd_appt', 'opd_reg', 'opd_queue', 'opd_doctor', 'opd_visit_list'];
+// admin/layout_footer.php
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title><?= $page_title ?? 'Hospital Admin Console' ?></title>
-    
-    <link href="https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    
-    <style>
-        :root {
-            --sidebar-width: 260px;
-            --topbar-height: 60px;
-            --sidebar-bg: #1e293b;
-            --sidebar-hover: rgba(255, 255, 255, 0.07);
-            --sidebar-active: #0284c7;
-            --body-bg: #f1f5f9;
-        }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+    </main>
+</div>
 
-        body {
-            font-family: 'Segoe UI', sans-serif;
-            background-color: var(--body-bg);
-            font-size: 0.9rem;
-            color: #334155;
-            min-height: 100vh;
-            overflow-x: hidden;
-        }
+<!-- Bootstrap JS: ensure it is loaded only once -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 
-        .sidebar {
-            width: var(--sidebar-width);
-            height: 100vh;
-            position: fixed;
-            left: 0;
-            top: 0;
-            background: var(--sidebar-bg);
-            display: flex;
-            flex-direction: column;
-            z-index: 1050;
-            transition: transform 0.3s ease-in-out;
-        }
+<!-- Flatpickr -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
 
-        .sidebar-brand {
-            height: var(--topbar-height);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 20px;
-            font-weight: 700;
-            color: #fff;
-            font-size: 1.15rem;
-            border-bottom: 1px solid rgba(255,255,255,0.08);
-        }
+<script>
+(function () {
+    'use strict';
 
-        .sidebar-menu {
-            list-style: none;
-            padding: 15px 0;
-            margin: 0;
-            flex-grow: 1;
-            overflow-y: auto;
-        }
+    function initializeLayout() {
 
-        .sidebar-menu li {
-            margin-bottom: 2px;
-        }
+        /* =====================================================
+           1. MOBILE SIDEBAR
+           ===================================================== */
 
-        .sidebar-link {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 10px 20px;
-            color: #94a3b8;
-            text-decoration: none;
-            font-weight: 500;
-            font-size: 0.92rem;
-            transition: 0.2s ease;
-            background: transparent;
-            border: none;
-            width: 100%;
-            text-align: left;
-            cursor: pointer;
-        }
+        const sidebar = document.getElementById('sidebarMenu');
+        const overlay = document.getElementById('sidebarOverlay');
+        const toggleBtn = document.getElementById('sidebarToggleBtn');
+        const closeBtn = document.getElementById('sidebarCloseBtn');
 
-        .sidebar-link .link-inner {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
+        function openSidebar() {
+            if (!sidebar || !overlay) return;
 
-        .sidebar-link:hover {
-            background: var(--sidebar-hover);
-            color: #ffffff;
-        }
+            sidebar.classList.add('show');
+            overlay.classList.add('show');
 
-        .sidebar-link.active {
-            background: var(--sidebar-active);
-            color: #ffffff;
-        }
-
-        .submenu-arrow {
-            font-size: 0.8rem;
-            transition: transform 0.3s ease;
-        }
-
-        .sidebar-link[aria-expanded="true"] .submenu-arrow {
-            transform: rotate(180deg);
-        }
-
-        .submenu-items {
-            list-style: none;
-            padding: 4px 0 6px 15px;
-            margin: 0;
-            background: rgba(0, 0, 0, 0.15);
-        }
-
-        .submenu-items a, .nested-toggle-btn {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 8px 15px;
-            color: #94a3b8;
-            text-decoration: none;
-            font-size: 0.85rem;
-            transition: all 0.2s;
-            border-radius: 4px;
-            background: transparent;
-            border: none;
-            width: 100%;
-            text-align: left;
-            cursor: pointer;
-        }
-
-        .nested-toggle-btn {
-            justify-content: space-between;
-        }
-
-        .nested-toggle-btn[aria-expanded="true"] .nested-arrow {
-            transform: rotate(180deg);
-        }
-
-        .nested-arrow {
-            font-size: 0.75rem;
-            transition: transform 0.2s ease;
-        }
-
-        .submenu-items a:hover, .nested-toggle-btn:hover {
-            color: #ffffff;
-            background: rgba(255, 255, 255, 0.05);
-        }
-
-        .submenu-items a.active-child {
-            color: #38bdf8;
-            font-weight: 600;
-            background: rgba(2, 132, 199, 0.15);
-        }
-
-        .nested-submenu-items {
-            list-style: none;
-            padding: 3px 0 5px 12px;
-            margin: 0;
-            background: rgba(0, 0, 0, 0.25);
-            border-left: 2px solid #0284c7;
-            margin-left: 15px;
-        }
-
-        .nested-submenu-items a {
-            padding: 6px 12px;
-            font-size: 0.82rem;
-        }
-
-        .main-wrapper {
-            margin-left: var(--sidebar-width);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            transition: margin-left 0.3s ease-in-out;
-        }
-
-        .topbar {
-            height: var(--topbar-height);
-            background: #ffffff;
-            border-bottom: 1px solid #e2e8f0;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 25px;
-            position: sticky;
-            top: 0;
-            z-index: 1000;
-        }
-
-        .content {
-            padding: 25px;
-            flex-grow: 1;
-        }
-
-        .btn-logout {
-            background-color: #fee2e2;
-            color: #dc2626;
-            border: 1px solid #fecaca;
-            font-size: 0.8rem;
-            font-weight: 600;
-            padding: 5px 12px;
-            border-radius: 6px;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            transition: all 0.2s;
-        }
-
-        .btn-logout:hover {
-            background-color: #dc2626;
-            color: #ffffff;
-            border-color: #dc2626;
-        }
-
-        .sidebar-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            background: rgba(15, 23, 42, 0.6);
-            backdrop-filter: blur(2px);
-            z-index: 1040;
-            display: none;
-        }
-
-        .sidebar-overlay.show {
-            display: block;
-        }
-
-        @media (max-width: 991.98px) {
-            .sidebar {
-                transform: translateX(-100%);
-            }
-            .sidebar.show {
-                transform: translateX(0);
-                box-shadow: 4px 0 20px rgba(0, 0, 0, 0.3);
-            }
-            .main-wrapper {
-                margin-left: 0 !important;
-            }
-            .topbar {
-                padding: 0 15px;
-            }
-            .content {
-                padding: 15px;
+            if (toggleBtn) {
+                toggleBtn.setAttribute('aria-expanded', 'true');
             }
         }
 
-        /* Sidebar menu text capitalization fix */
-.sidebar-menu .sidebar-link,
-.sidebar-menu .submenu-items a,
-.sidebar-menu .nested-submenu-items a,
-.sidebar-menu .nested-toggle-btn {
-    text-transform: none !important;
-}
-    </style>
-</head>
-<body>
+        function closeSidebar() {
+            if (!sidebar || !overlay) return;
 
-<div class="sidebar-overlay" id="sidebarOverlay"></div>
+            sidebar.classList.remove('show');
+            overlay.classList.remove('show');
 
-<aside class="sidebar" id="sidebarMenu">
-    <div class="sidebar-brand">
-        <span><i class="bi bi-hospital-fill text-primary me-2"></i> Clinic Panel</span>
-        <button class="btn btn-sm text-white d-lg-none p-0" id="sidebarCloseBtn" type="button">
-            <i class="bi bi-x-lg fs-5"></i>
-        </button>
-    </div>
-    
-    <ul class="sidebar-menu">
-        <!-- 1. DASHBOARD -->
-        <li>
-            <a href="dashboard.php" class="sidebar-link <?= ($current_page == 'dashboard.php') ? 'active' : '' ?>">
-                <div class="link-inner">
-                    <i class="bi bi-speedometer2"></i>
-                    <span>Dashboard</span>
-                </div>
-            </a>
-        </li>
-
-        <!-- 2. MASTERS MODULE -->
-        <?php if (has_any_access($master_keys, $is_full_admin, $user_menus)): ?>
-        <li>
-            <button class="sidebar-link <?= $is_master_active ? 'text-white' : '' ?>" 
-                    type="button" 
-                    data-bs-toggle="collapse" 
-                    data-bs-target="#adminMasterSubmenu" 
-                    aria-expanded="<?= $is_master_active ? 'true' : 'false' ?>" 
-                    aria-controls="adminMasterSubmenu">
-                <div class="link-inner">
-                    <i class="bi bi-database-fill-gear text-primary"></i>
-                    <span>Masters</span>
-                </div>
-                <i class="bi bi-chevron-down submenu-arrow"></i>
-            </button>
-            
-            <div class="collapse <?= $is_master_active ? 'show' : '' ?>" id="adminMasterSubmenu">
-                <ul class="submenu-items">
-                    <!-- General Masters -->
-                    <?php if (has_access('masters_org', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="org_profile.php" class="<?= ($current_page == 'org_profile.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-building"></i> Hospital Profile
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_states', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_states.php" class="<?= ($current_page == 'master_states.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-map"></i> Master States
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_city', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_city.php" class="<?= ($current_page == 'master_city.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-geo-alt"></i> City Master
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_financial_year', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_financial_year.php" class="<?= ($current_page == 'master_financial_year.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-calendar-check"></i> Financial Year Master
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_centers', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_centers.php" class="<?= ($current_page == 'master_centers.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-geo-alt"></i> Centers / Branches
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_users', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="users.php" class="<?= ($current_page == 'users.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-people"></i> Staff & Users
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <!-- Doctor Masters -->
-                    <?php if (has_access('masters_doctors', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_doctors.php" class="<?= ($current_page == 'master_doctors.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-person-badge"></i> Doctors & Schedules
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_departments', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_departments.php" class="<?= ($current_page == 'master_departments.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-diagram-3"></i> Departments
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_qualifications', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_qualifications.php" class="<?= ($current_page == 'master_qualifications.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-mortarboard"></i> Qualifications
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_specializations', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_specializations.php" class="<?= ($current_page == 'master_specializations.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-heart-pulse"></i> Specializations
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_days', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_days.php" class="<?= ($current_page == 'master_days.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-calendar-day"></i> Working Days
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_payment_modes', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_payment_modes.php" class="<?= ($current_page == 'master_payment_modes.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-wallet2"></i> Payment Modes
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_insurance_categories', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_insurance_categories.php" class="<?= ($current_page == 'master_insurance_categories.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-folder-check"></i> Category & Insurance
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_doctor_services', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_doctor_services.php" class="<?= ($current_page == 'master_doctor_services.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-gear-fill"></i> Doctor Service Master
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('masters_doctor_tariff', $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <a href="master_doctor_tariff.php" class="<?= ($current_page == 'master_doctor_tariff.php') ? 'active-child' : '' ?>">
-                            <i class="bi bi-currency-rupee"></i> Doctor Tariff Master
-                        </a>
-                    </li>
-                    <?php endif; ?>
-
-                    <!-- Prescription Masters Submenu -->
-                    <?php if (has_any_access($rx_keys, $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <button class="nested-toggle-btn <?= $is_prescription_active ? 'text-warning fw-bold' : '' ?>"
-                                type="button"
-                                data-bs-toggle="collapse"
-                                data-bs-target="#nestedPrescriptionSubmenu"
-                                aria-expanded="<?= $is_prescription_active ? 'true' : 'false' ?>"
-                                aria-controls="nestedPrescriptionSubmenu">
-                            <span>
-                                <i class="bi bi-prescription2 text-warning me-2"></i>
-                                Prescription Masters
-                            </span>
-                            <i class="bi bi-chevron-down nested-arrow"></i>
-                        </button>
-
-                        <div class="collapse <?= $is_prescription_active ? 'show' : '' ?>" id="nestedPrescriptionSubmenu">
-                            <ul class="nested-submenu-items">
-                                <?php if (has_access('rx_units', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="master_units.php" class="<?= ($current_page == 'master_units.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-rulers"></i> Unit Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_frequency', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="frequency_master.php" class="<?= ($current_page == 'frequency_master.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-arrow-repeat"></i> Frequency Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_meals', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="master_meals.php" class="<?= ($current_page == 'master_meals.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-cup-hot"></i> Meal Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_durations', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="master_durations.php" class="<?= ($current_page == 'master_durations.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-hourglass-split"></i> Duration Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_medicines', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="master_medicines.php" class="<?= ($current_page == 'master_medicines.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-capsule"></i> Medicine Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_symptoms', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="master_symptoms.php" class="<?= ($current_page == 'master_symptoms.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-activity"></i> Symptom Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_diagnoses', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="master_diagnoses.php" class="<?= ($current_page == 'master_diagnoses.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-clipboard2-pulse"></i> Diagnosis Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_investigations', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="master_investigations.php" class="<?= ($current_page == 'master_investigations.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-clipboard2-check"></i> Investigation Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_vitals', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="master_vitals.php" class="<?= ($current_page == 'master_vitals.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-heart-pulse"></i> Vital Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_advices', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="master_advices.php" class="<?= ($current_page == 'master_advices.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-chat-left-text"></i> Advices Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('rx_templates', $is_full_admin, $user_menus)): ?>
-                                <li>
-                                    <a href="prescription_template_master.php" class="<?= ($current_page == 'prescription_template_master.php') ? 'active-child' : '' ?>">
-                                        <i class="bi bi-file-earmark-medical"></i> Prescription Template Master
-                                    </a>
-                                </li>
-                                <?php endif; ?>
-                            </ul>
-                        </div>
-                    </li>
-                    <?php endif; ?>
-
-                    <!-- Facilities / Infrastructure Masters Submenu -->
-                    <?php if (has_any_access($fac_keys, $is_full_admin, $user_menus)): ?>
-                    <li>
-                        <button class="nested-toggle-btn <?= $is_facility_active ? 'text-warning fw-bold' : '' ?>" 
-                                type="button" 
-                                data-bs-toggle="collapse" 
-                                data-bs-target="#nestedFacilitySubmenu" 
-                                aria-expanded="<?= $is_facility_active ? 'true' : 'false' ?>" 
-                                aria-controls="nestedFacilitySubmenu">
-                            <span><i class="bi bi-buildings text-warning me-2"></i> Facilities & Rooms</span>
-                            <i class="bi bi-chevron-down nested-arrow"></i>
-                        </button>
-
-                        <div class="collapse <?= $is_facility_active ? 'show' : '' ?>" id="nestedFacilitySubmenu">
-                            <ul class="nested-submenu-items">
-                                <?php if (has_access('fac_buildings', $is_full_admin, $user_menus)): ?>
-                                <li><a href="master_buildings.php" class="<?= ($current_page == 'master_buildings.php') ? 'active-child' : '' ?>"><i class="bi bi-building"></i> Buildings</a></li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('fac_blocks', $is_full_admin, $user_menus)): ?>
-                                <li><a href="master_blocks.php" class="<?= ($current_page == 'master_blocks.php') ? 'active-child' : '' ?>"><i class="bi bi-grid"></i> Blocks</a></li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('fac_floors', $is_full_admin, $user_menus)): ?>
-                                <li><a href="master_floors.php" class="<?= ($current_page == 'master_floors.php') ? 'active-child' : '' ?>"><i class="bi bi-layers"></i> Floors</a></li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('fac_room_categories', $is_full_admin, $user_menus)): ?>
-                                <li><a href="master_room_categories.php" class="<?= ($current_page == 'master_room_categories.php') ? 'active-child' : '' ?>"><i class="bi bi-tag"></i> Room Categories</a></li>
-                                <?php endif; ?>
-
-                                <?php if (has_access('fac_rooms', $is_full_admin, $user_menus)): ?>
-                                <li><a href="master_rooms.php" class="<?= ($current_page == 'master_rooms.php') ? 'active-child' : '' ?>"><i class="bi bi-door-open"></i> Rooms Master</a></li>
-                                <?php endif; ?>
-                            </ul>
-                        </div>
-                    </li>
-                    <?php endif; ?>
-                </ul>
-            </div>
-        </li>
-        <?php endif; ?>
-
-        <!-- 3. OPD MODULE -->
-        <?php if (has_any_access($opd_keys, $is_full_admin, $user_menus)): ?>
-        <li>
-            <button class="sidebar-link <?= $is_opd_active ? 'text-white' : '' ?>" 
-                    type="button" 
-                    data-bs-toggle="collapse" 
-                    data-bs-target="#opdMainSubmenu" 
-                    aria-expanded="<?= $is_opd_active ? 'true' : 'false' ?>" 
-                    aria-controls="opdMainSubmenu">
-                <div class="link-inner">
-                    <i class="bi bi-person-wheelchair text-info"></i>
-                    <span>OPD Services</span>
-                </div>
-                <i class="bi bi-chevron-down submenu-arrow"></i>
-            </button>
-
-            <div class="collapse <?= $is_opd_active ? 'show' : '' ?>" id="opdMainSubmenu">
-                <ul class="submenu-items">
-                    <?php if (has_access('opd_appt', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_appointments.php" id="headerAppointmentsLink" class="<?= ($current_page == 'opd_appointments.php') ? 'active-child' : '' ?>"><i class="bi bi-calendar-check"></i> Appointments</a></li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('opd_reg', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_registration.php" class="<?= ($current_page == 'opd_registration.php') ? 'active-child' : '' ?>"><i class="bi bi-plus-circle"></i> Registration & Token</a></li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('opd_queue', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_appointments.php#nav-queue" id="headerQueueDisplayLink" class="<?= ($current_page == 'opd_appointments.php') ? 'active-child' : '' ?>"><i class="bi bi-display"></i> Queue Display</a></li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('opd_doctor', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_doctor.php" class="<?= ($current_page == 'opd_doctor.php') ? 'active-child' : '' ?>"><i class="bi bi-prescription2"></i> Doctor Desk (Rx)</a></li>
-                    <?php endif; ?>
-                    
-                    <?php if (has_access('opd_visit_list', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_visit_list.php" class="<?= ($current_page == 'opd_visit_list.php') ? 'active-child' : '' ?>"><i class="bi bi-journal-medical"></i> OPD Visit List</a></li>
-                    <?php endif; ?>
-                </ul>
-            </div>
-        </li>
-        <?php endif; ?>
-    </ul>
-</aside>
-
-<div class="main-wrapper">
-    <header class="topbar">
-        <div class="d-flex align-items-center gap-2">
-            <button class="btn btn-sm btn-outline-secondary d-lg-none" id="sidebarToggleBtn" type="button">
-                <i class="bi bi-list fs-5"></i>
-            </button>
-            <span class="fw-semibold text-secondary d-none d-sm-inline">
-                <i class="bi bi-hospital me-1 text-primary"></i> <?= htmlspecialchars($_SESSION['org_name'] ?? 'Hospital Admin') ?>
-            </span>
-        </div>
-        
-        <div class="d-flex align-items-center gap-2 gap-sm-3">
-            <div class="d-flex align-items-center gap-2">
-                <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center" style="width: 32px; height: 32px; font-size: 0.9rem;">
-                    <i class="bi bi-person-badge"></i>
-                </div>
-                <span class="fw-bold small text-dark d-none d-sm-inline"><?= htmlspecialchars($_SESSION['fullname'] ?? $_SESSION['username'] ?? 'Admin') ?></span>
-            </div>
-
-            <div class="vr my-1 text-muted d-none d-sm-block" style="height: 20px;"></div>
-
-            <a href="../logout.php" class="btn-logout" title="Logout">
-                <i class="bi bi-box-arrow-right"></i> <span class="d-none d-sm-inline">Logout</span>
-            </a>
-        </div>
-    </header>
-    
-    <main class="content">
-
-<!-- <script>
-document.addEventListener('DOMContentLoaded', function () {
-    // Mobile Drawer Toggle Handler
-    const sidebar = document.getElementById('sidebarMenu');
-    const overlay = document.getElementById('sidebarOverlay');
-    const toggleBtn = document.getElementById('sidebarToggleBtn');
-    const closeBtn = document.getElementById('sidebarCloseBtn');
-
-    function toggleSidebar() {
-        if (sidebar && overlay) {
-            sidebar.classList.toggle('show');
-            overlay.classList.toggle('show');
+            if (toggleBtn) {
+                toggleBtn.setAttribute('aria-expanded', 'false');
+            }
         }
+
+        function toggleSidebar() {
+            if (!sidebar || !overlay) return;
+
+            if (sidebar.classList.contains('show')) {
+                closeSidebar();
+            } else {
+                openSidebar();
+            }
+        }
+
+        if (toggleBtn && sidebar && overlay) {
+            toggleBtn.addEventListener('click', function (event) {
+                event.preventDefault();
+                toggleSidebar();
+            });
+        }
+
+        if (closeBtn) {
+            closeBtn.addEventListener('click', closeSidebar);
+        }
+
+        if (overlay) {
+            overlay.addEventListener('click', closeSidebar);
+        }
+
+        document.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape') {
+                closeSidebar();
+            }
+        });
+
+        if (sidebar) {
+            sidebar.querySelectorAll('a[href]').forEach(function (link) {
+                link.addEventListener('click', function () {
+                    if (window.innerWidth < 992) {
+                        closeSidebar();
+                    }
+                });
+            });
+        }
+
+        window.addEventListener('resize', function () {
+            if (window.innerWidth >= 992) {
+                closeSidebar();
+            }
+        });
+
+
+        /* =====================================================
+           2. MAIN MENUS
+           Masters <-> OPD Services
+           ===================================================== */
+
+        const mainMenuCollapses = document.querySelectorAll(
+            '.sidebar-menu > li > .collapse'
+        );
+
+        mainMenuCollapses.forEach(function (collapseEl) {
+
+            collapseEl.addEventListener('show.bs.collapse', function () {
+
+                mainMenuCollapses.forEach(function (otherEl) {
+
+                    if (
+                        otherEl !== collapseEl &&
+                        otherEl.classList.contains('show')
+                    ) {
+                        bootstrap.Collapse
+                            .getOrCreateInstance(otherEl, {
+                                toggle: false
+                            })
+                            .hide();
+                    }
+
+                });
+
+            });
+
+        });
+
+
+        /* =====================================================
+           3. NESTED MENUS
+           Prescription Masters <-> Facilities & Rooms
+           ===================================================== */
+
+        const nestedCollapses = document.querySelectorAll(
+            '#nestedPrescriptionSubmenu, #nestedFacilitySubmenu'
+        );
+
+        nestedCollapses.forEach(function (collapseEl) {
+
+            collapseEl.addEventListener('show.bs.collapse', function () {
+
+                nestedCollapses.forEach(function (otherEl) {
+
+                    if (
+                        otherEl !== collapseEl &&
+                        otherEl.classList.contains('show')
+                    ) {
+                        bootstrap.Collapse
+                            .getOrCreateInstance(otherEl, {
+                                toggle: false
+                            })
+                            .hide();
+                    }
+
+                });
+
+            });
+
+        });
+
+
+        /* =====================================================
+           4. SIDEBAR SCROLL POSITION
+           All Masters + Prescription + Facilities pages
+           ===================================================== */
+
+        const sidebarMenu = document.querySelector('.sidebar-menu');
+
+        const prescriptionPages = [
+            'master_units.php',
+            'frequency_master.php',
+            'master_frequency.php',
+            'master_meals.php',
+            'master_durations.php',
+            'master_medicines.php',
+            'master_routes.php',
+            'master_frequencies.php',
+            'master_timings.php',
+            'master_prescription_instructions.php',
+            'master_symptoms.php',
+            'master_diagnoses.php',
+            'master_investigations.php',
+            'master_vitals.php',
+            'master_advices.php',
+            'prescription_template_master.php'
+        ];
+
+        const facilityPages = [
+            'master_buildings.php',
+            'master_blocks.php',
+            'master_floors.php',
+            'master_room_categories.php',
+            'master_rooms.php'
+        ];
+
+        const generalMasterPages = [
+            'org_profile.php',
+            'master_states.php',
+            'master_city.php',
+            'master_financial_year.php',
+            'master_centers.php',
+            'users.php',
+            'master_doctors.php',
+            'master_departments.php',
+            'master_qualifications.php',
+            'master_specializations.php',
+            'master_days.php',
+            'master_payment_modes.php',
+            'master_insurance_categories.php',
+            'master_doctor_services.php',
+            'master_doctor_tariff.php'
+        ];
+
+        const currentPage = window.location.pathname
+            .split('/')
+            .pop();
+
+        const preserveSidebarScroll =
+            prescriptionPages.includes(currentPage) ||
+            facilityPages.includes(currentPage) ||
+            generalMasterPages.includes(currentPage);
+
+        const scrollStorageKey = 'admin_sidebar_scroll_top';
+
+        if (sidebarMenu) {
+
+            if (preserveSidebarScroll) {
+
+                const savedScroll =
+                    sessionStorage.getItem(scrollStorageKey);
+
+                if (savedScroll !== null) {
+
+                    const restoreScroll = function () {
+                        sidebarMenu.scrollTop =
+                            parseInt(savedScroll, 10) || 0;
+                    };
+
+                    restoreScroll();
+                    requestAnimationFrame(restoreScroll);
+                    setTimeout(restoreScroll, 150);
+                    setTimeout(restoreScroll, 350);
+                }
+
+                // Save the position continuously.
+                sidebarMenu.addEventListener('scroll', function () {
+                    sessionStorage.setItem(
+                        scrollStorageKey,
+                        String(sidebarMenu.scrollTop)
+                    );
+                }, { passive: true });
+
+                // Save before any sidebar link navigation.
+                sidebarMenu.querySelectorAll('a[href]').forEach(
+                    function (link) {
+
+                        link.addEventListener('click', function () {
+                            sessionStorage.setItem(
+                                scrollStorageKey,
+                                String(sidebarMenu.scrollTop)
+                            );
+                        });
+
+                    }
+                );
+
+            } else {
+                sessionStorage.removeItem(scrollStorageKey);
+            }
+        }
+
+
+        /* =====================================================
+           5. PRESERVE SCROLL WHEN NESTED MENUS EXPAND/COLLAPSE
+           ===================================================== */
+
+        [
+            'nestedPrescriptionSubmenu',
+            'nestedFacilitySubmenu'
+        ].forEach(function (menuId) {
+
+            const collapseEl = document.getElementById(menuId);
+
+            if (!collapseEl || !sidebarMenu) return;
+
+            let savedPosition = 0;
+
+            collapseEl.addEventListener('show.bs.collapse', function () {
+                savedPosition = sidebarMenu.scrollTop;
+            });
+
+            collapseEl.addEventListener('shown.bs.collapse', function () {
+                sidebarMenu.scrollTop = savedPosition;
+            });
+
+            collapseEl.addEventListener('hide.bs.collapse', function () {
+                savedPosition = sidebarMenu.scrollTop;
+            });
+
+            collapseEl.addEventListener('hidden.bs.collapse', function () {
+                sidebarMenu.scrollTop = savedPosition;
+            });
+
+        });
+
+
+        /* =====================================================
+           6. DOCTOR DESK FOLLOW-UP DATE
+           DD-MM-YYYY
+           ===================================================== */
+
+        const followUpInput =
+            document.getElementById('follow_up_date');
+
+        const calendarBtn =
+            document.getElementById('followUpCalendarBtn');
+
+        if (
+            followUpInput &&
+            typeof flatpickr !== 'undefined' &&
+            !followUpInput._flatpickr
+        ) {
+
+            const followUpPicker = flatpickr(followUpInput, {
+                dateFormat: 'd-m-Y',
+                allowInput: true,
+                disableMobile: true,
+                clickOpens: true
+            });
+
+            if (calendarBtn) {
+                calendarBtn.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    followUpPicker.open();
+                });
+            }
+        }
+
     }
 
-    if (toggleBtn) toggleBtn.addEventListener('click', toggleSidebar);
-    if (closeBtn) closeBtn.addEventListener('click', toggleSidebar);
-    if (overlay) overlay.addEventListener('click', toggleSidebar);
-
-    // Queue tab direct hash handler
-    if (window.location.hash === '#nav-queue') {
-        const queueLink = document.getElementById('headerQueueDisplayLink');
-        if (queueLink) queueLink.classList.add('active-child');
-
-        const queueTab = document.querySelector('button[data-bs-target="#nav-queue"]');
-        if (queueTab && typeof bootstrap !== 'undefined') {
-            new bootstrap.Tab(queueTab).show();
-        }
+    if (document.readyState === 'loading') {
+        document.addEventListener(
+            'DOMContentLoaded',
+            initializeLayout,
+            { once: true }
+        );
+    } else {
+        initializeLayout();
     }
-});
-</script> -->
+
+})();
+</script>
+
+</body>
+</html>
