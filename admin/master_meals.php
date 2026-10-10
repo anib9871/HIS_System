@@ -10,6 +10,50 @@ $center_id  = (int)($_SESSION['center_id'] ?? 1);
 $created_by = (int)($_SESSION['user_id'] ?? 0);
 
 /*
+ * DEFAULT MEAL INSTRUCTIONS: seed missing values for each org/center.
+ * Existing records and user edits are preserved.
+ */
+$defaultMeals = [
+    ['BEFORE MEAL', 'BM'],
+    ['AFTER MEAL', 'AM'],
+    ['WITH MEAL', 'WM'],
+    ['EMPTY STOMACH', 'ES'],
+    ['BEFORE BREAKFAST', 'BBF'],
+    ['AFTER BREAKFAST', 'ABF'],
+    ['BEFORE LUNCH', 'BL'],
+    ['AFTER LUNCH', 'AL'],
+    ['BEFORE DINNER', 'BD'],
+    ['AFTER DINNER', 'AD'],
+    ['WITH BREAKFAST', 'WB'],
+    ['WITH LUNCH', 'WL'],
+    ['WITH DINNER', 'WD'],
+    ['BEFORE FOOD', 'AC'],
+    ['AFTER FOOD', 'PC'],
+    ['BETWEEN MEALS', 'BTM'],
+    ['WITH OR AFTER FOOD', 'WAF'],
+    ['ON EMPTY STOMACH', 'OES'],
+    ['AT BEDTIME', 'HS'],
+    ['AS DIRECTED', 'ADIR'],
+];
+try {
+    $checkMeal = $tenant_pdo->prepare(
+        "SELECT id FROM master_meals WHERE org_id = ? AND center_id = ? AND LOWER(TRIM(meal_name)) = LOWER(TRIM(?)) LIMIT 1"
+    );
+    $insertMeal = $tenant_pdo->prepare(
+        "INSERT INTO master_meals (org_id, center_id, meal_name, meal_code, status, created_by) VALUES (?, ?, ?, ?, 1, ?)"
+    );
+    foreach ($defaultMeals as [$defaultName, $defaultCode]) {
+        $checkMeal->execute([$org_id, $center_id, $defaultName]);
+        if (!$checkMeal->fetchColumn()) {
+            $insertMeal->execute([$org_id, $center_id, $defaultName, $defaultCode, $created_by ?: null]);
+        }
+    }
+} catch (PDOException $e) {
+    // Do not interrupt the master page if seeding is unavailable.
+}
+
+
+/*
  * SAVE / UPDATE
  */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_meal'])) {
@@ -20,9 +64,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_meal'])) {
     $edit_id   = (int)($_POST['edit_id'] ?? 0);
 
     if ($meal_name === '') {
-        set_flash_err("Meal Name is required.");
+        $mealAlert = ['type' => 'error', 'message' => 'Meal Name is required.'];
     } else {
         try {
+            // Case-insensitive duplicate check, excluding the current row during edit.
+            $dup = $tenant_pdo->prepare("
+                SELECT id FROM master_meals
+                WHERE org_id = ? AND center_id = ? AND LOWER(TRIM(meal_name)) = LOWER(TRIM(?))
+                  AND id <> ?
+                LIMIT 1
+            ");
+            $dup->execute([$org_id, $center_id, $meal_name, $edit_id]);
+            if ($dup->fetchColumn()) {
+                $mealAlert = ['type' => 'error', 'message' => 'This meal name already exists.'];
+            } else {
 
             if ($edit_id > 0) {
                 $stmt = $tenant_pdo->prepare("
@@ -38,7 +93,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_meal'])) {
                     $org_id,
                     $center_id
                 ]);
-                set_flash_msg("Meal updated successfully.");
+                header('Location: master_meals.php?meal_alert=success&meal_message=' . rawurlencode('Meal updated successfully.'));
+                exit;
             } else {
                 $stmt = $tenant_pdo->prepare("
                     INSERT INTO master_meals (org_id, center_id, meal_name, meal_code, status, created_by)
@@ -52,14 +108,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_meal'])) {
                     $status,
                     $created_by ?: null
                 ]);
-                set_flash_msg("Meal added successfully.");
+                header('Location: master_meals.php?meal_alert=success&meal_message=' . rawurlencode('Meal added successfully.'));
+                exit;
             }
 
-            header("Location: master_meals.php");
-            exit;
-
+            }
         } catch (PDOException $e) {
-            set_flash_err("Database Error: " . $e->getMessage());
+            $mealAlert = ['type' => 'error', 'message' => 'Database Error: ' . $e->getMessage()];
         }
     }
 }
@@ -91,6 +146,14 @@ $meals = $tenant_pdo->prepare("
 ");
 $meals->execute([$org_id, $center_id]);
 $meals = $meals->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+// Popup messages are passed through this page's own query parameters, independent of layout_header flash handling.
+if (isset($_GET['meal_alert'], $_GET['meal_message']) && in_array($_GET['meal_alert'], ['success', 'error'], true)) {
+    $mealAlert = [
+        'type' => $_GET['meal_alert'],
+        'message' => trim((string)$_GET['meal_message'])
+    ];
+}
 
 require_once __DIR__ . '/layout_header.php';
 ?>
@@ -264,7 +327,77 @@ function resetForm() {
     document.getElementById('btnSubmit').innerText = 'SAVE MEAL';
     document.getElementById('status').checked = true;
     document.getElementById('meal_name').focus();
+    const btn = document.getElementById('btnSubmit');
+    btn.disabled = false;
+    document.getElementById('meal_name').dispatchEvent(new Event('input'));
+}
+
+// Live duplicate check
+const mealNameInput = document.getElementById('meal_name');
+const mealSaveButton = document.getElementById('btnSubmit');
+let mealDuplicateHint = document.getElementById('mealDuplicateHint');
+if (!mealDuplicateHint) {
+    mealDuplicateHint = document.createElement('div');
+    mealDuplicateHint.id = 'mealDuplicateHint';
+    mealDuplicateHint.className = 'small mt-1';
+    mealNameInput.parentNode.appendChild(mealDuplicateHint);
+}
+const existingMeals = <?= json_encode(array_map(fn($m) => ['id'=>(int)$m['id'], 'name'=>mb_strtolower(preg_replace('/\\s+/', ' ', trim($m['meal_name'])))], $meals), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
+mealNameInput.addEventListener('input', function () {
+    const value = this.value.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+    const editId = parseInt(document.getElementById('edit_id').value || '0', 10);
+    const duplicate = value !== '' && existingMeals.some(m => String(m.name).trim().replace(/\s+/g, ' ').toLocaleLowerCase() === value && m.id !== editId);
+    mealDuplicateHint.textContent = duplicate ? 'This meal name already exists.' : '';
+    mealDuplicateHint.className = 'small mt-1 ' + (duplicate ? 'text-danger' : 'text-success');
+    mealSaveButton.disabled = duplicate;
+});
+mealNameInput.dispatchEvent(new Event('input')); 
+</script>
+
+
+<style>
+.meal-alert-overlay{position:fixed;inset:0;background:rgba(15,23,42,.35);display:flex;align-items:center;justify-content:center;z-index:99999;padding:16px}
+.meal-alert-box{background:#fff;border-radius:16px;width:min(360px,92vw);padding:22px 24px 18px;text-align:center;box-shadow:0 18px 55px rgba(15,23,42,.25);animation:mealAlertIn .18s ease-out}
+.meal-alert-icon{width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:30px;font-weight:700}
+.meal-alert-success .meal-alert-icon{color:#16a34a;border:3px solid #86efac;background:#f0fdf4}
+.meal-alert-error .meal-alert-icon{color:#dc2626;border:3px solid #fca5a5;background:#fef2f2}
+.meal-alert-title{font-size:19px;font-weight:700;color:#1e293b;margin-bottom:7px}
+.meal-alert-message{font-size:13px;color:#64748b;margin-bottom:15px;overflow-wrap:anywhere}
+.meal-alert-ok{border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600;padding:9px 28px;cursor:pointer}
+.meal-alert-progress{height:3px;background:#e2e8f0;margin-top:16px;border-radius:5px;overflow:hidden}
+.meal-alert-progress span{display:block;height:100%;background:#16a34a;width:100%;transform-origin:left}
+@keyframes mealAlertIn{from{opacity:0;transform:translateY(6px) scale(.97)}to{opacity:1;transform:none}}
+</style>
+<script>
+function showMealAlert(type, message) {
+    const overlay = document.createElement('div');
+    overlay.className = 'meal-alert-overlay';
+    const success = type === 'success';
+    overlay.innerHTML = `<div class="meal-alert-box ${success ? 'meal-alert-success' : 'meal-alert-error'}" role="alertdialog" aria-modal="true">
+        <div class="meal-alert-icon">${success ? '✓' : '!'}</div>
+        <div class="meal-alert-title">${success ? 'Successful!' : 'Something went wrong'}</div>
+        <div class="meal-alert-message"></div>
+        ${success ? '<div class="meal-alert-progress"><span></span></div>' : '<button type="button" class="meal-alert-ok">OK</button>'}
+    </div>`;
+    overlay.querySelector('.meal-alert-message').textContent = message;
+    document.body.appendChild(overlay);
+    if (success) {
+        const bar = overlay.querySelector('.meal-alert-progress span');
+        bar.style.transition = 'transform 5s linear';
+        requestAnimationFrame(() => { bar.style.transform = 'scaleX(0)'; });
+        setTimeout(() => overlay.remove(), 5000);
+    } else {
+        overlay.querySelector('.meal-alert-ok').addEventListener('click', () => overlay.remove());
+    }
 }
 </script>
+<?php if (!empty($mealAlert)): ?>
+<script>
+document.addEventListener('DOMContentLoaded', () => showMealAlert(
+    <?= json_encode($mealAlert['type']) ?>,
+    <?= json_encode($mealAlert['message'], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>
+));
+</script>
+<?php endif; ?>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
