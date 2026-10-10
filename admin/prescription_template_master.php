@@ -749,19 +749,45 @@ require_once __DIR__ . '/layout_header.php';
     border-color: #2563eb !important;
 }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<style>
+.pt-swal-popup { border-radius: 14px !important; }
+.pt-swal-title { font-size: 20px !important; padding-top: 8px !important; }
+.pt-swal-text { font-size: 13px !important; }
+.pt-swal-popup .swal2-icon { transform: scale(.78); margin-top: 8px; margin-bottom: 8px; }
+.pt-swal-popup .swal2-confirm { font-size: 12px !important; padding: 8px 22px !important; }
+</style>
 
 <div class="container-fluid px-0">
 
-    <?php if ($err): ?>
-        <div class="alert alert-danger py-2 px-3 fw-bold">
-            <?= htmlspecialchars($err) ?>
-        </div>
-    <?php endif; ?>
-
-    <?php if ($success): ?>
-        <div class="alert alert-success py-2 px-3 fw-bold">
-            <?= htmlspecialchars($success) ?>
-        </div>
+    <?php if ($err || $success): ?>
+        <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            if (typeof Swal === 'undefined') return;
+            <?php if ($err): ?>
+            Swal.fire({
+                icon: 'error',
+                title: 'Something went wrong',
+                text: <?= json_encode($err, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
+                width: '340px',
+                padding: '1.1em',
+                confirmButtonText: 'OK',
+                customClass: { popup: 'pt-swal-popup', title: 'pt-swal-title', htmlContainer: 'pt-swal-text' }
+            });
+            <?php elseif ($success): ?>
+            Swal.fire({
+                icon: 'success',
+                title: 'Successful!',
+                text: <?= json_encode($success, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>,
+                width: '340px',
+                padding: '1.1em',
+                timer: 1800,
+                showConfirmButton: false,
+                customClass: { popup: 'pt-swal-popup', title: 'pt-swal-title', htmlContainer: 'pt-swal-text' }
+            });
+            <?php endif; ?>
+        });
+        </script>
     <?php endif; ?>
 
     <div class="d-flex justify-content-between align-items-center mb-3">
