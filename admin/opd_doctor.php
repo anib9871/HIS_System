@@ -1553,7 +1553,7 @@ function openAddMedicineModal() {
 async function saveMedicineFull() {
     const name = document.getElementById('new_med_name').value.trim();
     if(!name) {
-        alert('Please enter a medicine name.');
+        Swal.fire({ icon: 'warning', title: 'Required', text: 'Please enter a medicine name.' });
         document.getElementById('new_med_name').focus();
         return;
     }
@@ -1582,11 +1582,11 @@ async function saveMedicineFull() {
             refreshMasterData(); 
             Swal.fire({ icon: 'success', title: 'Added', text: 'MEDICINE ADDED TO MASTER.', timer: 1500, showConfirmButton: false });
         } else {
-            alert('Error: ' + data.message);
+            Swal.fire({ icon: 'error', title: 'Error', text: data.message || 'Unable to complete the request.' });
         }
     } catch(e) {
         console.error(e);
-        alert('Error saving medicine.');
+        Swal.fire({ icon: 'error', title: 'Error', text: 'Error saving medicine. Please try again.' });
     }
 }
 
@@ -1607,7 +1607,7 @@ async function saveQuickAdd() {
     const name = nameInput.value.trim();
 
     if(!name) {
-        alert('Please enter a name.');
+        Swal.fire({ icon: 'warning', title: 'Required', text: 'Please enter a name.' });
         nameInput.focus();
         return;
     }
@@ -1630,11 +1630,11 @@ async function saveQuickAdd() {
             refreshMasterData();
             Swal.fire({ icon: 'success', title: 'Added', text: 'ADDED TO MASTER.', timer: 1500, showConfirmButton: false });
         } else {
-            alert('Error: ' + data.message);
+            Swal.fire({ icon: 'error', title: 'Error', text: data.message || 'Unable to complete the request.' });
         }
     } catch(e) {
         console.error(e);
-        alert('Error saving data.');
+        Swal.fire({ icon: 'error', title: 'Error', text: 'Error saving data. Please try again.' });
     }
 }
 
@@ -1700,11 +1700,11 @@ async function refreshMasterData() {
             medicineOptionsDataList();
 
         } else {
-            alert('Failed to refresh: ' + data.message);
+            Swal.fire({ icon: 'error', title: 'Refresh Failed', text: data.message || 'Failed to refresh master data.' });
         }
     } catch (e) {
         console.error(e);
-        alert('Error refreshing masters.');
+        Swal.fire({ icon: 'error', title: 'Refresh Failed', text: 'Error refreshing masters. Please try again.' });
     }
 }
 
