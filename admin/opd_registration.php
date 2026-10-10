@@ -1338,7 +1338,7 @@ input[inputmode="numeric"],
 </style>
 
 <?php if (!empty($err)): ?>
-    <div class="alert alert-danger py-2 px-3 mb-3 fw-bold no-print"><i class="bi bi-exclamation-triangle-fill me-2"></i><?= htmlspecialchars($err) ?></div>
+    <div id="opdRegistrationErrorMessage" class="d-none"><?= htmlspecialchars($err, ENT_QUOTES, 'UTF-8') ?></div>
 <?php endif; ?>
 
 
@@ -1988,6 +1988,28 @@ input[inputmode="numeric"],
         </div>
     </div>
 </div>
+
+<!-- SweetAlert2: consistent alerts for OPD Registration & Billing -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const errorNode = document.getElementById('opdRegistrationErrorMessage');
+    if (errorNode && errorNode.textContent.trim()) {
+        const message = errorNode.textContent.trim();
+        if (window.Swal) {
+            Swal.fire({
+                icon: 'error',
+                title: 'Unable to Complete',
+                text: message,
+                confirmButtonText: 'OK',
+                confirmButtonColor: '#2563eb'
+            });
+        } else {
+            window.alert(message);
+        }
+    }
+});
+</script>
 
 <script>
 // =====================================================================
@@ -3198,7 +3220,17 @@ function printReceiptFromPreview() {
     if (!currentReceiptHtml) return;
     const printWindow = window.open('', '_blank', 'width=900,height=950');
     if (!printWindow) {
-        alert('Please allow pop-ups for printing the receipt.');
+        if (window.Swal) {
+            Swal.fire({
+                icon: 'warning',
+                title: 'Pop-up Blocked',
+                text: 'Please allow pop-ups in your browser to print the receipt.',
+                confirmButtonText: 'OK',
+                confirmButtonColor: '#2563eb'
+            });
+        } else {
+            window.alert('Please allow pop-ups in your browser to print the receipt.');
+        }
         return;
     }
     printWindow.document.open();
