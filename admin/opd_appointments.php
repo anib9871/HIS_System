@@ -264,7 +264,7 @@ if ($edit_appointment_id > 0) {
 
         $ea = $tenant_pdo->prepare("
 
-            SELECT a.\*,
+            SELECT a.*,
 
                    COALESCE(p.fullname, a.patient_name) AS patient_display_name,
 
@@ -732,7 +732,7 @@ $date_filter = $_GET['date_filter'] ?? $today_date;
 
 $appointments = $tenant_pdo->prepare("
 
-    SELECT a.\*,
+    SELECT a.*,
 
            COALESCE(p.fullname, a.patient_name) AS patient_display_name,
 
@@ -768,7 +768,7 @@ $appointments = $appointments->fetchAll(PDO::FETCH_ASSOC);
 
 $queue_list = $tenant_pdo->prepare("
 
-    SELECT qt.\*, v.token_no, p.fullname, p.age, p.gender, p.mobile, d.full_name as doctor_name
+    SELECT qt.*, v.token_no, p.fullname, p.age, p.gender, p.mobile, d.full_name as doctor_name
 
     FROM opd_queue_tracking qt
 
@@ -826,7 +826,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
 
 
-/\* APPOINTMENT SCREEN: ALL TEXT IN CAPITALS \*/
+/* APPOINTMENT SCREEN: ALL TEXT IN CAPITALS */
 
 .appointment-booking-card input[type="text"],
 
@@ -834,9 +834,9 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
 .appointment-schedule-card,
 
-\#familyMemberModal,
+#familyMemberModal,
 
-\#familyMemberModal \* {
+#familyMemberModal * {
 
     text-transform: uppercase !important;
 
@@ -844,13 +844,13 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
 
 
-/\* Keep mobile/search/date/time/numeric values unaffected \*/
+/* Keep mobile/search/date/time/numeric values unaffected */
 
-\#appointment_mobile,
+#appointment_mobile,
 
-\#appointment_date_display,
+#appointment_date_display,
 
-\#date_filter_display,
+#date_filter_display,
 
 .appointment-booking-card input[type="time"],
 
@@ -926,7 +926,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
 }
 
-/\* BLINKING STATUS FOR PATIENT INSIDE CABIN \*/
+/* BLINKING STATUS FOR PATIENT INSIDE CABIN */
 
 .status-blink {
 
@@ -1102,7 +1102,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
 
 
-/\* Keep appointment Action dropdown visible above the table/card. \*/
+/* Keep appointment Action dropdown visible above the table/card. */
 
 .appointment-schedule-card {
 
@@ -1235,7 +1235,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
                         <div class="col-md-2">
 
-                            <label class="form-label small fw-semibold text-secondary mb-1">Date \*</label>
+                            <label class="form-label small fw-semibold text-secondary mb-1">Date *</label>
 
                             <div class="appt-date-wrap">
 
@@ -1285,7 +1285,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
                         <div class="col-md-2">
 
-                            <label class="form-label small fw-semibold text-secondary mb-1">Mobile No. / Search \*</label>
+                            <label class="form-label small fw-semibold text-secondary mb-1">Mobile No. / Search *</label>
 
                             <input type="text" name="mobile" id="appointment_mobile" class="form-control form-control-sm" maxlength="10" placeholder="MOBILE NO." value="<?= htmlspecialchars($edit_appointment['patient_display_mobile'] ?? $edit_appointment['mobile'] ?? '') ?>" required>
 
@@ -1305,7 +1305,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
                         <div class="col-md-3">
 
-                            <label class="form-label small fw-semibold text-secondary mb-1">Patient Name \*</label>
+                            <label class="form-label small fw-semibold text-secondary mb-1">Patient Name *</label>
 
                             <input type="text" name="patient_name" id="appointment_patient_name" class="form-control form-control-sm" placeholder="PATIENT NAME" value="<?= htmlspecialchars($edit_appointment['patient_display_name'] ?? $edit_appointment['patient_name'] ?? '') ?>" required>
 
@@ -1363,7 +1363,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
                         <div class="col-md-3">
 
-                            <label class="form-label small fw-semibold text-secondary mb-1">Doctor \*</label>
+                            <label class="form-label small fw-semibold text-secondary mb-1">Doctor *</label>
 
                             <select name="doctor_id" id="doctor_id" class="form-select form-select-sm" required>
 
@@ -1866,7 +1866,7 @@ function ddmmyyyyToISO(value) {
 
     if (dt.getFullYear() !== year || dt.getMonth() !== month - 1 || dt.getDate() !== day) return '';
 
-    return \`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}\`;
+    return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
 
 }
 
@@ -1874,7 +1874,7 @@ function isoToDDMMYYYY(value) {
 
     const m = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
 
-    return m ? \`${m[3]}-${m[2]}-${m[1]}\` : '';
+    return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
 
 }
 
