@@ -3,10 +3,14 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
+// Session start karein agar nahi hai
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 $page_title = "City Master";
 
 require_once __DIR__ . '/../config/tenant_db.php';
-require_once __DIR__ . '/../config/alerts.php';
 
 $org_id = (int)($_SESSION['org_id'] ?? 1);
 $center_id = (int)($_SESSION['center_id'] ?? 1);
@@ -27,62 +31,60 @@ try {
 } catch (Exception $e) {}
 
 // ==========================================
-// 1. AUTO-SEED TOP CITIES LOGIC
+// 1. AJAX Handler: Check if City Name Already Exists
+// ==========================================
+if (isset($_GET['check_name'])) {
+    header('Content-Type: application/json');
+    $name = strtoupper(trim($_GET['check_name']));
+    $s_id = (int)($_GET['s_id'] ?? 0);
+    $edit_id = (int)($_GET['edit_id'] ?? 0);
+    
+    $stmt =$tenant_pdo->prepare("SELECT COUNT(*) FROM master_city WHERE city_name = ? AND state_id = ? AND org_id = ? AND center_id = ? AND id != ?");
+    $stmt->execute([$name, $s_id,$org_id, $center_id,$edit_id]);
+    $exists =$stmt->fetchColumn() > 0;
+    
+    echo json_encode(['exists' => $exists]);
+    exit;
+}
+
+// ==========================================
+// 2. AUTO-SEED TOP CITIES LOGIC
 // ==========================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['seed_cities'])) {
     // List of major states and their top cities
-    $top_cities_data = [
-        'UTTAR PRADESH' => ['LUCKNOW', 'KANPUR', 'AGRA', 'VARANASI', 'PRAYAGRAJ', 'NOIDA', 'GHAZIABAD', 'GORAKHPUR', 'MEERUT', 'BAREILLY'],
-        'DELHI' => ['NEW DELHI', 'SOUTH DELHI', 'EAST DELHI', 'NORTH DELHI'],
-        'MAHARASHTRA' => ['MUMBAI', 'PUNE', 'NAGPUR', 'NASHIK', 'THANE', 'AURANGABAD'],
-        'KARNATAKA' => ['BENGALURU', 'MYSURU', 'MANGALURU', 'HUBLI'],
-        'GUJARAT' => ['AHMEDABAD', 'SURAT', 'VADODARA', 'RAJKOT', 'GANDHINAGAR'],
-        'TELANGANA' => ['HYDERABAD', 'WARANGAL', 'NIZAMABAD'],
-        'TAMIL NADU' => ['CHENNAI', 'COIMBATORE', 'MADURAI', 'SALEM'],
-        'WEST BENGAL' => ['KOLKATA', 'HOWRAH', 'DARJEELING', 'ASANSOL'],
-        'RAJASTHAN' => ['JAIPUR', 'JODHPUR', 'UDAIPUR', 'KOTA', 'AJMER'],
-        'BIHAR' => ['PATNA', 'GAYA', 'MUZAFFARPUR', 'BHAGALPUR'],
-        'MADHYA PRADESH' => ['BHOPAL', 'INDORE', 'GWALIOR', 'JABALPUR', 'UJJAIN'],
-        'PUNJAB' => ['LUDHIANA', 'AMRITSAR', 'JALANDHAR', 'CHANDIGARH', 'PATIALA'],
-        'HARYANA' => ['GURUGRAM', 'FARIDABAD', 'PANIPAT', 'AMBALA']
-    ];
-    
-    $added_count = 0;
+    $top_cities_data = [         'UTTAR PRADESH' => ['LUCKNOW', 'KANPUR', 'AGRA', 'VARANASI', 'PRAYAGRAJ', 'NOIDA', 'GHAZIABAD', 'GORAKHPUR', 'MEERUT', 'BAREILLY'],         'DELHI' => ['NEW DELHI', 'SOUTH DELHI', 'EAST DELHI', 'NORTH DELHI'],         'MAHARASHTRA' => ['MUMBAI', 'PUNE', 'NAGPUR', 'NASHIK', 'THANE', 'AURANGABAD'],         'KARNATAKA' => ['BENGALURU', 'MYSURU', 'MANGALURU', 'HUBLI'],         'GUJARAT' => ['AHMEDABAD', 'SURAT', 'VADODARA', 'RAJKOT', 'GANDHINAGAR'],         'TELANGANA' => ['HYDERABAD', 'WARANGAL', 'NIZAMABAD'],         'TAMIL NADU' => ['CHENNAI', 'COIMBATORE', 'MADURAI', 'SALEM'],         'WEST BENGAL' => ['KOLKATA', 'HOWRAH', 'DARJEELING', 'ASANSOL'],         'RAJASTHAN' => ['JAIPUR', 'JODHPUR', 'UDAIPUR', 'KOTA', 'AJMER'],         'BIHAR' => ['PATNA', 'GAYA', 'MUZAFFARPUR', 'BHAGALPUR'],         'MADHYA PRADESH' => ['BHOPAL', 'INDORE', 'GWALIOR', 'JABALPUR', 'UJJAIN'],         'PUNJAB' => ['LUDHIANA', 'AMRITSAR', 'JALANDHAR', 'CHANDIGARH', 'PATIALA'],         'HARYANA' => ['GURUGRAM', 'FARIDABAD', 'PANIPAT', 'AMBALA']     ];$added_count = 0;
     try {
-        foreach ($top_cities_data as $state_name => $city_list) {
+        foreach ($top_cities_data as $state_name =>$city_list) {
             // Find the State ID for this state name
-            $stmt = $tenant_pdo->prepare("SELECT id FROM master_states WHERE UPPER(state_name) = ? AND org_id = ? AND center_id = ? LIMIT 1");
-            $stmt->execute([strtoupper($state_name), $org_id, $center_id]);
-            $state_id = $stmt->fetchColumn();
+            $stmt =$tenant_pdo->prepare("SELECT id FROM master_states WHERE UPPER(state_name) = ? AND org_id = ? AND center_id = ? LIMIT 1");
+            $stmt->execute([strtoupper($state_name), $org_id,$center_id]);
+            $state_id =$stmt->fetchColumn();
             
             if ($state_id) {
-                $chk_stmt = $tenant_pdo->prepare("SELECT id FROM master_city WHERE state_id = ? AND UPPER(city_name) = ? AND org_id = ? AND center_id = ?");
-                $ins_stmt = $tenant_pdo->prepare("INSERT INTO master_city (org_id, center_id, state_id, city_name, status) VALUES (?, ?, ?, ?, 1)");
+                $chk_stmt =$tenant_pdo->prepare("SELECT id FROM master_city WHERE state_id = ? AND UPPER(city_name) = ? AND org_id = ? AND center_id = ?");
+                $ins_stmt =$tenant_pdo->prepare("INSERT INTO master_city (org_id, center_id, state_id, city_name, status) VALUES (?, ?, ?, ?, 1)");
                 
-                foreach ($city_list as $city) {
-                    $chk_stmt->execute([$state_id, strtoupper($city), $org_id, $center_id]);
+                foreach ($city_list as $city) {$chk_stmt->execute([$state_id, strtoupper($city), $org_id,$center_id]);
                     if (!$chk_stmt->fetch()) { // Insert only if city doesn't exist
-                        $ins_stmt->execute([$org_id, $center_id, $state_id, strtoupper($city)]);
-                        $added_count++;
+                        $ins_stmt->execute([$org_id, $center_id,$state_id, strtoupper($city)]);$added_count++;
                     }
                 }
             }
         }
         
         if ($added_count > 0) {
-            set_flash_msg("{$added_count} Top Cities automatically added to your database!");
+            $_SESSION['swal_success'] = "{$added_count} Top Cities automatically added to your database!";
         } else {
-            set_flash_msg("Cities already exist, or States are missing (Add States first).");
+            $_SESSION['swal_success'] = "Cities already exist, or States are missing (Add States first).";
         }
-    } catch (Exception $e) {
-        set_flash_err("Auto-Seed Error: " . $e->getMessage());
+    } catch (Exception $e) {$_SESSION['swal_error'] = "Auto-Seed Error: " . $e->getMessage();
     }
     header("Location: master_city.php");
     exit;
 }
 
 // ==========================================
-// 2. HANDLE FORM SUBMISSION & UPDATE
+// 3. HANDLE FORM SUBMISSION & UPDATE
 // ==========================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_city'])) {
     $state_id  = (int)($_POST['state_id'] ?? 0);
@@ -90,70 +92,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_city'])) {
     $status    = isset($_POST['status']) ? 1 : 0;
     $edit_id   = (int)($_POST['edit_id'] ?? 0);
 
-    if ($state_id === 0 || empty($city_name)) {
-        set_flash_err("State select karna aur City name daalna zaroori hai.");
+    // Using 'or' to prevent syntax corruption issues on copy-paste
+    if ($state_id === 0 or empty($city_name)) {$_SESSION['swal_error'] = "State select karna aur City name daalna zaroori hai.";
     } else {
         try {
             if ($edit_id > 0) {
                 // Update existing city
-                $stmt = $tenant_pdo->prepare("UPDATE master_city SET state_id = ?, city_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
-                $stmt->execute([$state_id, $city_name, $status, $edit_id, $org_id, $center_id]);
-                set_flash_msg("City updated successfully.");
+                $stmt =$tenant_pdo->prepare("UPDATE master_city SET state_id = ?, city_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
+                $stmt->execute([$state_id, $city_name,$status, $edit_id,$org_id, $center_id]);$_SESSION['swal_success'] = "City updated successfully.";
             } else {
                 // Insert new city
-                $chk = $tenant_pdo->prepare("SELECT id FROM master_city WHERE state_id = ? AND city_name = ? AND org_id = ? AND center_id = ?");
-                $chk->execute([$state_id, $city_name, $org_id, $center_id]);
+                $chk =$tenant_pdo->prepare("SELECT id FROM master_city WHERE state_id = ? AND city_name = ? AND org_id = ? AND center_id = ?");
+                $chk->execute([$state_id,$city_name, $org_id,$center_id]);
                 
-                if ($chk->fetch()) {
-                    set_flash_err("Yeh city is state me pehle se added hai!");
+                if ($chk->fetch()) {$_SESSION['swal_error'] = "Yeh city is state me pehle se added hai!";
                 } else {
-                    $stmt = $tenant_pdo->prepare("INSERT INTO master_city (org_id, center_id, state_id, city_name, status) VALUES (?, ?, ?, ?, ?)");
-                    $stmt->execute([$org_id, $center_id, $state_id, $city_name, $status]);
-                    set_flash_msg("Nayi City successfully add ho gayi.");
+                    $stmt =$tenant_pdo->prepare("INSERT INTO master_city (org_id, center_id, state_id, city_name, status) VALUES (?, ?, ?, ?, ?)");
+                    $stmt->execute([$org_id,$center_id, $state_id,$city_name, $status]);$_SESSION['swal_success'] = "Nayi City successfully add ho gayi.";
                 }
             }
             header("Location: master_city.php");
             exit;
-        } catch (PDOException $e) {
-            set_flash_err("Database Error: " . $e->getMessage());
+        } catch (PDOException $e) {$_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
         }
     }
 }
 
-// 3. Toggle Status
+// ==========================================
+// 4. Toggle Status
+// ==========================================
 if (isset($_GET['toggle_status'])) {
     $id = (int)$_GET['toggle_status'];
     $st = (int)($_GET['st'] ?? 1) === 1 ? 0 : 1;
-    $tenant_pdo->prepare("UPDATE master_city SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id, $org_id, $center_id]);
-    set_flash_msg("City status updated!");
+    $tenant_pdo->prepare("UPDATE master_city SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id,$org_id, $center_id]);$_SESSION['swal_success'] = "City status updated!";
     header("Location: master_city.php");
     exit;
 }
 
-// 4. Fetch States for Dropdown
+// Fetch States for Dropdown
 $states = [];
 try {
-    $states_stmt = $tenant_pdo->prepare("SELECT id, state_name FROM master_states WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY state_name ASC");
-    $states_stmt->execute([$org_id, $center_id]);
-    $states = $states_stmt->fetchAll();
+    $states_stmt =$tenant_pdo->prepare("SELECT id, state_name FROM master_states WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY state_name ASC");
+    $states_stmt->execute([$org_id,$center_id]);
+    $states =$states_stmt->fetchAll();
 } catch (Exception $e) {}
 
-// 5. Fetch Cities List with State Names via JOIN
+// Fetch Cities List with State Names via JOIN
 $cities = [];
 try {
-    $cities_stmt = $tenant_pdo->prepare("
+    $cities_stmt =$tenant_pdo->prepare("
         SELECT c.*, s.state_name 
         FROM master_city c 
         LEFT JOIN master_states s ON c.state_id = s.id 
         WHERE c.org_id = ? AND c.center_id = ? 
         ORDER BY c.id DESC
     ");
-    $cities_stmt->execute([$org_id, $center_id]);
-    $cities = $cities_stmt->fetchAll();
+    $cities_stmt->execute([$org_id,$center_id]);
+    $cities =$cities_stmt->fetchAll();
 } catch (Exception $e) {}
 
 require_once __DIR__ . '/layout_header.php';
 ?>
+
+<!-- SweetAlert2 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
 <div class="row g-3">
     <!-- Form Card -->
@@ -169,9 +171,10 @@ require_once __DIR__ . '/layout_header.php';
 
                     <div class="mb-3">
                         <label class="form-label small fw-semibold text-secondary mb-1">Select State *</label>
-                        <select name="state_id" id="state_id" class="form-select form-select-sm" required autofocus>
+                        <!-- Added onchange="checkName()" -->
+                        <select name="state_id" id="state_id" class="form-select form-select-sm" required autofocus onchange="checkName()">
                             <option value="">-- Choose State --</option>
-                            <?php foreach ($states as $s): ?>
+                            <?php foreach ($states as$s): ?>
                                 <option value="<?= htmlspecialchars($s['id']) ?>"><?= htmlspecialchars($s['state_name']) ?></option>
                             <?php endforeach; ?>
                         </select>
@@ -179,7 +182,10 @@ require_once __DIR__ . '/layout_header.php';
 
                     <div class="mb-3">
                         <label class="form-label small fw-semibold text-secondary mb-1">City Name *</label>
-                        <input type="text" name="city_name" id="city_name" class="form-control form-control-sm text-uppercase" placeholder="e.g. LUCKNOW" required>
+                        <!-- Added onkeyup="checkName()" -->
+                        <input type="text" name="city_name" id="city_name" class="form-control form-control-sm text-uppercase" placeholder="E.G. LUCKNOW" required onkeyup="checkName()">
+                        <!-- Error Message Span -->
+                        <span id="name_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> This city already exists in the selected state!</span>
                     </div>
 
                     <div class="form-check form-switch mb-4">
@@ -205,7 +211,6 @@ require_once __DIR__ . '/layout_header.php';
                 <span class="fw-bold text-dark"><i class="bi bi-list-ul text-primary me-2"></i> Cities List</span>
                 
                 <div class="d-flex align-items-center gap-2">
-                    
                     <!-- NEW: AUTO-ADD TOP CITIES BUTTON -->
                     <form method="POST" action="master_city.php" class="m-0">
                         <input type="hidden" name="seed_cities" value="1">
@@ -234,17 +239,18 @@ require_once __DIR__ . '/layout_header.php';
                             <?php if (empty($cities)): ?>
                                 <tr><td colspan="5" class="text-center py-4 text-muted">No cities found. Click "Auto-Add Top 50 Cities" to populate instantly!</td></tr>
                             <?php else: ?>
-                                <?php foreach ($cities as $c): ?>
+                                <?php foreach ($cities as$c): ?>
                                     <?php $is_act = (int)$c['status'] === 1; ?>
                                     <tr>
                                         <td class="ps-3 font-monospace text-muted">#<?= $c['id'] ?></td>
                                         <td class="fw-bold text-dark text-uppercase"><?= htmlspecialchars($c['city_name']) ?></td>
                                         <td><span class="badge bg-light text-secondary border"><?= htmlspecialchars($c['state_name'] ?? 'N/A') ?></span></td>
                                         <td>
+                                            <!-- SweetAlert applied on the toggle switch using onclick -->
                                             <div class="form-check form-switch m-0" title="Toggle Status">
                                                 <input class="form-check-input" type="checkbox" role="switch" 
                                                        <?= $is_act ? 'checked' : '' ?> 
-                                                       onchange="window.location.href='master_city.php?toggle_status=<?= $c['id'] ?>&st=<?= $is_act ? 1 : 0 ?>'">
+                                                       onclick="event.preventDefault(); confirmToggle(<?= $c['id'] ?>, <?=$is_act ? 1 : 0 ?>)">
                                             </div>
                                         </td>
                                         <td class="text-end pe-3">
@@ -264,6 +270,39 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// --- Live AJAX Name Check ---
+let typingTimer;
+function checkName() {
+    clearTimeout(typingTimer);
+    let nameInput = document.getElementById('city_name').value.trim();
+    let stateId = document.getElementById('state_id').value;
+    let editId = document.getElementById('edit_id').value;
+    let errorSpan = document.getElementById('name_error');
+    let btnSubmit = document.getElementById('btnSubmit');
+
+    if (nameInput.length === 0 || stateId === "") {
+        errorSpan.style.display = 'none';
+        btnSubmit.disabled = false;
+        return;
+    }
+
+    typingTimer = setTimeout(function() {
+        fetch(`master_city.php?check_name=${encodeURIComponent(nameInput)}&s_id=${stateId}&edit_id=${editId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.exists) {
+                    errorSpan.style.display = 'block';
+                    btnSubmit.disabled = true;
+                } else {
+                    errorSpan.style.display = 'none';
+                    btnSubmit.disabled = false;
+                }
+            })
+            .catch(error => console.error('Error:', error));
+    }, 300);
+}
+
+// Edit Data Logic
 function editRow(d) {
     document.getElementById('edit_id').value = d.id;
     document.getElementById('state_id').value = d.state_id;
@@ -272,16 +311,24 @@ function editRow(d) {
     
     document.getElementById('formTitle').innerHTML = '<i class="bi bi-pencil-square text-warning me-2"></i> Edit City';
     document.getElementById('btnSubmit').innerHTML = '<i class="bi bi-check-lg me-1"></i> Update City';
+    
+    document.getElementById('name_error').style.display = 'none';
+    document.getElementById('btnSubmit').disabled = false;
     document.getElementById('city_name').focus();
 }
 
+// Reset Form Logic
 function resetForm() {
     document.getElementById('edit_id').value = '0';
     document.getElementById('formTitle').innerHTML = '<i class="bi bi-geo-alt text-primary me-2"></i> Add / Edit City';
     document.getElementById('btnSubmit').innerHTML = '<i class="bi bi-save me-1"></i> Save City';
+    
+    document.getElementById('name_error').style.display = 'none';
+    document.getElementById('btnSubmit').disabled = false;
     document.getElementById('state_id').focus();
 }
 
+// Live Search Filter Logic
 document.getElementById('searchInput').addEventListener('keyup', function() {
     let val = this.value.toLowerCase();
     let rows = document.querySelectorAll('#cityTable tbody tr');
@@ -292,6 +339,54 @@ document.getElementById('searchInput').addEventListener('keyup', function() {
             row.style.display = 'none';
         }
     });
+});
+
+// --- SweetAlert for Status Toggle ---
+function confirmToggle(id, currentStatus) {
+    let actionText = currentStatus === 1 ? "Deactivate" : "Activate";
+    let actionColor = currentStatus === 1 ? "#d33" : "#28a745";
+    
+    Swal.fire({
+        title: 'Are you sure?',
+        text: `Do you want to ${actionText} this city?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: actionColor,
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: `Yes, ${actionText} it!`
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = `?toggle_status=${id}&st=${currentStatus}`;
+        }
+    });
+}
+</script>
+
+<!-- SweetAlert Success/Error Handlers -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    <?php if (isset($_SESSION['swal_success'])): ?>
+        Swal.fire({
+            icon: 'success',
+            title: 'Success!',
+            text: '<?= addslashes($_SESSION['swal_success']) ?>',
+            timer: 3000,
+            showConfirmButton: false,
+            toast: true,
+            position: 'top-end'
+        });
+        <?php unset($_SESSION['swal_success']); ?>
+    <?php endif; ?>
+
+    <?php if (isset($_SESSION['swal_error'])): ?>
+        Swal.fire({
+            icon: 'error',
+            title: 'Error!',
+            text: '<?= addslashes($_SESSION['swal_error']) ?>',
+            confirmButtonColor: '#d33'
+        });
+        <?php unset($_SESSION['swal_error']); ?>
+    <?php endif; ?>
 });
 </script>
 
