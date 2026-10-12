@@ -1,10 +1,31 @@
 <?php
 // admin/users.php
+
+// Session start karein agar nahi hai
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 $page_title = "Staff Users & Access Control";
 require_once __DIR__ . '/../config/tenant_db.php';
-require_once __DIR__ . '/../config/alerts.php';
 
-// Hierarchical Modules / Sub-menus Matrix (Header & Sidebar ke according group-wise)
+// ==============================================================
+// 1. AJAX Handler: Check if Username/Email Already Exists
+// ==============================================================
+if (isset($_GET['check_username'])) {
+    header('Content-Type: application/json');
+    $username = trim($_GET['check_username']);
+    $edit_id = (int)($_GET['edit_id'] ?? 0);
+    
+    $stmt = $tenant_pdo->prepare("SELECT COUNT(*) FROM tenant_users WHERE username = ? AND user_id != ?");
+    $stmt->execute([$username, $edit_id]);
+    $exists = $stmt->fetchColumn() > 0;
+    
+    echo json_encode(['exists' => $exists]);
+    exit;
+}
+
+// Hierarchical Modules / Sub-menus Matrix
 $module_hierarchy = [
     'general_masters' => [
         'title'    => 'Hospital & General Masters',
@@ -26,8 +47,8 @@ $module_hierarchy = [
         'submenus' => [
             'masters_doctors'         => ['name' => 'Doctors & Schedules',     'desc' => 'Doctor profiles & consultation slots'],
             'masters_departments'     => ['name' => 'Departments',             'desc' => 'Hospital medical departments'],
-            'masters_qualifications'  => ['name' => 'Qualifications',           'desc' => 'Degrees & qualifications list'],
-            'masters_specializations' => ['name' => 'Specializations',          'desc' => 'Medical specializations list'],
+            'masters_qualifications'  => ['name' => 'Qualifications',          'desc' => 'Degrees & qualifications list'],
+            'masters_specializations' => ['name' => 'Specializations',         'desc' => 'Medical specializations list'],
             'masters_days'            => ['name' => 'Working Days',            'desc' => 'OPD consultation working days'],
             'masters_doctor_services' => ['name' => 'Doctor Service Master',   'desc' => 'Services mapped to doctors'],
             'masters_doctor_tariff'   => ['name' => 'Doctor Tariff Master',    'desc' => 'Doctor consultation charges & rates']
@@ -115,7 +136,7 @@ $flat_submenus = [
     'opd_visit_list'               => 'OPD Visits'
 ];
 
-// 1. Status Toggle via URL
+// 2. Status Toggle via URL
 if (isset($_GET['toggle_status'])) {
     $toggle_id = (int)$_GET['toggle_status'];
     $current   = (int)($_GET['current'] ?? 1);
@@ -124,15 +145,15 @@ if (isset($_GET['toggle_status'])) {
     try {
         $stmt = $tenant_pdo->prepare("UPDATE tenant_users SET status = ? WHERE user_id = ?");
         $stmt->execute([$new_st, $toggle_id]);
-        set_flash_msg("User status update ho gaya!");
+        $_SESSION['swal_success'] = "User status update ho gaya!";
     } catch (PDOException $e) {
-        set_flash_err("Status update failed: " . $e->getMessage());
+        $_SESSION['swal_error'] = "Status update failed: " . $e->getMessage();
     }
     header("Location: users.php");
     exit;
 }
 
-// 2. Fetch Edit User Data
+// 3. Fetch Edit User Data
 $edit_data = null;
 $user_assigned_menus = [];
 if (isset($_GET['edit'])) {
@@ -145,7 +166,7 @@ if (isset($_GET['edit'])) {
     }
 }
 
-// 3. Create or Update Staff User
+// 4. Create or Update Staff User
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $fullname  = trim($_POST['fullname'] ?? '');
     $username  = trim($_POST['username'] ?? '');
@@ -164,11 +185,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $selected_menus = json_encode(array_values($raw_menus));
 
     if (empty($fullname) || empty($username) || empty($role_id)) {
-        set_flash_err("Mandatory fields bharna zaroori hai!");
+        $_SESSION['swal_error'] = "Mandatory fields bharna zaroori hai!";
     } else {
         if ($_POST['action'] === 'save_user') {
             if (empty($password)) {
-                set_flash_err("Password daalna zaroori hai!");
+                $_SESSION['swal_error'] = "Password daalna zaroori hai!";
             } else {
                 try {
                     $stmt = $tenant_pdo->prepare("
@@ -176,11 +197,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ");
                     $stmt->execute([$center_id, $role_id, $fullname, $username, $password, $mobile, $selected_menus, $is_admin, $status]);
-                    set_flash_msg("Staff user successfully ban gaya!");
+                    $_SESSION['swal_success'] = "Staff user successfully ban gaya!";
                     header("Location: users.php");
                     exit;
                 } catch (PDOException $e) {
-                    set_flash_err("Error: Username pehle se maujood ho sakta hai.");
+                    $_SESSION['swal_error'] = "Error: Username pehle se maujood ho sakta hai.";
                 }
             }
         } elseif ($_POST['action'] === 'update_user') {
@@ -201,11 +222,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     ");
                     $stmt->execute([$center_id, $role_id, $fullname, $username, $mobile, $selected_menus, $is_admin, $status, $user_id]);
                 }
-                set_flash_msg("User permissions update ho gayi!");
+                $_SESSION['swal_success'] = "User permissions update ho gayi!";
                 header("Location: users.php");
                 exit;
             } catch (PDOException $e) {
-                set_flash_err("Update failed: " . $e->getMessage());
+                $_SESSION['swal_error'] = "Update failed: " . $e->getMessage();
             }
         }
     }
@@ -224,6 +245,9 @@ $users = $tenant_pdo->query("
 
 require_once __DIR__ . '/layout_header.php';
 ?>
+
+<!-- SweetAlert2 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
 <style>
 .form-switch .form-check-input { width: 2.2em; height: 1.15em; cursor: pointer; }
@@ -288,6 +312,7 @@ require_once __DIR__ . '/layout_header.php';
                 <div class="card-body">
                     <form method="POST" action="users.php">
                         <input type="hidden" name="action" value="<?= $edit_data ? 'update_user' : 'save_user' ?>">
+                        <input type="hidden" id="edit_id" value="<?= $edit_data ? $edit_data['user_id'] : 0 ?>">
                         <?php if ($edit_data): ?>
                             <input type="hidden" name="user_id" value="<?= $edit_data['user_id'] ?>">
                         <?php endif; ?>
@@ -302,8 +327,8 @@ require_once __DIR__ . '/layout_header.php';
                                 <label class="form-label small fw-semibold">Role *</label>
                                 <select name="role_id" class="form-select form-select-sm" required>
                                     <option value="">Select Role</option>
-                                    <?php foreach ($roles as $r): ?>
-                                        <option value="<?= $r['role_id'] ?>" <?= (isset($edit_data['role_id']) && $edit_data['role_id'] == $r['role_id']) ? 'selected' : '' ?>>
+                                    <?php foreach ($roles as$r): ?>
+                                        <option value="<?= $r['role_id'] ?>" <?= (isset($edit_data['role_id']) && $edit_data['role_id'] ==$r['role_id']) ? 'selected' : '' ?>>
                                             <?= htmlspecialchars($r['role_name']) ?>
                                         </option>
                                     <?php endforeach; ?>
@@ -312,8 +337,8 @@ require_once __DIR__ . '/layout_header.php';
                             <div class="col-6">
                                 <label class="form-label small fw-semibold">Branch Center</label>
                                 <select name="center_id" class="form-select form-select-sm">
-                                    <?php foreach ($centers as $c): ?>
-                                        <option value="<?= $c['center_id'] ?>" <?= (isset($edit_data['center_id']) && $edit_data['center_id'] == $c['center_id']) ? 'selected' : '' ?>>
+                                    <?php foreach ($centers as$c): ?>
+                                        <option value="<?= $c['center_id'] ?>" <?= (isset($edit_data['center_id']) && $edit_data['center_id'] ==$c['center_id']) ? 'selected' : '' ?>>
                                             <?= htmlspecialchars($c['center_name']) ?>
                                         </option>
                                     <?php endforeach; ?>
@@ -324,7 +349,9 @@ require_once __DIR__ . '/layout_header.php';
                         <div class="row g-2 mb-3">
                             <div class="col-6">
                                 <label class="form-label small fw-semibold">Username / Email *</label>
-                                <input type="text" name="username" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['username'] ?? '') ?>" placeholder="user@clinic.com" required>
+                                <!-- Added onkeyup="checkUsername()" for live validation -->
+                                <input type="text" name="username" id="username" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['username'] ?? '') ?>" placeholder="user@clinic.com" required onkeyup="checkUsername()">
+                                <span id="username_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> Username already taken!</span>
                             </div>
                             <div class="col-6">
                                 <label class="form-label small fw-semibold"><?= $edit_data ? 'Change Password' : 'Password *' ?></label>
@@ -353,7 +380,7 @@ require_once __DIR__ . '/layout_header.php';
                                 <div class="text-muted" style="font-size: 0.72rem;">Grant all permissions without restrictions</div>
                             </div>
                             <div class="form-check form-switch m-0">
-                                <input class="form-check-input" type="checkbox" name="is_admin" value="1" id="is_admin_flag" <?= (!empty($edit_data['is_admin']) && $edit_data['is_admin'] == 1) ? 'checked' : '' ?> onchange="handleAdminToggle(this.checked)">
+                                <input class="form-check-input" type="checkbox" name="is_admin" value="1" id="is_admin_flag" <?= (!empty($edit_data['is_admin']) &&$edit_data['is_admin'] == 1) ? 'checked' : '' ?> onchange="handleAdminToggle(this.checked)">
                             </div>
                         </div>
 
@@ -370,7 +397,7 @@ require_once __DIR__ . '/layout_header.php';
                             </div>
 
                             <div class="p-2 bg-light border rounded-3" style="max-height: 380px; overflow-y: auto;">
-                                <?php foreach ($module_hierarchy as $parent_key => $parent_val): ?>
+                                <?php foreach ($module_hierarchy as $parent_key =>$parent_val): ?>
                                     <div class="accordion-module-card">
                                         <div class="accordion-module-header active" onclick="toggleAccordion('<?= $parent_key ?>_body', '<?= $parent_key ?>_arrow', this)">
                                             <div class="d-flex align-items-center gap-2">
@@ -384,11 +411,10 @@ require_once __DIR__ . '/layout_header.php';
                                         </div>
 
                                         <div id="<?= $parent_key ?>_body" class="accordion-module-body" style="display: block;">
-                                            <?php foreach ($parent_val['submenus'] as $sub_key => $sub_val): ?>
+                                            <?php foreach ($parent_val['submenus'] as $sub_key =>$sub_val): ?>
                                                 <?php 
                                                     $checked = false;
-                                                    if ($edit_data) {
-                                                        $checked = in_array($sub_key, $user_assigned_menus);
+                                                    if ($edit_data) {$checked = in_array($sub_key,$user_assigned_menus);
                                                     } else {
                                                         $checked = in_array($sub_key, ['opd_reg', 'opd_queue']);
                                                     }
@@ -410,7 +436,7 @@ require_once __DIR__ . '/layout_header.php';
                         </div>
 
                         <div class="d-flex gap-2">
-                            <button type="submit" class="btn btn-primary btn-sm flex-grow-1 fw-semibold">
+                            <button type="submit" class="btn btn-primary btn-sm flex-grow-1 fw-semibold" id="btnSubmit">
                                 <i class="bi <?= $edit_data ? 'bi-check-lg' : 'bi-save' ?> me-1"></i> <?= $edit_data ? 'Update Axis & User' : 'Save Staff User' ?>
                             </button>
                             <?php if ($edit_data): ?>
@@ -446,7 +472,7 @@ require_once __DIR__ . '/layout_header.php';
                             <?php if (empty($users)): ?>
                                 <tr><td colspan="5" class="text-center text-muted py-4">No staff users created yet.</td></tr>
                             <?php else: ?>
-                                <?php foreach ($users as $u): ?>
+                                <?php foreach ($users as$u): ?>
                                     <?php 
                                         $u_menus = json_decode($u['menu_access'] ?? '[]', true) ?: [];
                                     ?>
@@ -464,7 +490,7 @@ require_once __DIR__ . '/layout_header.php';
                                                 <span class="badge bg-danger">Full Admin Axis</span>
                                             <?php else: ?>
                                                 <div style="max-width: 250px; max-height: 80px; overflow-y: auto;">
-                                                    <?php foreach ($u_menus as $m_key): ?>
+                                                    <?php foreach ($u_menus as$m_key): ?>
                                                         <?php if ($m_key !== 'dashboard'): ?>
                                                             <span class="badge-axis"><?= $flat_submenus[$m_key] ?? $m_key ?></span>
                                                         <?php endif; ?>
@@ -482,10 +508,11 @@ require_once __DIR__ . '/layout_header.php';
                                                 <a href="users.php?edit=<?= $u['user_id'] ?>" class="btn-action-edit" title="Edit Axis">
                                                     <i class="bi bi-pencil-fill" style="font-size: 0.85rem;"></i>
                                                 </a>
+                                                <!-- SweetAlert attached to toggle switch -->
                                                 <div class="form-check form-switch m-0" title="Toggle Status">
                                                     <input class="form-check-input" type="checkbox" role="switch" 
                                                            <?= (int)$u['status'] === 1 ? 'checked' : '' ?> 
-                                                           onchange="window.location.href='users.php?toggle_status=<?= $u['user_id'] ?>&current=<?= $u['status'] ?>'">
+                                                           onclick="event.preventDefault(); confirmToggle(<?= $u['user_id'] ?>, <?=$u['status'] ?>)">
                                                 </div>
                                             </div>
                                         </td>
@@ -501,6 +528,58 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// --- Live AJAX Username Check ---
+let typingTimer;
+function checkUsername() {
+    clearTimeout(typingTimer);
+    let usernameInput = document.getElementById('username').value.trim();
+    let editId = document.getElementById('edit_id').value;
+    
+    let errorSpan = document.getElementById('username_error');
+    let btnSubmit = document.getElementById('btnSubmit');
+
+    if (usernameInput.length === 0) {
+        errorSpan.style.display = 'none';
+        btnSubmit.disabled = false;
+        return;
+    }
+
+    typingTimer = setTimeout(function() {
+        fetch(`users.php?check_username=${encodeURIComponent(usernameInput)}&edit_id=${editId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.exists) {
+                    errorSpan.style.display = 'block';
+                    btnSubmit.disabled = true;
+                } else {
+                    errorSpan.style.display = 'none';
+                    btnSubmit.disabled = false;
+                }
+            })
+            .catch(error => console.error('Error:', error));
+    }, 300);
+}
+
+// --- SweetAlert for Status Toggle ---
+function confirmToggle(id, currentStatus) {
+    let actionText = currentStatus === 1 ? "Deactivate" : "Activate";
+    let actionColor = currentStatus === 1 ? "#d33" : "#28a745";
+    
+    Swal.fire({
+        title: 'Are you sure?',
+        text: `Do you want to ${actionText} this user?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: actionColor,
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: `Yes, ${actionText} it!`
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = `?toggle_status=${id}&current=${currentStatus}`;
+        }
+    });
+}
+
 // Live Search Bar for Staff Directory
 document.getElementById('searchUserInput').addEventListener('keyup', function() {
     let val = this.value.toLowerCase();
@@ -539,6 +618,34 @@ function handleAdminToggle(isAdminChecked) {
         toggleAllMenus(true);
     }
 }
+</script>
+
+<!-- SweetAlert Success/Error Handlers -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    <?php if (isset($_SESSION['swal_success'])): ?>
+        Swal.fire({
+            icon: 'success',
+            title: 'Success!',
+            text: '<?= addslashes($_SESSION['swal_success']) ?>',
+            timer: 3000,
+            showConfirmButton: false,
+            toast: true,
+            position: 'top-end'
+        });
+        <?php unset($_SESSION['swal_success']); ?>
+    <?php endif; ?>
+
+    <?php if (isset($_SESSION['swal_error'])): ?>
+        Swal.fire({
+            icon: 'error',
+            title: 'Error!',
+            text: '<?= addslashes($_SESSION['swal_error']) ?>',
+            confirmButtonColor: '#d33'
+        });
+        <?php unset($_SESSION['swal_error']); ?>
+    <?php endif; ?>
+});
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
