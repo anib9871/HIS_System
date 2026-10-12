@@ -3,14 +3,44 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
+// Session start karein agar nahi hai
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 require_once __DIR__ . '/../config/tenant_db.php';
-require_once __DIR__ . '/../config/alerts.php';
 
 $page_title = "Doctor & Availability Master";
 $org_id = (int)($_SESSION['org_id'] ?? 1);
 $center_id = (int)($_SESSION['center_id'] ?? 1);
 
-// --- 0. AJAX HANDLERS FOR QUICK ADD MODALS ---
+// --- 0. AJAX HANDLER: Duplicate Validation (Doc Code & Reg No) ---
+if (isset($_GET['check_duplicate'])) {
+    header('Content-Type: application/json');
+    $code = strtoupper(trim($_GET['code'] ?? ''));
+    $reg = strtoupper(trim($_GET['reg'] ?? ''));
+    $edit_id = (int)($_GET['edit_id'] ?? 0);
+    
+    $code_exists = false;
+    $reg_exists = false;
+
+    if (!empty($code)) {
+        $stmt = $tenant_pdo->prepare("SELECT COUNT(*) FROM master_doctors WHERE doc_code = ? AND id != ? AND org_id = ? AND center_id = ?");
+        $stmt->execute([$code, $edit_id, $org_id, $center_id]);
+        $code_exists = $stmt->fetchColumn() > 0;
+    }
+
+    if (!empty($reg)) {
+        $stmt = $tenant_pdo->prepare("SELECT COUNT(*) FROM master_doctors WHERE registration_no = ? AND id != ? AND org_id = ? AND center_id = ?");
+        $stmt->execute([$reg, $edit_id, $org_id, $center_id]);
+        $reg_exists = $stmt->fetchColumn() > 0;
+    }
+    
+    echo json_encode(['code_exists' => $code_exists, 'reg_exists' => $reg_exists]);
+    exit;
+}
+
+// --- 0.5. AJAX HANDLERS FOR QUICK ADD MODALS (WITH DUPLICATE CHECK) ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
     header('Content-Type: application/json');
     try {
@@ -18,6 +48,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             $dept_name = ucwords(strtolower(trim($_POST['dept_name'] ?? '')));
             $dept_prefix = strtoupper(trim($_POST['dept_prefix'] ?? ''));
             $status = isset($_POST['status']) ? 1 : 0;
+            
+            // Check if exists
+            $chk = $tenant_pdo->prepare("SELECT COUNT(*) FROM master_departments WHERE dept_name = ? AND org_id = ? AND center_id = ?");
+            $chk->execute([$dept_name, $org_id, $center_id]);
+            if ($chk->fetchColumn() > 0) {
+                echo json_encode(['success' => false, 'error' => 'This Department already exists!']);
+                exit;
+            }
+            
             $stmt = $tenant_pdo->prepare("INSERT INTO master_departments (org_id, center_id, dept_name, dept_prefix, status) VALUES (?, ?, ?, ?, ?)");
             $stmt->execute([$org_id, $center_id, $dept_name, $dept_prefix, $status]);
             echo json_encode(['success' => true, 'id' => $tenant_pdo->lastInsertId(), 'name' => $dept_name]);
@@ -26,6 +65,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         if ($_POST['ajax_action'] === 'add_qual') {
             $qual_name = strtoupper(trim($_POST['qualification_name'] ?? ''));
             $status = isset($_POST['status']) ? 1 : 0;
+            
+            // Check if exists
+            $chk = $tenant_pdo->prepare("SELECT COUNT(*) FROM master_qualifications WHERE qualification_name = ? AND org_id = ? AND center_id = ?");
+            $chk->execute([$qual_name, $org_id, $center_id]);
+            if ($chk->fetchColumn() > 0) {
+                echo json_encode(['success' => false, 'error' => 'This Qualification already exists!']);
+                exit;
+            }
+
             $stmt = $tenant_pdo->prepare("INSERT INTO master_qualifications (org_id, center_id, qualification_name, status) VALUES (?, ?, ?, ?)");
             $stmt->execute([$org_id, $center_id, $qual_name, $status]);
             echo json_encode(['success' => true, 'id' => $tenant_pdo->lastInsertId(), 'name' => $qual_name]);
@@ -34,6 +82,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         if ($_POST['ajax_action'] === 'add_spec') {
             $spec_name = ucwords(strtolower(trim($_POST['specialization_name'] ?? '')));
             $status = isset($_POST['status']) ? 1 : 0;
+            
+            // Check if exists
+            $chk = $tenant_pdo->prepare("SELECT COUNT(*) FROM master_specializations WHERE specialization_name = ? AND org_id = ? AND center_id = ?");
+            $chk->execute([$spec_name, $org_id, $center_id]);
+            if ($chk->fetchColumn() > 0) {
+                echo json_encode(['success' => false, 'error' => 'This Specialization already exists!']);
+                exit;
+            }
+
             $stmt = $tenant_pdo->prepare("INSERT INTO master_specializations (org_id, center_id, specialization_name, status) VALUES (?, ?, ?, ?)");
             $stmt->execute([$org_id, $center_id, $spec_name, $status]);
             echo json_encode(['success' => true, 'id' => $tenant_pdo->lastInsertId(), 'name' => $spec_name]);
@@ -44,9 +101,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
         exit;
     }
 }
-
-$err = "";
-$msg = "";
 
 // --- 1. HANDLE DOCTOR PROFILE CREATE / UPDATE ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_doctor'])) {
@@ -79,22 +133,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_doctor'])) {
     }
 
     if (empty($full_name) || empty($registration_no)) {
-        $err = "Registration No. and Full Name are mandatory.";
+        $_SESSION['swal_error'] = "Registration No. and Full Name are mandatory.";
     } else {
         try {
-            if ($edit_id > 0) {
-                $stmt = $tenant_pdo->prepare("UPDATE master_doctors SET doc_code = ?, registration_no = ?, full_name = ?, qualification_id = ?, specialization_id = ?, department_id = ?, mobile = ?, email = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
-                $stmt->execute([$doc_code, $registration_no, $full_name, $qualification_id, $specialization_id, $department_id, $mobile, $email, $status, $edit_id, $org_id, $center_id]);
-                if(function_exists('set_flash_msg')) set_flash_msg("Doctor profile updated successfully.");
+            // STRICT BACKEND DUPLICATE CHECK
+            $dup_chk = $tenant_pdo->prepare("SELECT COUNT(*) FROM master_doctors WHERE (doc_code = ? OR registration_no = ?) AND id != ? AND org_id = ? AND center_id = ?");
+            $dup_chk->execute([$doc_code, $registration_no, $edit_id, $org_id, $center_id]);
+            
+            if ($dup_chk->fetchColumn() > 0) {
+                $_SESSION['swal_error'] = "Error: This Doc Code or Registration No. already exists!";
             } else {
-                $stmt = $tenant_pdo->prepare("INSERT INTO master_doctors (org_id, center_id, doc_code, registration_no, full_name, qualification_id, specialization_id, department_id, mobile, email, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$org_id, $center_id, $doc_code, $registration_no, $full_name, $qualification_id, $specialization_id, $department_id, $mobile, $email, $status]);
-                if(function_exists('set_flash_msg')) set_flash_msg("New doctor record created successfully.");
+                if ($edit_id > 0) {
+                    $stmt = $tenant_pdo->prepare("UPDATE master_doctors SET doc_code = ?, registration_no = ?, full_name = ?, qualification_id = ?, specialization_id = ?, department_id = ?, mobile = ?, email = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
+                    $stmt->execute([$doc_code, $registration_no, $full_name, $qualification_id, $specialization_id, $department_id, $mobile, $email, $status, $edit_id, $org_id, $center_id]);
+                    $_SESSION['swal_success'] = "Doctor profile updated successfully.";
+                } else {
+                    $stmt = $tenant_pdo->prepare("INSERT INTO master_doctors (org_id, center_id, doc_code, registration_no, full_name, qualification_id, specialization_id, department_id, mobile, email, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                    $stmt->execute([$org_id, $center_id, $doc_code, $registration_no, $full_name, $qualification_id, $specialization_id, $department_id, $mobile, $email, $status]);
+                    $_SESSION['swal_success'] = "New doctor record created successfully.";
+                }
             }
             header("Location: master_doctors.php?tab=doctors");
             exit;
         } catch (PDOException $e) {
-            die("<h3 style='color:red; text-align:center; padding:20px;'>Doctor Save Error: " . $e->getMessage() . "</h3>");
+            $_SESSION['swal_error'] = "Doctor Save Error: " . $e->getMessage();
+            header("Location: master_doctors.php?tab=doctors");
+            exit;
         }
     }
 }
@@ -110,7 +174,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_schedule'])) {
     $max_tokens   = (int)($_POST['max_tokens'] ?? 50);
     $edit_sch_id  = (int)($_POST['edit_sch_id'] ?? 0);
 
-    // FIX: Strict mapping array to correct typos like "THRUSDAY" automatically
     $valid_days_map = [
         'monday'    => 'Monday',
         'tuesday'   => 'Tuesday',
@@ -131,29 +194,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_schedule'])) {
                 
                 $stmt = $tenant_pdo->prepare("UPDATE doctor_availability SET doctor_id=?, day_of_week=?, shift_name=?, start_time=?, end_time=?, avg_consult_time_mins=?, max_tokens=? WHERE id=? AND org_id=? AND center_id=?");
                 $stmt->execute([$doctor_id, $day, $shift_name, $start_time, $end_time, $consult_time, $max_tokens, $edit_sch_id, $org_id, $center_id]);
-                if(function_exists('set_flash_msg')) set_flash_msg("Availability schedule updated successfully.");
+                $_SESSION['swal_success'] = "Availability schedule updated successfully.";
             } else {
-                // INSERT NEW SCHEDULES (MULTIPLE DAYS)
-                $stmt = $tenant_pdo->prepare("INSERT IGNORE INTO doctor_availability (org_id, center_id, doctor_id, day_of_week, shift_name, start_time, end_time, avg_consult_time_mins, max_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                // INSERT NEW SCHEDULES
+                $ins_stmt = $tenant_pdo->prepare("INSERT INTO doctor_availability (org_id, center_id, doctor_id, day_of_week, shift_name, start_time, end_time, avg_consult_time_mins, max_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $chk_stmt = $tenant_pdo->prepare("SELECT id FROM doctor_availability WHERE doctor_id=? AND day_of_week=? AND shift_name=? AND org_id=? AND center_id=?");
+                
                 $count = 0;
+                $skipped = 0;
+                
                 foreach ($days_selected as $raw_day_input) {
                     $raw_day = strtolower(trim($raw_day_input));
                     $clean_day = $valid_days_map[$raw_day] ?? ucfirst($raw_day);
                     
-                    $stmt->execute([$org_id, $center_id, $doctor_id, $clean_day, $shift_name, $start_time, $end_time, $consult_time, $max_tokens]);
-                    if ($stmt->rowCount() > 0) {
-                        $count++;
+                    // Check duplicate schedule
+                    $chk_stmt->execute([$doctor_id, $clean_day, $shift_name, $org_id, $center_id]);
+                    if ($chk_stmt->fetchColumn()) {
+                        $skipped++;
+                        continue;
                     }
+                    
+                    $ins_stmt->execute([$org_id, $center_id, $doctor_id, $clean_day, $shift_name, $start_time, $end_time, $consult_time, $max_tokens]);
+                    $count++;
                 }
-                if(function_exists('set_flash_msg')) set_flash_msg("{$count} new availability slot(s) added successfully.");
+                
+                if ($count > 0 && $skipped > 0) {
+                    $_SESSION['swal_success'] = "{$count} slot(s) added. {$skipped} slot(s) already exist and were skipped.";
+                } elseif ($count > 0) {
+                    $_SESSION['swal_success'] = "{$count} new availability slot(s) added successfully.";
+                } else {
+                    $_SESSION['swal_error'] = "The selected schedule slot already exists for this doctor!";
+                }
             }
             header("Location: master_doctors.php?tab=schedules");
             exit;
         } catch (PDOException $e) {
-            die("<h3 style='color:red; text-align:center; padding:20px;'>Schedule Save Error: " . $e->getMessage() . "</h3>");
+            $_SESSION['swal_error'] = "Schedule Save Error: " . $e->getMessage();
+            header("Location: master_doctors.php?tab=schedules");
+            exit;
         }
     } else {
-        $err = "Please select a Doctor and at least One Day.";
+        $_SESSION['swal_error'] = "Please select a Doctor and at least One Day.";
     }
 }
 
@@ -163,7 +244,7 @@ if (isset($_GET['toggle_status'])) {
     $current = (int)($_GET['st'] ?? 1);
     $new_st = ($current === 1) ? 0 : 1;
     $tenant_pdo->prepare("UPDATE master_doctors SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$new_st, $id, $org_id, $center_id]);
-    if(function_exists('set_flash_msg')) set_flash_msg("Doctor status updated successfully.");
+    $_SESSION['swal_success'] = "Doctor status updated successfully.";
     header("Location: master_doctors.php?tab=doctors");
     exit;
 }
@@ -171,7 +252,7 @@ if (isset($_GET['toggle_status'])) {
 if (isset($_GET['del_sch'])) {
     $sch_id = (int)$_GET['del_sch'];
     $tenant_pdo->prepare("DELETE FROM doctor_availability WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$sch_id, $org_id, $center_id]);
-    if(function_exists('set_flash_msg')) set_flash_msg("Schedule slot deleted successfully.");
+    $_SESSION['swal_success'] = "Schedule slot deleted successfully.";
     header("Location: master_doctors.php?tab=schedules");
     exit;
 }
@@ -237,24 +318,15 @@ $active_tab = $_GET['tab'] ?? 'doctors';
 require_once __DIR__ . '/layout_header.php';
 ?>
 
+<!-- SweetAlert2 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
 <style>
 /* Modern Toggle Switch & Edit Button Styling */
 .form-switch .form-check-input { width: 2.4em; height: 1.25em; cursor: pointer; }
 .btn-action-edit { background-color: #e0f2fe; color: #0284c7; border: none; width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; transition: 0.2s; text-decoration: none; }
 .btn-action-edit:hover { background-color: #0284c7; color: #fff; }
 </style>
-
-<!-- ERROR MESSAGE DISPLAY -->
-<?php if (!empty($err)): ?>
-    <div class="alert alert-danger fw-bold py-2 px-3 shadow-sm mb-3">
-        <i class="bi bi-exclamation-triangle-fill me-2"></i> <?= htmlspecialchars($err) ?>
-    </div>
-<?php endif; ?>
-<?php if (!empty($msg)): ?>
-    <div class="alert alert-success fw-bold py-2 px-3 shadow-sm mb-3">
-        <i class="bi bi-check-circle-fill me-2"></i> <?= htmlspecialchars($msg) ?>
-    </div>
-<?php endif; ?>
 
 <ul class="nav nav-pills mb-3 bg-white p-2 rounded-3 border shadow-sm" id="doctorMasterTab" role="tablist">
     <li class="nav-item" role="presentation">
@@ -284,11 +356,15 @@ require_once __DIR__ . '/layout_header.php';
                     <div class="row g-2 mb-2">
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Doc Code</label>
-                            <input type="text" name="doc_code" id="doc_code" class="form-control form-control-sm font-monospace text-uppercase" placeholder="Auto">
+                            <input type="text" name="doc_code" id="doc_code" class="form-control form-control-sm font-monospace text-uppercase" placeholder="Auto" onkeyup="checkDuplicateDoc()">
+                            <!-- Updated warning text -->
+                            <span id="code_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> This Doc Code already exists!</span>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Reg. No. *</label>
-                            <input type="text" name="registration_no" id="registration_no" class="form-control form-control-sm font-monospace text-uppercase" placeholder="MCI-45892" required>
+                            <input type="text" name="registration_no" id="registration_no" class="form-control form-control-sm font-monospace text-uppercase" placeholder="MCI-45892" required onkeyup="checkDuplicateDoc()">
+                            <!-- Updated warning text -->
+                            <span id="reg_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> This Registration No. already exists!</span>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold text-secondary mb-1">Full Name *</label>
@@ -417,7 +493,7 @@ require_once __DIR__ . '/layout_header.php';
                                             <div class="form-check form-switch m-0" title="Toggle Status (Active/Inactive)">
                                                 <input class="form-check-input" type="checkbox" role="switch" 
                                                        <?= $is_act ? 'checked' : '' ?> 
-                                                       onchange="window.location.href='?toggle_status=<?= $d['id'] ?>&st=<?= $d['status'] ?>'">
+                                                       onclick="event.preventDefault(); confirmDoctorToggle(<?= $d['id'] ?>, <?= $d['status'] ?>)">
                                             </div>
                                         </td>
                                         <td class="text-center pe-3">
@@ -549,7 +625,7 @@ require_once __DIR__ . '/layout_header.php';
                                                 </td>
                                                 <td class="text-end pe-3 text-nowrap">
                                                     <a href="javascript:void(0);" onclick='editSchedule(<?= htmlspecialchars(json_encode($s), ENT_QUOTES, 'UTF-8') ?>)' class="btn btn-outline-primary btn-sm py-0 px-2 me-1" title="Edit Schedule"><i class="bi bi-pencil"></i></a>
-                                                    <a href="?del_sch=<?= $s['id'] ?>" onclick="return confirm('Delete this availability schedule?')" class="btn btn-outline-danger btn-sm py-0 px-2" title="Delete Schedule"><i class="bi bi-trash"></i></a>
+                                                    <a href="javascript:void(0);" onclick="confirmDeleteSch(<?= $s['id'] ?>)" class="btn btn-outline-danger btn-sm py-0 px-2" title="Delete Schedule"><i class="bi bi-trash"></i></a>
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
@@ -658,6 +734,88 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// --- Live AJAX Duplicate Check (Doc Code & Reg No) ---
+let typingTimerDoc;
+function checkDuplicateDoc() {
+    clearTimeout(typingTimerDoc);
+    let codeInput = document.getElementById('doc_code').value.trim();
+    let regInput = document.getElementById('registration_no').value.trim();
+    let editId = document.getElementById('doc_edit_id').value;
+    
+    let codeError = document.getElementById('code_error');
+    let regError = document.getElementById('reg_error');
+    let btnSubmit = document.getElementById('btnDocSubmit');
+
+    if (codeInput.length === 0 && regInput.length === 0) {
+        codeError.style.display = 'none';
+        regError.style.display = 'none';
+        btnSubmit.disabled = false;
+        return;
+    }
+
+    typingTimerDoc = setTimeout(function() {
+        fetch(`master_doctors.php?check_duplicate=1&code=${encodeURIComponent(codeInput)}&reg=${encodeURIComponent(regInput)}&edit_id=${editId}`)
+            .then(response => response.json())
+            .then(data => {
+                let hasError = false;
+                
+                if (data.code_exists && codeInput.length > 0) {
+                    codeError.style.display = 'block';
+                    hasError = true;
+                } else {
+                    codeError.style.display = 'none';
+                }
+
+                if (data.reg_exists && regInput.length > 0) {
+                    regError.style.display = 'block';
+                    hasError = true;
+                } else {
+                    regError.style.display = 'none';
+                }
+
+                btnSubmit.disabled = hasError;
+            })
+            .catch(error => console.error('Error:', error));
+    }, 300);
+}
+
+// --- SweetAlert for Doctor Toggle ---
+function confirmDoctorToggle(id, currentStatus) {
+    let actionText = currentStatus === 1 ? "Deactivate" : "Activate";
+    let actionColor = currentStatus === 1 ? "#d33" : "#28a745";
+    
+    Swal.fire({
+        title: 'Are you sure?',
+        text: `Do you want to ${actionText} this doctor profile?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: actionColor,
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: `Yes, ${actionText} it!`
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = `master_doctors.php?tab=doctors&toggle_status=${id}&st=${currentStatus}`;
+        }
+    });
+}
+
+// --- SweetAlert for Schedule Delete ---
+function confirmDeleteSch(id) {
+    Swal.fire({
+        title: 'Delete Schedule?',
+        text: "Are you sure you want to remove this availability slot? This cannot be undone.",
+        icon: 'error',
+        showCancelButton: true,
+        confirmButtonColor: '#d33',
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: 'Yes, Delete!'
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = `master_doctors.php?tab=schedules&del_sch=${id}`;
+        }
+    });
+}
+
 // --- SCHEDULING FORM LOGIC ---
 function editSchedule(s) {
     document.getElementById('edit_sch_id').value = s.id;
@@ -765,11 +923,19 @@ function submitAjaxForm(e, actionType, dropdownId) {
                 alert("Added Successfully!");
             }
         } else {
-            alert('Error: ' + data.error);
+            Swal.fire({
+                icon: 'error',
+                title: 'Duplicate Found!',
+                text: data.error,
+            });
         }
     })
     .catch(err => {
-        alert('Something went wrong during submission!');
+        Swal.fire({
+            icon: 'error',
+            title: 'Error!',
+            text: 'Something went wrong during submission!',
+        });
     })
     .finally(() => {
         btn.innerHTML = oldHtml;
@@ -792,6 +958,10 @@ function editDoc(d) {
     
     document.getElementById('docFormTitle').innerHTML = '<i class="bi bi-pencil-square text-warning me-1"></i> Edit Doctor Profile';
     document.getElementById('btnDocSubmit').innerHTML = '<i class="bi bi-check2-circle me-1"></i> Update Doctor';
+    
+    document.getElementById('code_error').style.display = 'none';
+    document.getElementById('reg_error').style.display = 'none';
+    document.getElementById('btnDocSubmit').disabled = false;
     document.getElementById('full_name').focus();
     
     const triggerEl = document.querySelector('#tab-doctors-btn');
@@ -808,10 +978,43 @@ function resetDocForm() {
     document.getElementById('specialization_id').value = '';
     document.getElementById('mobile').value = '';
     document.getElementById('email').value = '';
+    
     document.getElementById('docFormTitle').innerHTML = '<i class="bi bi-person-plus-fill text-primary me-1"></i> Add / Edit Doctor Profile';
     document.getElementById('btnDocSubmit').innerHTML = '<i class="bi bi-check2-circle me-1"></i> Save Doctor';
+    
+    document.getElementById('code_error').style.display = 'none';
+    document.getElementById('reg_error').style.display = 'none';
+    document.getElementById('btnDocSubmit').disabled = false;
     document.getElementById('full_name').focus();
 }
+</script>
+
+<!-- SweetAlert Success/Error Handlers -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    <?php if (isset($_SESSION['swal_success'])): ?>
+        Swal.fire({
+            icon: 'success',
+            title: 'Success!',
+            text: '<?= addslashes($_SESSION['swal_success']) ?>',
+            timer: 3000,
+            showConfirmButton: false,
+            toast: true,
+            position: 'top-end'
+        });
+        <?php unset($_SESSION['swal_success']); ?>
+    <?php endif; ?>
+
+    <?php if (isset($_SESSION['swal_error'])): ?>
+        Swal.fire({
+            icon: 'error',
+            title: 'Error!',
+            text: '<?= addslashes($_SESSION['swal_error']) ?>',
+            confirmButtonColor: '#d33'
+        });
+        <?php unset($_SESSION['swal_error']); ?>
+    <?php endif; ?>
+});
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
