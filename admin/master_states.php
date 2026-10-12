@@ -1,16 +1,33 @@
 <?php
 // admin/master_states.php
 require_once __DIR__ . '/../config/tenant_db.php';
-require_once __DIR__ . '/../config/alerts.php';
+
+// Session start karein agar nahi hai
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
 $page_title = "State Master";
 $org_id = (int)($_SESSION['org_id'] ?? 1);
 $center_id = (int)($_SESSION['center_id'] ?? 1); // Center ID added
 $user_id = (int)($_SESSION['user_id'] ?? 1);
 
-// 1. Auto-Seed All Indian States & UTs
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['seed_states'])) {
-    $india_states = [
+// 1. AJAX Handler: Check if State Name Already Exists
+if (isset($_GET['check_name'])) {
+    header('Content-Type: application/json');
+    $name = strtoupper(trim($_GET['check_name']));
+    $edit_id = (int)($_GET['edit_id'] ?? 0);
+    
+    $stmt =$tenant_pdo->prepare("SELECT COUNT(*) FROM master_states WHERE state_name = ? AND org_id = ? AND center_id = ? AND id != ?");
+    $stmt->execute([$name,$org_id, $center_id,$edit_id]);
+    $exists =$stmt->fetchColumn() > 0;
+    
+    echo json_encode(['exists' => $exists]);
+    exit;
+}
+
+// 2. Auto-Seed All Indian States & UTs
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['seed_states'])) {$india_states = [
         'ANDHRA PRADESH', 'ARUNACHAL PRADESH', 'ASSAM', 'BIHAR', 'CHHATTISGARH',
         'GOA', 'GUJARAT', 'HARYANA', 'HIMACHAL PRADESH', 'JHARKHAND',
         'KARNATAKA', 'KERALA', 'MADHYA PRADESH', 'MAHARASHTRA', 'MANIPUR',
@@ -23,90 +40,85 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['seed_states'])) {
     
     try {
         // Center ID included in duplication check
-        $existing_stmt = $tenant_pdo->prepare("SELECT UPPER(state_name) FROM master_states WHERE org_id = ? AND center_id = ?");
-        $existing_stmt->execute([$org_id, $center_id]);
-        $existing_states = $existing_stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+        $existing_stmt =$tenant_pdo->prepare("SELECT UPPER(state_name) FROM master_states WHERE org_id = ? AND center_id = ?");
+        $existing_stmt->execute([$org_id,$center_id]);
+        $existing_states =$existing_stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
 
-        $stmt = $tenant_pdo->prepare("INSERT INTO master_states (org_id, center_id, state_name, status, created_by) VALUES (?, ?, ?, 1, ?)");
+        $stmt =$tenant_pdo->prepare("INSERT INTO master_states (org_id, center_id, state_name, status, created_by) VALUES (?, ?, ?, 1, ?)");
         $added = 0;
 
-        foreach ($india_states as $state) {
-            if (!in_array($state, $existing_states)) {
-                $stmt->execute([$org_id, $center_id, $state, $user_id]);
-                $added++;
+        foreach ($india_states as$state) {
+            if (!in_array($state,$existing_states)) {
+                $stmt->execute([$org_id, $center_id,$state, $user_id]);$added++;
             }
         }
 
         if ($added > 0) {
-            set_flash_msg("{$added} States & UTs automatically added to the master.");
+            $_SESSION['swal_success'] = "{$added} States & UTs automatically added to the master.";
         } else {
-            set_flash_msg("All States & UTs are already present.");
+            $_SESSION['swal_success'] = "All States & UTs are already present.";
         }
-    } catch (PDOException $e) {
-        set_flash_err("Database Error: " . $e->getMessage());
+    } catch (PDOException $e) {$_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
     }
     header("Location: master_states.php");
     exit;
 }
 
-// 2. Toggle Status
+// 3. Toggle Status
 if (isset($_GET['toggle_status'])) {
     $id = (int)$_GET['toggle_status'];
     $st = (int)($_GET['st'] ?? 1) === 1 ? 0 : 1;
     try {
         // Center ID added to update condition
-        $tenant_pdo->prepare("UPDATE master_states SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id, $org_id, $center_id]);
-        set_flash_msg("State status updated!");
-    } catch (PDOException $e) {
-        set_flash_err("Status update failed: " . $e->getMessage());
+        $tenant_pdo->prepare("UPDATE master_states SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id,$org_id, $center_id]);$_SESSION['swal_success'] = "State status updated!";
+    } catch (PDOException $e) {$_SESSION['swal_error'] = "Status update failed: " . $e->getMessage();
     }
     header("Location: master_states.php");
     exit;
 }
 
-// 3. Save / Update Single State
+// 4. Save / Update Single State
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_state'])) {
     $state_name = strtoupper(trim($_POST['state_name'] ?? ''));
     $status   = isset($_POST['status']) ? 1 : 0;
     $edit_id  = (int)($_POST['edit_id'] ?? 0);
 
-    if (empty($state_name)) {
-        set_flash_err("State Name is required.");
+    if (empty($state_name)) {$_SESSION['swal_error'] = "State Name is required.";
     } else {
         try {
             if ($edit_id > 0) {
                 // Center ID added to update condition
-                $stmt = $tenant_pdo->prepare("UPDATE master_states SET state_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
-                $stmt->execute([$state_name, $status, $edit_id, $org_id, $center_id]);
-                set_flash_msg("State updated successfully.");
+                $stmt =$tenant_pdo->prepare("UPDATE master_states SET state_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
+                $stmt->execute([$state_name,$status, $edit_id,$org_id, $center_id]);$_SESSION['swal_success'] = "State updated successfully.";
             } else {
                 // Center ID added to duplication check
-                $chk = $tenant_pdo->prepare("SELECT id FROM master_states WHERE state_name = ? AND org_id = ? AND center_id = ?");
-                $chk->execute([$state_name, $org_id, $center_id]);
+                $chk =$tenant_pdo->prepare("SELECT id FROM master_states WHERE state_name = ? AND org_id = ? AND center_id = ?");
+                $chk->execute([$state_name, $org_id,$center_id]);
                 if ($chk->fetch()) {
-                    set_flash_err("State '{$state_name}' is already added!");
+                    $_SESSION['swal_error'] = "State '{$state_name}' is already added!";
                 } else {
                     // Center ID added to insert
-                    $stmt = $tenant_pdo->prepare("INSERT INTO master_states (org_id, center_id, state_name, status, created_by) VALUES (?, ?, ?, ?, ?)");
-                    $stmt->execute([$org_id, $center_id, $state_name, $status, $user_id]);
-                    set_flash_msg("State added successfully.");
+                    $stmt =$tenant_pdo->prepare("INSERT INTO master_states (org_id, center_id, state_name, status, created_by) VALUES (?, ?, ?, ?, ?)");
+                    $stmt->execute([$org_id,$center_id, $state_name,$status, $user_id]);$_SESSION['swal_success'] = "State added successfully.";
                 }
             }
             header("Location: master_states.php");
             exit;
-        } catch (PDOException $e) {
-            set_flash_err("Database Error: " . $e->getMessage());
+        } catch (PDOException $e) {$_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
         }
     }
 }
 
 // Fetch all states for the organization and center
-$states = $tenant_pdo->prepare("SELECT * FROM master_states WHERE org_id = ? AND center_id = ? ORDER BY id DESC");
-$states->execute([$org_id, $center_id]);
-$states = $states->fetchAll() ?: [];
+$states =$tenant_pdo->prepare("SELECT * FROM master_states WHERE org_id = ? AND center_id = ? ORDER BY id DESC");
+$states->execute([$org_id,$center_id]);
+$states =$states->fetchAll() ?: [];
 
 require_once __DIR__ . '/layout_header.php';
 ?>
+
+<!-- SweetAlert2 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
 <div class="row g-3">
     <!-- Form Card -->
@@ -122,7 +134,10 @@ require_once __DIR__ . '/layout_header.php';
 
                     <div class="mb-3">
                         <label class="form-label small fw-semibold text-secondary mb-1">State Name *</label>
-                        <input type="text" name="state_name" id="state_name" class="form-control form-control-sm text-uppercase" placeholder="e.g. UTTAR PRADESH" required autofocus>
+                        <!-- Added onkeyup for AJAX check -->
+                        <input type="text" name="state_name" id="state_name" class="form-control form-control-sm text-uppercase" placeholder="E.G. UTTAR PRADESH" required autofocus onkeyup="checkName()">
+                        <!-- Error Message Span -->
+                        <span id="name_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> This state already exists!</span>
                     </div>
 
                     <div class="form-check form-switch mb-4">
@@ -175,16 +190,17 @@ require_once __DIR__ . '/layout_header.php';
                             <?php if (empty($states)): ?>
                                 <tr><td colspan="4" class="text-center py-4 text-muted">No states found. Click "Auto-Add 36 States & UTs" to insert all.</td></tr>
                             <?php else: ?>
-                                <?php foreach ($states as $s): ?>
+                                <?php foreach ($states as$s): ?>
                                     <?php $is_act = (int)$s['status'] === 1; ?>
                                     <tr>
                                         <td class="ps-3 font-monospace text-muted">#<?= $s['id'] ?></td>
                                         <td class="fw-bold text-dark text-uppercase"><?= htmlspecialchars($s['state_name']) ?></td>
                                         <td>
+                                            <!-- SweetAlert applied on the toggle switch using onclick and event.preventDefault() -->
                                             <div class="form-check form-switch m-0" title="Toggle Status">
                                                 <input class="form-check-input" type="checkbox" role="switch" 
                                                        <?= $is_act ? 'checked' : '' ?> 
-                                                       onchange="window.location.href='master_states.php?toggle_status=<?= $s['id'] ?>&st=<?= $is_act ? 1 : 0 ?>'">
+                                                       onclick="event.preventDefault(); confirmToggle(<?= $s['id'] ?>, <?=$is_act ? 1 : 0 ?>)">
                                             </div>
                                         </td>
                                         <td class="text-end pe-3">
@@ -204,13 +220,48 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// --- Live AJAX Name Check ---
+let typingTimer;
+function checkName() {
+    clearTimeout(typingTimer);
+    let nameInput = document.getElementById('state_name').value.trim();
+    let editId = document.getElementById('edit_id').value;
+    let errorSpan = document.getElementById('name_error');
+    let btnSubmit = document.getElementById('btnSubmit');
+
+    if (nameInput.length === 0) {
+        errorSpan.style.display = 'none';
+        btnSubmit.disabled = false;
+        return;
+    }
+
+    typingTimer = setTimeout(function() {
+        fetch(`master_states.php?check_name=${encodeURIComponent(nameInput)}&edit_id=${editId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.exists) {
+                    errorSpan.style.display = 'block';
+                    btnSubmit.disabled = true;
+                } else {
+                    errorSpan.style.display = 'none';
+                    btnSubmit.disabled = false;
+                }
+            })
+            .catch(error => console.error('Error:', error));
+    }, 300);
+}
+
 // Edit Data Logic
 function editRow(d) {
     document.getElementById('edit_id').value = d.id;
     document.getElementById('state_name').value = d.state_name;
     document.getElementById('status').checked = (parseInt(d.status) === 1);
+    
     document.getElementById('formTitle').innerHTML = '<i class="bi bi-pencil-square text-warning me-2"></i> Edit State';
     document.getElementById('btnSubmit').innerHTML = '<i class="bi bi-check-lg me-1"></i> Update State';
+    
+    document.getElementById('name_error').style.display = 'none';
+    document.getElementById('btnSubmit').disabled = false;
     document.getElementById('state_name').focus();
 }
 
@@ -219,6 +270,9 @@ function resetForm() {
     document.getElementById('edit_id').value = '0';
     document.getElementById('formTitle').innerHTML = '<i class="bi bi-map text-primary me-2"></i> Add / Edit State';
     document.getElementById('btnSubmit').innerHTML = '<i class="bi bi-save me-1"></i> Save State';
+    
+    document.getElementById('name_error').style.display = 'none';
+    document.getElementById('btnSubmit').disabled = false;
     document.getElementById('state_name').focus();
 }
 
@@ -233,6 +287,54 @@ document.getElementById('searchInput').addEventListener('keyup', function() {
             row.style.display = 'none';
         }
     });
+});
+
+// --- SweetAlert for Status Toggle ---
+function confirmToggle(id, currentStatus) {
+    let actionText = currentStatus === 1 ? "Deactivate" : "Activate";
+    let actionColor = currentStatus === 1 ? "#d33" : "#28a745";
+    
+    Swal.fire({
+        title: 'Are you sure?',
+        text: `Do you want to ${actionText} this state?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: actionColor,
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: `Yes, ${actionText} it!`
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = `?toggle_status=${id}&st=${currentStatus}`;
+        }
+    });
+}
+</script>
+
+<!-- SweetAlert Success/Error Handlers -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    <?php if (isset($_SESSION['swal_success'])): ?>
+        Swal.fire({
+            icon: 'success',
+            title: 'Success!',
+            text: '<?= addslashes($_SESSION['swal_success']) ?>',
+            timer: 3000,
+            showConfirmButton: false,
+            toast: true,
+            position: 'top-end'
+        });
+        <?php unset($_SESSION['swal_success']); ?>
+    <?php endif; ?>
+
+    <?php if (isset($_SESSION['swal_error'])): ?>
+        Swal.fire({
+            icon: 'error',
+            title: 'Error!',
+            text: '<?= addslashes($_SESSION['swal_error']) ?>',
+            confirmButtonColor: '#d33'
+        });
+        <?php unset($_SESSION['swal_error']); ?>
+    <?php endif; ?>
 });
 </script>
 
