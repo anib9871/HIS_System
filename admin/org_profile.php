@@ -3,10 +3,14 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
+// Session start karein agar nahi hai
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 $page_title = "Organization Profile";
 
 require_once __DIR__ . '/../config/tenant_db.php';
-require_once __DIR__ . '/../config/alerts.php';
 
 // 1. Ensure table and columns exist safely
 try {
@@ -49,9 +53,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_org'])) {
     $gst_no   = trim($_POST['gst_no'] ?? '');
 
     if (empty($org_name)) {
-        set_flash_err("Hospital / Organization Name is required.");
+        $_SESSION['swal_error'] = "Hospital / Organization Name is required.";
     } elseif (mb_strlen($mnemonic) > 4) {
-        set_flash_err("Mnemonic code cannot exceed 4 characters.");
+        $_SESSION['swal_error'] = "Mnemonic code cannot exceed 4 characters.";
     } else {
         try {
             // A. Update in Tenant DB
@@ -85,11 +89,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_org'])) {
                 }
             } catch (Exception $em) {}
 
-            set_flash_msg("Hospital profile details successfully updated!");
+            $_SESSION['swal_success'] = "Hospital profile details successfully updated!";
             header("Location: org_profile.php");
             exit;
         } catch (PDOException $e) {
-            set_flash_err("Database Error: " . $e->getMessage());
+            $_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
         }
     }
 }
@@ -114,6 +118,9 @@ $val_mnemonic = $org['mnemonic'] ?? ($_SESSION['mnemonic'] ?? '');
 
 require_once __DIR__ . '/layout_header.php';
 ?>
+
+<!-- SweetAlert2 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
 <div class="row justify-content-center">
     <div class="col-xl-9 col-lg-10">
@@ -141,7 +148,8 @@ require_once __DIR__ . '/layout_header.php';
                                 <label class="form-label small fw-semibold text-secondary mb-1">
                                     Organization / Hospital Name <span class="text-danger">*</span>
                                 </label>
-                                <input type="text" name="org_name" class="form-control form-control-sm fw-bold" 
+                                <!-- text-uppercase for auto caps -->
+                                <input type="text" name="org_name" class="form-control form-control-sm fw-bold text-uppercase" 
                                        value="<?= htmlspecialchars($val_org_name) ?>" required>
                             </div>
                             <div class="col-md-4">
@@ -181,7 +189,6 @@ require_once __DIR__ . '/layout_header.php';
                     </div>
 
                     <div class="row g-2 mb-3">
-                        <!-- State Dropdown -->
                         <div class="col-md-4">
                             <label class="form-label small fw-semibold text-secondary mb-1">State</label>
                             <select name="state_id" id="state_id" class="form-select form-select-sm">
@@ -194,7 +201,6 @@ require_once __DIR__ . '/layout_header.php';
                             </select>
                         </div>
                         
-                        <!-- City Dropdown (Fetched via JS) -->
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">City</label>
                             <select name="city_id" id="city_id" class="form-select form-select-sm">
@@ -209,7 +215,7 @@ require_once __DIR__ . '/layout_header.php';
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">GSTIN / Reg No. (Optional)</label>
-                            <input type="text" name="gst_no" class="form-control form-control-sm font-monospace" 
+                            <input type="text" name="gst_no" class="form-control form-control-sm font-monospace text-uppercase" 
                                    value="<?= htmlspecialchars($org['gst_no'] ?? '') ?>">
                         </div>
                     </div>
@@ -230,11 +236,19 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
-// Logic to limit Mnemonic field length
+// Logic to limit Mnemonic field length using SweetAlert
 function checkMnemonicLength(input) {
     input.value = input.value.toUpperCase();
     if (input.value.length > 4) {
-        alert("Warning: Mnemonic code cannot exceed 4 characters!");
+        Swal.fire({
+            icon: 'warning',
+            title: 'Limit Exceeded',
+            text: 'Mnemonic code cannot exceed 4 characters!',
+            timer: 2000,
+            showConfirmButton: false,
+            toast: true,
+            position: 'top-end'
+        });
         input.value = input.value.substring(0, 4);
     }
 }
@@ -242,7 +256,12 @@ function checkMnemonicLength(input) {
 function validateMnemonicForm() {
     let mnemonic = document.getElementById('mnemonic_input').value;
     if (mnemonic.length > 4) {
-        alert("Error: Mnemonic code must be 4 characters or less.");
+        Swal.fire({
+            icon: 'error',
+            title: 'Validation Error',
+            text: 'Mnemonic code must be 4 characters or less.',
+            confirmButtonColor: '#d33'
+        });
         return false;
     }
     return true;
@@ -283,6 +302,34 @@ stateSelect.addEventListener('change', loadCities);
 
 // Call on page load to pre-fill cities if state is already selected
 document.addEventListener('DOMContentLoaded', loadCities);
+</script>
+
+<!-- SweetAlert Success/Error Handlers -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    <?php if (isset($_SESSION['swal_success'])): ?>
+        Swal.fire({
+            icon: 'success',
+            title: 'Success!',
+            text: '<?= addslashes($_SESSION['swal_success']) ?>',
+            timer: 3000,
+            showConfirmButton: false,
+            toast: true,
+            position: 'top-end'
+        });
+        <?php unset($_SESSION['swal_success']); ?>
+    <?php endif; ?>
+
+    <?php if (isset($_SESSION['swal_error'])): ?>
+        Swal.fire({
+            icon: 'error',
+            title: 'Error!',
+            text: '<?= addslashes($_SESSION['swal_error']) ?>',
+            confirmButtonColor: '#d33'
+        });
+        <?php unset($_SESSION['swal_error']); ?>
+    <?php endif; ?>
+});
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
