@@ -1,8 +1,12 @@
 <?php
 // admin/master_doctor_tariff.php
 
+// Session start karein agar nahi hai
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 require_once __DIR__ . '/../config/tenant_db.php';
-require_once __DIR__ . '/../config/alerts.php';
 
 $page_title = "Doctor Tariff Master";
 
@@ -77,8 +81,6 @@ if (isset($_GET['ajax_tariffs'])) {
 
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        // When doctor + service + category are selected, return the
-        // insurance mappings already used for that exact combination.
         $used = [];
         $base_exists = false;
 
@@ -167,12 +169,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_tariff'])) {
     $edit_id       = (int)($_POST['edit_id'] ?? 0);
     $insurance_ids = $_POST['insurance_ids'] ?? [];
 
-    // Make sure insurance_ids is always an array
     if (!is_array($insurance_ids)) {
         $insurance_ids = [];
     }
 
-    // Clean insurance IDs
     $insurance_ids = array_values(
         array_filter(
             array_map('intval', $insurance_ids),
@@ -182,37 +182,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_tariff'])) {
         )
     );
 
-
-    // ---------------------------------------------------------
-    // Validation
-    // ---------------------------------------------------------
-
     if ($doctor_id <= 0 || $service_id <= 0 || $category_id <= 0) {
-
-        set_flash_err("Doctor, Service, and Category are mandatory!");
-
+        $_SESSION['swal_error'] = "Doctor, Service, and Category are mandatory!";
     } else {
-
         try {
-
-            // =================================================
-            // UPDATE EXISTING TARIFF
-            // =================================================
-
             if ($edit_id > 0) {
-
-                /*
-                 * During edit, one tariff row represents one
-                 * insurance mapping.
-                 *
-                 * If no insurance is selected, save as
-                 * Base Category tariff.
-                 */
-
                 $ins_id = !empty($insurance_ids)
                     ? (int)$insurance_ids[0]
                     : null;
-
 
                 $stmt = $tenant_pdo->prepare("
                     UPDATE doctor_tariff_master
@@ -228,7 +205,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_tariff'])) {
                       AND center_id = ?
                 ");
 
-
                 $stmt->execute([
                     $doctor_id,
                     $service_id,
@@ -241,16 +217,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_tariff'])) {
                     $center_id
                 ]);
 
-
-                set_flash_msg("Tariff updated successfully.");
-
-
-            // =================================================
-            // INSERT NEW TARIFF
-            // =================================================
+                $_SESSION['swal_success'] = "Tariff updated successfully.";
 
             } else {
-
                 $stmt = $tenant_pdo->prepare("
                     INSERT INTO doctor_tariff_master
                     (
@@ -267,14 +236,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_tariff'])) {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
 
-
-                // ---------------------------------------------
-                // NO INSURANCE
-                // Save as Base Category Rate
-                // ---------------------------------------------
-
                 if (empty($insurance_ids)) {
-
                     $stmt->execute([
                         $org_id,
                         $center_id,
@@ -286,16 +248,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_tariff'])) {
                         $status,
                         $user_id
                     ]);
-
-
-                // ---------------------------------------------
-                // MULTIPLE INSURANCES
-                // ---------------------------------------------
-
                 } else {
-
                     foreach ($insurance_ids as $ins_id) {
-
                         $stmt->execute([
                             $org_id,
                             $center_id,
@@ -310,19 +264,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_tariff'])) {
                     }
                 }
 
-
-                set_flash_msg("Tariff rate(s) added successfully.");
+                $_SESSION['swal_success'] = "Tariff rate(s) added successfully.";
             }
 
-
-            // Redirect after successful operation
             header("Location: master_doctor_tariff.php");
             exit;
 
-
         } catch (PDOException $e) {
-
-            set_flash_err("Database Error: " . $e->getMessage());
+            $_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
         }
     }
 }
@@ -333,13 +282,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_tariff'])) {
 // =========================================================
 
 if (isset($_GET['toggle_status'])) {
-
     $id = (int)$_GET['toggle_status'];
-
     $current_status = (int)($_GET['st'] ?? 1);
-
     $new_status = ($current_status === 1) ? 0 : 1;
-
 
     $stmt = $tenant_pdo->prepare("
         UPDATE doctor_tariff_master
@@ -349,7 +294,6 @@ if (isset($_GET['toggle_status'])) {
           AND center_id = ?
     ");
 
-
     $stmt->execute([
         $new_status,
         $id,
@@ -357,7 +301,7 @@ if (isset($_GET['toggle_status'])) {
         $center_id
     ]);
 
-
+    $_SESSION['swal_success'] = "Tariff status updated successfully.";
     header("Location: master_doctor_tariff.php");
     exit;
 }
@@ -379,7 +323,6 @@ $doctorsStmt = $tenant_pdo->prepare("
 ");
 
 $doctorsStmt->execute([$org_id]);
-
 $doctors = $doctorsStmt->fetchAll(PDO::FETCH_ASSOC);
 
 
@@ -398,7 +341,6 @@ $servicesStmt = $tenant_pdo->prepare("
 ");
 
 $servicesStmt->execute([$org_id]);
-
 $services = $servicesStmt->fetchAll(PDO::FETCH_ASSOC);
 
 
@@ -417,7 +359,6 @@ $categoriesStmt = $tenant_pdo->prepare("
 ");
 
 $categoriesStmt->execute([$org_id]);
-
 $categories = $categoriesStmt->fetchAll(PDO::FETCH_ASSOC);
 
 
@@ -439,7 +380,6 @@ $insuranceStmt = $tenant_pdo->prepare("
 ");
 
 $insuranceStmt->execute([$org_id]);
-
 $insurances = $insuranceStmt->fetchAll(PDO::FETCH_ASSOC);
 
 
@@ -488,20 +428,16 @@ if (!$tariff_list) {
 
 
 require_once __DIR__ . '/layout_header.php';
-
 ?>
 
-
+<!-- SweetAlert2 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
 <div class="row g-3">
 
-    <!-- =====================================================
-         TOP : ADD / EDIT FORM
-    ====================================================== -->
+    <!-- TOP : ADD / EDIT FORM -->
     <div class="col-12">
-
         <div class="card border shadow-sm">
-
             <div class="card-header bg-white py-2 px-3 border-bottom">
                 <span class="fw-bold small text-dark" id="formTitle">
                     <i class="bi bi-currency-rupee text-primary me-1"></i>
@@ -510,7 +446,6 @@ require_once __DIR__ . '/layout_header.php';
             </div>
 
             <div class="card-body p-3">
-
                 <form method="POST" action="" id="doctorTariffForm">
 
                     <input type="hidden" name="action_tariff" value="1">
@@ -603,230 +538,85 @@ require_once __DIR__ . '/layout_header.php';
 
                     </div>
 
-
                     <!-- Buttons -->
                     <div class="d-flex justify-content-end gap-2 pt-3 mt-3 border-top">
-
-                        <button
-                            type="reset"
-                            class="btn btn-light btn-sm border px-4"
-                            onclick="resetForm()"
-                        >
-                            Reset
-                        </button>
-
-                        <button
-                            type="submit"
-                            class="btn btn-primary btn-sm px-4 fw-semibold"
-                            id="btnSubmit"
-                        >
-                            Save Tariff
-                        </button>
-
+                        <button type="reset" class="btn btn-light btn-sm border px-4" onclick="resetForm()">Reset</button>
+                        <button type="submit" class="btn btn-primary btn-sm px-4 fw-semibold" id="btnSubmit">Save Tariff</button>
                     </div>
 
                 </form>
-
             </div>
-
         </div>
-
     </div>
 
-
-    <!-- =====================================================
-         BOTTOM : TARIFF LIST
-    ====================================================== -->
+    <!-- BOTTOM : TARIFF LIST -->
     <div class="col-12">
-
         <div class="card border shadow-sm">
-
             <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
-
                 <span class="fw-bold small text-dark">
-                    <i class="bi bi-list-columns text-primary me-1"></i>
-                    Tariff List
+                    <i class="bi bi-list-columns text-primary me-1"></i> Tariff List
                 </span>
-
-                <input
-                    type="text"
-                    id="searchInput"
-                    class="form-control form-control-sm"
-                    style="max-width:300px;"
-                    placeholder="Search doctor, service, category..."
-                >
-
+                <input type="text" id="searchInput" class="form-control form-control-sm" style="max-width:300px;" placeholder="Search doctor, service, category...">
             </div>
 
-
             <div class="card-body p-0">
-
                 <div class="table-responsive">
-
-                    <table
-                        class="table table-hover align-middle mb-0 small"
-                        id="tariffTable"
-                    >
-
+                    <table class="table table-hover align-middle mb-0 small" id="tariffTable">
                         <thead class="table-light">
-
                             <tr>
-
-                                <th class="ps-3" style="width:60px;">
-                                    #
-                                </th>
-
-                                <th>
-                                    Doctor
-                                </th>
-
-                                <th>
-                                    Service
-                                </th>
-
-                                <th>
-                                    Category
-                                </th>
-
-                                <th>
-                                    Insurance
-                                </th>
-
-                                <th style="width:120px;">
-                                    Rate (₹)
-                                </th>
-
-                                <th style="width:100px;">
-                                    Status
-                                </th>
-
-                                <th class="text-end pe-3" style="width:80px;">
-                                    Action
-                                </th>
-
+                                <th class="ps-3" style="width:60px;">#</th>
+                                <th>Doctor</th>
+                                <th>Service</th>
+                                <th>Category</th>
+                                <th>Insurance</th>
+                                <th style="width:120px;">Rate (₹)</th>
+                                <th style="width:100px;">Status</th>
+                                <th class="text-end pe-3" style="width:80px;">Action</th>
                             </tr>
-
                         </thead>
-
-
                         <tbody id="tariffTableBody">
-
                             <?php if (empty($tariff_list)): ?>
-
                                 <tr>
-                                    <td
-                                        colspan="8"
-                                        class="text-center py-4 text-muted"
-                                    >
-                                        No tariffs mapped yet.
-                                    </td>
+                                    <td colspan="8" class="text-center py-4 text-muted">No tariffs mapped yet.</td>
                                 </tr>
-
                             <?php else: ?>
-
                                 <?php foreach ($tariff_list as $row): ?>
-
-                                    <?php
-                                    $is_act = ((int)$row['status'] === 1);
-                                    ?>
-
+                                    <?php $is_act = ((int)$row['status'] === 1); ?>
                                     <tr>
-
-                                        <!-- ID -->
-                                        <td class="ps-3 font-monospace">
-                                            #<?= (int)$row['id'] ?>
-                                        </td>
-
-
-                                        <!-- Doctor -->
+                                        <td class="ps-3 font-monospace">#<?= (int)$row['id'] ?></td>
                                         <td>
-                                            <div class="fw-bold text-dark">
-                                                <?= htmlspecialchars($row['full_name']) ?>
-                                            </div>
+                                            <div class="fw-bold text-dark"><?= htmlspecialchars($row['full_name']) ?></div>
                                         </td>
-
-
-                                        <!-- Service -->
                                         <td>
-                                            <span class="badge bg-secondary-subtle text-dark border">
-                                                <?= htmlspecialchars($row['service_name']) ?>
-                                            </span>
+                                            <span class="badge bg-secondary-subtle text-dark border"><?= htmlspecialchars($row['service_name']) ?></span>
                                         </td>
-
-
-                                        <!-- Category -->
                                         <td>
-                                            <div class="fw-semibold text-primary">
-                                                <?= htmlspecialchars($row['category_name']) ?>
-                                            </div>
+                                            <div class="fw-semibold text-primary"><?= htmlspecialchars($row['category_name']) ?></div>
                                         </td>
-
-
-                                        <!-- Insurance -->
                                         <td>
-                                            <small class="text-muted">
-                                                <?= !empty($row['insurance_name'])
-                                                    ? htmlspecialchars($row['insurance_name'])
-                                                    : 'Base Category'
-                                                ?>
-                                            </small>
+                                            <small class="text-muted"><?= !empty($row['insurance_name']) ? htmlspecialchars($row['insurance_name']) : 'Base Category' ?></small>
                                         </td>
-
-
-                                        <!-- Rate -->
-                                        <td class="fw-bold text-success">
-                                            ₹<?= number_format((float)$row['rate'], 2) ?>
-                                        </td>
-
-
-                                        <!-- Status -->
+                                        <td class="fw-bold text-success">₹<?= number_format((float)$row['rate'], 2) ?></td>
                                         <td>
-                                            <a
-                                                href="?toggle_status=<?= (int)$row['id'] ?>&st=<?= $is_act ? 1 : 0 ?>"
-                                                class="badge text-decoration-none
-                                                <?= $is_act
-                                                    ? 'bg-success-subtle text-success border border-success'
-                                                    : 'bg-danger-subtle text-danger border border-danger'
-                                                ?>"
-                                            >
+                                            <!-- SweetAlert attached to status toggle -->
+                                            <a href="javascript:void(0);" onclick="confirmToggle(<?= (int)$row['id'] ?>, <?= $is_act ? 1 : 0 ?>)" class="badge text-decoration-none <?= $is_act ? 'bg-success-subtle text-success border border-success' : 'bg-danger-subtle text-danger border border-danger' ?>">
                                                 <?= $is_act ? 'Active' : 'Inactive' ?>
                                             </a>
                                         </td>
-
-
-                                        <!-- Action -->
                                         <td class="text-end pe-3">
-
-                                            <button
-                                                type="button"
-                                                class="btn btn-outline-primary btn-sm py-0 px-2"
-                                                onclick="editRowFromJson(this); return false;"
-                                                data-row='<?= htmlspecialchars(json_encode($row, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP), ENT_QUOTES, "UTF-8") ?>'
-                                                title="Edit"
-                                            >
+                                            <button type="button" class="btn btn-outline-primary btn-sm py-0 px-2" onclick="editRowFromJson(this); return false;" data-row='<?= htmlspecialchars(json_encode($row, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP), ENT_QUOTES, "UTF-8") ?>' title="Edit">
                                                 <i class="bi bi-pencil"></i>
                                             </button>
-
                                         </td>
-
                                     </tr>
-
                                 <?php endforeach; ?>
-
                             <?php endif; ?>
-
                         </tbody>
-
                     </table>
-
                 </div>
-
             </div>
-
         </div>
-
     </div>
-
 </div>
 
 <!-- =========================================================
@@ -922,10 +712,26 @@ require_once __DIR__ . '/layout_header.php';
 
 
 <script>
+// --- SweetAlert for Status Toggle ---
+function confirmToggle(id, currentStatus) {
+    let actionText = currentStatus === 1 ? "Deactivate" : "Activate";
+    let actionColor = currentStatus === 1 ? "#d33" : "#28a745";
+    
+    Swal.fire({
+        title: 'Are you sure?',
+        text: `Do you want to ${actionText} this tariff record?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: actionColor,
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: `Yes, ${actionText} it!`
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = `?toggle_status=${id}&st=${currentStatus}`;
+        }
+    });
+}
 
-// =========================================================
-// AJAX FORM SUBMISSION FOR MODALS
-// =========================================================
 function submitAjaxForm(e, actionType) {
     e.preventDefault();
     let form = e.target;
@@ -948,7 +754,6 @@ function submitAjaxForm(e, actionType) {
             modalInstance.hide();
             form.reset();
             
-            // Reload the dropdowns automatically
             refreshDropdownMasters();
             
             if(typeof Swal !== 'undefined') {
@@ -957,7 +762,7 @@ function submitAjaxForm(e, actionType) {
                 alert("Added Successfully!");
             }
         } else {
-            alert('Error: ' + data.error);
+            Swal.fire({ icon: 'error', title: 'Error!', text: data.error });
         }
     })
     .catch(err => alert('Something went wrong!'))
@@ -967,18 +772,7 @@ function submitAjaxForm(e, actionType) {
     });
 }
 
-
-// =========================================================
-// LOAD INSURANCES FROM PHP
-// =========================================================
-
-let allInsurances =
-    <?= json_encode($insurances, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
-
-
-// =========================================================
-// AUTO-REFRESH DROPDOWNS (When returning from another tab)
-// =========================================================
+let allInsurances = <?= json_encode($insurances, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
 
 function refreshDropdownMasters() {
     fetch('?ajax_masters=1', { cache: 'no-store' })
@@ -986,7 +780,6 @@ function refreshDropdownMasters() {
         .then(data => {
             if (!data.success) return;
 
-            // 1. Refresh Doctors Dropdown
             const docSel = document.getElementById('doctor_id');
             const docVal = docSel.value;
             let docHtml = '<option value="">-- Choose Doctor --</option>';
@@ -996,7 +789,6 @@ function refreshDropdownMasters() {
             docSel.innerHTML = docHtml;
             docSel.value = docVal;
 
-            // 2. Refresh Services Dropdown
             const srvSel = document.getElementById('service_id');
             const srvVal = srvSel.value;
             let srvHtml = '<option value="">-- Choose Service --</option>';
@@ -1006,7 +798,6 @@ function refreshDropdownMasters() {
             srvSel.innerHTML = srvHtml;
             srvSel.value = srvVal;
 
-            // 3. Refresh Categories Dropdown
             const catSel = document.getElementById('category_id');
             const catVal = catSel.value;
             let catHtml = '<option value="">-- Choose Category --</option>';
@@ -1016,25 +807,16 @@ function refreshDropdownMasters() {
             catSel.innerHTML = catHtml;
             catSel.value = catVal;
 
-            // 4. Update the global Insurances array 
             allInsurances = data.insurances;
 
-            // Re-run category change to refresh mapping checkboxes based on new data
             if (catVal) onCategoryChange();
         })
         .catch(err => console.error("Auto dropdown refresh error:", err));
 }
 
-// Fire the refresh automatically whenever the user clicks back onto this browser tab
 window.addEventListener('focus', refreshDropdownMasters);
 
-
-// =========================================================
-// CATEGORY CHANGE
-// =========================================================
-
 function onCategoryChange(selectedInsId = null) {
-
     const catId = document.getElementById('category_id').value;
     const doctorId = document.getElementById('doctor_id').value;
     const serviceId = document.getElementById('service_id').value;
@@ -1058,11 +840,9 @@ function onCategoryChange(selectedInsId = null) {
         return;
     }
 
-    // First render the insurance list. Existing mappings are fetched below.
     renderInsuranceList(filtered, selectedInsId, [], false);
     container.style.display = 'block';
 
-    // Only check duplicate mappings when Doctor + Service + Category are selected.
     if (doctorId && serviceId && catId) {
         fetch('?ajax_tariffs=1'
             + '&doctor_id=' + encodeURIComponent(doctorId)
@@ -1087,9 +867,7 @@ function onCategoryChange(selectedInsId = null) {
     }
 }
 
-
 function renderInsuranceList(filtered, selectedInsId, usedInsuranceIds, baseExists) {
-
     const listDiv = document.getElementById('insurance_list');
     const usedSet = new Set((usedInsuranceIds || []).map(String));
 
@@ -1147,9 +925,6 @@ function renderInsuranceList(filtered, selectedInsId, usedInsuranceIds, baseExis
     updateSelectAll();
 }
 
-
-// Refresh the tariff list automatically so entries added from another tab
-// appear here without manually refreshing the page.
 let tariffRefreshBusy = false;
 
 function refreshTariffList() {
@@ -1171,9 +946,7 @@ function refreshTariffList() {
         });
 }
 
-
 function renderTariffTable(rows) {
-
     const tbody = document.getElementById('tariffTableBody');
     if (!tbody) return;
 
@@ -1204,37 +977,32 @@ function renderTariffTable(rows) {
         return `
             <tr>
                 <td class="ps-3 font-monospace">#${parseInt(row.id)}</td>
-
                 <td>
                     <div class="fw-bold text-dark">${escapeHtml(row.full_name)}</div>
                 </td>
-
                 <td>
                     <span class="badge bg-secondary-subtle text-dark border">
                         ${escapeHtml(row.service_name)}
                     </span>
                 </td>
-
                 <td>
                     <div class="fw-semibold text-primary">
                         ${escapeHtml(row.category_name)}
                     </div>
                 </td>
-
                 <td>
                     <small class="text-muted">${insurance}</small>
                 </td>
-
                 <td class="fw-bold text-success">
                     ₹${Number(row.rate || 0).toLocaleString('en-IN', {
                         minimumFractionDigits: 2,
                         maximumFractionDigits: 2
                     })}
                 </td>
-
                 <td>
                     <a
-                        href="?toggle_status=${parseInt(row.id)}&st=${active ? 1 : 0}"
+                        href="javascript:void(0);"
+                        onclick="confirmToggle(${parseInt(row.id)}, ${active ? 1 : 0})"
                         class="badge text-decoration-none ${active
                             ? 'bg-success-subtle text-success border border-success'
                             : 'bg-danger-subtle text-danger border border-danger'}"
@@ -1242,7 +1010,6 @@ function renderTariffTable(rows) {
                         ${active ? 'Active' : 'Inactive'}
                     </a>
                 </td>
-
                 <td class="text-end pe-3">
                     <button
                         type="button"
@@ -1259,165 +1026,61 @@ function renderTariffTable(rows) {
     }).join('');
 }
 
-
 function editRowFromJson(button) {
     try {
         if (!button) return;
-
         const raw = button.getAttribute('data-row');
-        if (!raw) {
-            console.error('Edit data not found.');
-            return;
-        }
-
+        if (!raw) return;
         const data = JSON.parse(raw);
         editRow(data);
-
     } catch (error) {
         console.error('Unable to open tariff for edit:', error);
-        console.error('Raw edit data:', button ? button.getAttribute('data-row') : null);
     }
 }
 
-
-// Poll every 3 seconds. This makes changes from another browser tab visible
-// automatically without reloading the page.
 setInterval(refreshTariffList, 3000);
 
-
-
-// =========================================================
-// ESCAPE HTML
-// =========================================================
-
 function escapeHtml(value) {
-
     const div = document.createElement('div');
-
     div.textContent = value ?? '';
-
     return div.innerHTML;
 }
 
-
-
-// =========================================================
-// SELECT ALL INSURANCES
-// =========================================================
-
 function toggleAllIns(source) {
-
-    const checkboxes =
-        document.querySelectorAll('.ins-chk');
-
-
+    const checkboxes = document.querySelectorAll('.ins-chk');
     checkboxes.forEach(function (cb) {
-
         cb.checked = source.checked;
-
     });
-
 }
-
-
-
-// =========================================================
-// UPDATE SELECT ALL STATUS
-// =========================================================
 
 function updateSelectAll() {
-
-    const selectAll =
-        document.getElementById('selectAllIns');
-
-    const checkboxes =
-        document.querySelectorAll('.ins-chk');
-
-
-    if (!selectAll || checkboxes.length === 0) {
-
-        return;
-    }
-
-
-    const checked =
-        document.querySelectorAll('.ins-chk:checked');
-
-
-    selectAll.checked =
-        checked.length === checkboxes.length;
-
+    const selectAll = document.getElementById('selectAllIns');
+    const checkboxes = document.querySelectorAll('.ins-chk');
+    if (!selectAll || checkboxes.length === 0) return;
+    const checked = document.querySelectorAll('.ins-chk:checked');
+    selectAll.checked = checked.length === checkboxes.length;
 }
-
-
-
-// =========================================================
-// INSURANCE CHECKBOX CHANGE
-// =========================================================
 
 document.addEventListener('change', function (e) {
-
     if (e.target.classList.contains('ins-chk')) {
-
         updateSelectAll();
-
     }
-
 });
 
-
-
-// =========================================================
-// LIVE SEARCH
-// =========================================================
-
-const searchInput =
-    document.getElementById('searchInput');
-
-
+const searchInput = document.getElementById('searchInput');
 if (searchInput) {
-
     searchInput.addEventListener('keyup', function () {
-
-        const val =
-            this.value.toLowerCase().trim();
-
-
-        const rows =
-            document.querySelectorAll(
-                '#tariffTable tbody tr'
-            );
-
-
+        const val = this.value.toLowerCase().trim();
+        const rows = document.querySelectorAll('#tariffTable tbody tr');
         rows.forEach(function (row) {
-
-            const text =
-                row.innerText.toLowerCase();
-
-
-            row.style.display =
-                text.includes(val)
-                    ? ''
-                    : 'none';
-
+            const text = row.innerText.toLowerCase();
+            row.style.display = text.includes(val) ? '' : 'none';
         });
-
     });
-
 }
 
-
-
-// =========================================================
-// EDIT ROW
-// =========================================================
-
 function editRow(data) {
-
-    if (!data || !data.id) {
-        console.error('Invalid tariff data for edit:', data);
-        return;
-    }
+    if (!data || !data.id) return;
 
     const editId   = document.getElementById('edit_id');
     const doctor   = document.getElementById('doctor_id');
@@ -1428,12 +1091,8 @@ function editRow(data) {
     const title    = document.getElementById('formTitle');
     const button   = document.getElementById('btnSubmit');
 
-    if (!editId || !doctor || !service || !category || !rate || !status) {
-        console.error('Doctor tariff form elements not found.');
-        return;
-    }
+    if (!editId || !doctor || !service || !category || !rate || !status) return;
 
-    // Put the selected row values into the form.
     editId.value = data.id;
     doctor.value = data.doctor_id || '';
     service.value = data.service_id || '';
@@ -1441,7 +1100,6 @@ function editRow(data) {
     rate.value = data.rate ?? '';
     status.checked = parseInt(data.status, 10) === 1;
 
-    // Important: mark this row as EDIT mode before rendering insurance.
     if (title) {
         title.innerHTML = `
             <i class="bi bi-pencil-square text-warning me-1"></i>
@@ -1453,11 +1111,8 @@ function editRow(data) {
         button.innerText = 'Update Tariff';
     }
 
-    // Render the selected category's insurance and keep the current
-    // insurance checked even though it is already present in DB.
     onCategoryChange(data.insurance_id ? parseInt(data.insurance_id, 10) : null);
 
-    // Save edit state so the 3-second table refresh does not lose it.
     try {
         sessionStorage.setItem('doctor_tariff_form_edit_id', String(data.id));
         sessionStorage.setItem('doctor_tariff_form_doctor_id', String(data.doctor_id || ''));
@@ -1471,7 +1126,6 @@ function editRow(data) {
         );
     } catch (e) {}
 
-    // Bring the user back to the form after clicking Edit from the list.
     const form = document.getElementById('doctorTariffForm');
     if (form) {
         form.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1482,393 +1136,164 @@ function editRow(data) {
     }, 300);
 }
 
-
-
-
-// =========================================================
-// RESET FORM
-// =========================================================
-
 function resetForm() {
+    document.getElementById('edit_id').value = '0';
+    document.getElementById('doctor_id').value = '';
+    document.getElementById('service_id').value = '';
+    document.getElementById('category_id').value = '';
+    document.getElementById('rate').value = '';
+    document.getElementById('status').checked = true;
 
-    document.getElementById('edit_id').value =
-        '0';
+    document.getElementById('insurance_container').style.display = 'none';
+    document.getElementById('insurance_list').innerHTML = '';
 
-
-    document.getElementById('doctor_id').value =
-        '';
-
-
-    document.getElementById('service_id').value =
-        '';
-
-
-    document.getElementById('category_id').value =
-        '';
-
-
-    document.getElementById('rate').value =
-        '';
-
-
-    document.getElementById('status').checked =
-        true;
-
-
-    // Hide insurance
-
-    document.getElementById(
-        'insurance_container'
-    ).style.display = 'none';
-
-
-    document.getElementById(
-        'insurance_list'
-    ).innerHTML = '';
-
-
-    // Reset title
-
-    document.getElementById(
-        'formTitle'
-    ).innerHTML = `
-
+    document.getElementById('formTitle').innerHTML = `
         <i class="bi bi-currency-rupee text-primary me-1"></i>
-
         Add Doctor Tariff
-
     `;
 
-
-    // Reset button
-
-    document.getElementById(
-        'btnSubmit'
-    ).innerText =
-        'Save Tariff';
-
-
-    // Focus
-
-    document.getElementById(
-        'doctor_id'
-    ).focus();
-
+    document.getElementById('btnSubmit').innerText = 'Save Tariff';
+    document.getElementById('doctor_id').focus();
 }
 
-
-// =========================================================
-// PERSIST FORM VALUES UNTIL USER CLICKS RESET
-// =========================================================
-
 (function () {
-
     const form = document.getElementById('doctorTariffForm');
     if (!form) return;
 
     const STORAGE_PREFIX = 'doctor_tariff_form_';
-
-    const fieldIds = [
-        'doctor_id',
-        'service_id',
-        'category_id',
-        'rate',
-        'status',
-        'edit_id'
-    ];
-
+    const fieldIds = ['doctor_id', 'service_id', 'category_id', 'rate', 'status', 'edit_id'];
     let restoring = true;
 
-
-    // ---------------------------------------------------------
-    // Save current form values
-    // ---------------------------------------------------------
-
     function saveFormState() {
-
         if (restoring) return;
-
         fieldIds.forEach(function (id) {
-
             const el = document.getElementById(id);
             if (!el) return;
-
-            let value = '';
-
-            if (el.type === 'checkbox') {
-                value = el.checked ? '1' : '0';
-            } else {
-                value = el.value;
-            }
-
-            sessionStorage.setItem(
-                STORAGE_PREFIX + id,
-                value
-            );
+            let value = el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
+            sessionStorage.setItem(STORAGE_PREFIX + id, value);
         });
     }
 
-
-    // ---------------------------------------------------------
-    // Restore form values
-    // ---------------------------------------------------------
-
     function restoreFormState() {
-
         fieldIds.forEach(function (id) {
-
             const el = document.getElementById(id);
             if (!el) return;
-
-            const saved =
-                sessionStorage.getItem(STORAGE_PREFIX + id);
-
+            const saved = sessionStorage.getItem(STORAGE_PREFIX + id);
             if (saved === null) return;
-
             if (el.type === 'checkbox') {
-
-                el.checked = saved === '1';
-
+                el.checked = (saved === '1');
             } else {
-
                 el.value = saved;
             }
-
         });
 
-
-        // Restore insurance selections
-        const category =
-            document.getElementById('category_id');
-
+        const category = document.getElementById('category_id');
         if (category && category.value) {
-
-            const savedInsurance =
-                sessionStorage.getItem(
-                    STORAGE_PREFIX + 'insurance_ids'
-                );
-
+            const savedInsurance = sessionStorage.getItem(STORAGE_PREFIX + 'insurance_ids');
             let selectedIds = [];
-
             try {
-                selectedIds =
-                    savedInsurance
-                        ? JSON.parse(savedInsurance)
-                        : [];
+                selectedIds = savedInsurance ? JSON.parse(savedInsurance) : [];
             } catch (e) {
                 selectedIds = [];
             }
 
-
             onCategoryChange(selectedIds);
 
-
-            // Restore selected insurance checkboxes
             setTimeout(function () {
-
                 selectedIds.forEach(function (id) {
-
-                    const checkbox =
-                        document.getElementById('ins_' + id);
-
+                    const checkbox = document.getElementById('ins_' + id);
                     if (checkbox && !checkbox.disabled) {
                         checkbox.checked = true;
                     }
-
                 });
-
                 updateSelectAll();
-
             }, 50);
         }
     }
 
-
-    // ---------------------------------------------------------
-    // Save insurance checkbox state
-    // ---------------------------------------------------------
-
     function saveInsuranceState() {
-
         const selected = [];
-
-        document
-            .querySelectorAll('.ins-chk:checked')
-            .forEach(function (checkbox) {
-
-                selected.push(
-                    parseInt(checkbox.value)
-                );
-
-            });
-
-        sessionStorage.setItem(
-            STORAGE_PREFIX + 'insurance_ids',
-            JSON.stringify(selected)
-        );
+        document.querySelectorAll('.ins-chk:checked').forEach(function (checkbox) {
+            selected.push(parseInt(checkbox.value));
+        });
+        sessionStorage.setItem(STORAGE_PREFIX + 'insurance_ids', JSON.stringify(selected));
     }
 
-
-    // ---------------------------------------------------------
-    // Listen for changes
-    // ---------------------------------------------------------
-
     fieldIds.forEach(function (id) {
-
         const el = document.getElementById(id);
         if (!el) return;
-
-        el.addEventListener('change', function () {
-            saveFormState();
-        });
-
-        el.addEventListener('input', function () {
-            saveFormState();
-        });
-
+        el.addEventListener('change', saveFormState);
+        el.addEventListener('input', saveFormState);
     });
-
 
     document.addEventListener('change', function (e) {
-
-        if (
-            e.target.classList &&
-            e.target.classList.contains('ins-chk')
-        ) {
+        if (e.target.classList && e.target.classList.contains('ins-chk')) {
             saveInsuranceState();
         }
-
     });
 
-
-    // ---------------------------------------------------------
-    // Save insurance state whenever category changes
-    // ---------------------------------------------------------
-
-    const originalOnCategoryChange =
-        window.onCategoryChange;
-
+    const originalOnCategoryChange = window.onCategoryChange;
     window.onCategoryChange = function (selectedInsId = null) {
-
         if (typeof originalOnCategoryChange === 'function') {
-
             originalOnCategoryChange(selectedInsId);
-
         }
-
         setTimeout(function () {
-
             saveFormState();
-
             if (selectedInsId) {
-
-                const checkbox =
-                    document.getElementById(
-                        'ins_' + selectedInsId
-                    );
-
+                const checkbox = document.getElementById('ins_' + selectedInsId);
                 if (checkbox && !checkbox.disabled) {
                     checkbox.checked = true;
                 }
-
             }
-
             saveInsuranceState();
             updateSelectAll();
-
         }, 30);
     };
 
-
-    // ---------------------------------------------------------
-    // Reset = clear saved state
-    // ---------------------------------------------------------
-
-    const originalResetForm =
-        window.resetForm;
-
+    const originalResetForm = window.resetForm;
     window.resetForm = function () {
-
         fieldIds.forEach(function (id) {
-
-            sessionStorage.removeItem(
-                STORAGE_PREFIX + id
-            );
-
+            sessionStorage.removeItem(STORAGE_PREFIX + id);
         });
+        sessionStorage.removeItem(STORAGE_PREFIX + 'insurance_ids');
 
-        sessionStorage.removeItem(
-            STORAGE_PREFIX + 'insurance_ids'
-        );
-
-
-        // Call existing reset function
         if (typeof originalResetForm === 'function') {
             originalResetForm();
         }
-
-
-        // Explicitly clear all form fields
-        const doctor =
-            document.getElementById('doctor_id');
-
-        const service =
-            document.getElementById('service_id');
-
-        const category =
-            document.getElementById('category_id');
-
-        const rate =
-            document.getElementById('rate');
-
-        const status =
-            document.getElementById('status');
-
-        const editId =
-            document.getElementById('edit_id');
-
-
-        if (doctor) doctor.value = '';
-        if (service) service.value = '';
-        if (category) category.value = '';
-        if (rate) rate.value = '';
-        if (status) status.checked = true;
-        if (editId) editId.value = '0';
-
-
-        document
-            .getElementById('insurance_container')
-            .style.display = 'none';
-
-        document
-            .getElementById('insurance_list')
-            .innerHTML = '';
-
-
-        // Reset title/button
-        document.getElementById('formTitle').innerHTML = `
-            <i class="bi bi-currency-rupee text-primary me-1"></i>
-            Add Doctor Tariff
-        `;
-
-        document.getElementById('btnSubmit').innerText =
-            'Save Tariff';
-
-
         saveFormState();
     };
 
-
-    // ---------------------------------------------------------
-    // Restore after page load
-    // ---------------------------------------------------------
-
     restoreFormState();
-
     restoring = false;
-
 })();
+</script>
 
+<!-- SweetAlert Success/Error Handlers -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    <?php if (isset($_SESSION['swal_success'])): ?>
+        Swal.fire({
+            icon: 'success',
+            title: 'Success!',
+            text: '<?= addslashes($_SESSION['swal_success']) ?>',
+            timer: 3000,
+            showConfirmButton: false,
+            toast: true,
+            position: 'top-end'
+        });
+        <?php unset($_SESSION['swal_success']); ?>
+    <?php endif; ?>
+
+    <?php if (isset($_SESSION['swal_error'])): ?>
+        Swal.fire({
+            icon: 'error',
+            title: 'Error!',
+            text: '<?= addslashes($_SESSION['swal_error']) ?>',
+            confirmButtonColor: '#d33'
+        });
+        <?php unset($_SESSION['swal_error']); ?>
+    <?php endif; ?>
+});
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
