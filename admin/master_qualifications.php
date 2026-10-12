@@ -1,11 +1,33 @@
 <?php
 // admin/master_qualifications.php
+
+// Session start karein agar nahi hai
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 require_once __DIR__ . '/../config/tenant_db.php';
-require_once __DIR__ . '/../config/alerts.php';
 
 $page_title = "Doctor Qualifications";
 $org_id = (int)($_SESSION['org_id'] ?? 1);
 $center_id = (int)($_SESSION['center_id'] ?? 1);
+
+// ==============================================================
+// 1. AJAX Handler: Check if Qualification Name Already Exists
+// ==============================================================
+if (isset($_GET['check_duplicate'])) {
+    header('Content-Type: application/json');
+    $name = strtoupper(trim($_GET['name'] ?? ''));$edit_id = (int)($_GET['edit_id'] ?? 0);$name_exists = false;
+
+    if (!empty($name)) {
+        $stmt =$tenant_pdo->prepare("SELECT COUNT(*) FROM master_qualifications WHERE qualification_name = ? AND id != ? AND org_id = ? AND center_id = ?");
+        $stmt->execute([$name,$edit_id, $org_id,$center_id]);
+        $name_exists =$stmt->fetchColumn() > 0;
+    }
+
+    echo json_encode(['name_exists' => $name_exists]);
+    exit;
+}
 
 // Save / Update
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_qualification'])) {
@@ -14,23 +36,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_qualification'
     $status             = isset($_POST['status']) ? 1 : 0;
     $edit_id            = (int)($_POST['edit_id'] ?? 0);
 
-    if (empty($qualification_name)) {
-        set_flash_err("Qualification Name is required.");
+    if (empty($qualification_name)) {$_SESSION['swal_error'] = "Qualification Name is required.";
     } else {
         try {
-            if ($edit_id > 0) {
-                $stmt = $tenant_pdo->prepare("UPDATE master_qualifications SET qualification_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
-                $stmt->execute([$qualification_name, $status, $edit_id, $org_id, $center_id]);
-                set_flash_msg("Qualification updated successfully.");
+            // Backend Duplicate Validation
+            $dup_chk =$tenant_pdo->prepare("SELECT COUNT(*) FROM master_qualifications WHERE qualification_name = ? AND id != ? AND org_id = ? AND center_id = ?");
+            $dup_chk->execute([$qualification_name,$edit_id, $org_id,$center_id]);
+            
+            if ($dup_chk->fetchColumn() > 0) {$_SESSION['swal_error'] = "This Qualification already exists!";
             } else {
-                $stmt = $tenant_pdo->prepare("INSERT INTO master_qualifications (org_id, center_id, qualification_name, status) VALUES (?, ?, ?, ?)");
-                $stmt->execute([$org_id, $center_id, $qualification_name, $status]);
-                set_flash_msg("Qualification added successfully.");
+                if ($edit_id > 0) {
+                    $stmt =$tenant_pdo->prepare("UPDATE master_qualifications SET qualification_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
+                    $stmt->execute([$qualification_name,$status, $edit_id,$org_id, $center_id]);$_SESSION['swal_success'] = "Qualification updated successfully.";
+                } else {
+                    $stmt =$tenant_pdo->prepare("INSERT INTO master_qualifications (org_id, center_id, qualification_name, status) VALUES (?, ?, ?, ?)");
+                    $stmt->execute([$org_id, $center_id,$qualification_name, $status]);$_SESSION['swal_success'] = "Qualification added successfully.";
+                }
             }
             header("Location: master_qualifications.php");
             exit;
-        } catch (PDOException $e) {
-            set_flash_err("Database Error: " . $e->getMessage());
+        } catch (PDOException $e) {$_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
         }
     }
 }
@@ -39,17 +64,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_qualification'
 if (isset($_GET['toggle_status'])) {
     $id = (int)$_GET['toggle_status'];
     $st = (int)($_GET['st'] ?? 1) === 1 ? 0 : 1;
-    $tenant_pdo->prepare("UPDATE master_qualifications SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id, $org_id, $center_id]);
+    $tenant_pdo->prepare("UPDATE master_qualifications SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id,$org_id, $center_id]);$_SESSION['swal_success'] = "Status updated successfully.";
     header("Location: master_qualifications.php");
     exit;
 }
 
-$qualifications = $tenant_pdo->prepare("SELECT * FROM master_qualifications WHERE org_id = ? AND center_id = ? ORDER BY id DESC");
-$qualifications->execute([$org_id, $center_id]);
-$qualifications = $qualifications->fetchAll() ?: [];
+$qualifications =$tenant_pdo->prepare("SELECT * FROM master_qualifications WHERE org_id = ? AND center_id = ? ORDER BY id DESC");
+$qualifications->execute([$org_id,$center_id]);
+$qualifications =$qualifications->fetchAll() ?: [];
 
 require_once __DIR__ . '/layout_header.php';
 ?>
+
+<!-- SweetAlert2 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
 <div class="row g-3">
     <div class="col-lg-4">
@@ -64,8 +92,9 @@ require_once __DIR__ . '/layout_header.php';
 
                     <div class="mb-3">
                         <label class="form-label small fw-semibold text-secondary">Qualification Name *</label>
-                        <!-- 'text-uppercase' for visual capitals and 'autofocus' for keeping the cursor ready -->
-                        <input type="text" name="qualification_name" id="qualification_name" class="form-control form-control-sm text-uppercase" placeholder="E.G. MBBS / MD / MS / DNB" required autofocus>
+                        <!-- Added onkeyup for live duplication check -->
+                        <input type="text" name="qualification_name" id="qualification_name" class="form-control form-control-sm text-uppercase" placeholder="E.G. MBBS / MD / MS / DNB" required autofocus onkeyup="checkDuplicate()">
+                        <span id="name_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> This Qualification already exists!</span>
                     </div>
 
                     <div class="form-check form-switch mb-3">
@@ -86,11 +115,16 @@ require_once __DIR__ . '/layout_header.php';
         <div class="card border shadow-sm">
             <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
                 <span class="fw-bold small text-dark"><i class="bi bi-list-task text-primary me-1"></i> Qualifications List</span>
-                <span class="badge bg-light text-secondary border"><?= count($qualifications) ?> Records</span>
+                <div class="d-flex align-items-center gap-2">
+                    <!-- Added Search Bar -->
+                    <input type="text" id="searchQualInput" class="form-control form-control-sm" placeholder="Search Qualification..." style="max-width: 180px;">
+                    <span class="badge bg-light text-secondary border"><?= count($qualifications) ?> Records</span>
+                </div>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive">
-                    <table class="table table-hover align-middle mb-0 small">
+                    <!-- Added id to table -->
+                    <table class="table table-hover align-middle mb-0 small" id="qualTable">
                         <thead class="table-light">
                             <tr>
                                 <th class="ps-3" style="width: 60px;">#</th>
@@ -103,13 +137,14 @@ require_once __DIR__ . '/layout_header.php';
                             <?php if (empty($qualifications)): ?>
                                 <tr><td colspan="4" class="text-center py-4 text-muted">No qualifications recorded yet.</td></tr>
                             <?php else: ?>
-                                <?php foreach ($qualifications as $q): ?>
+                                <?php foreach ($qualifications as$q): ?>
                                     <?php $is_act = (int)$q['status'] === 1; ?>
                                     <tr>
                                         <td class="ps-3 font-monospace">#<?= $q['id'] ?></td>
                                         <td class="fw-bold text-dark text-uppercase"><?= htmlspecialchars($q['qualification_name']) ?></td>
                                         <td>
-                                            <a href="?toggle_status=<?= $q['id'] ?>&st=<?= $is_act ? 1 : 0 ?>" class="badge text-decoration-none <?= $is_act ? 'bg-success-subtle text-success border border-success' : 'bg-danger-subtle text-danger border border-danger' ?>">
+                                            <!-- SweetAlert integration for status toggle -->
+                                            <a href="javascript:void(0);" onclick="confirmToggle(<?= $q['id'] ?>, <?=$is_act ? 1 : 0 ?>)" class="badge text-decoration-none <?= $is_act ? 'bg-success-subtle text-success border border-success' : 'bg-danger-subtle text-danger border border-danger' ?>">
                                                 <?= $is_act ? 'Active' : 'Inactive' ?>
                                             </a>
                                         </td>
@@ -128,20 +163,117 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// --- Live Table Search ---
+document.getElementById('searchQualInput').addEventListener('keyup', function() {
+    let val = this.value.toLowerCase();
+    let rows = document.querySelectorAll('#qualTable tbody tr');
+    rows.forEach(row => {
+        row.style.display = row.innerText.toLowerCase().includes(val) ? '' : 'none';
+    });
+});
+
+// --- Live AJAX Duplicate Check ---
+let typingTimer;
+function checkDuplicate() {
+    clearTimeout(typingTimer);
+    let nameInput = document.getElementById('qualification_name').value.trim();
+    let editId = document.getElementById('edit_id').value;
+    
+    let nameError = document.getElementById('name_error');
+    let btnSubmit = document.getElementById('btnSubmit');
+
+    if (nameInput.length === 0) {
+        nameError.style.display = 'none';
+        btnSubmit.disabled = false;
+        return;
+    }
+
+    typingTimer = setTimeout(function() {
+        fetch(`master_qualifications.php?check_duplicate=1&name=${encodeURIComponent(nameInput)}&edit_id=${editId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.name_exists) {
+                    nameError.style.display = 'block';
+                    btnSubmit.disabled = true;
+                } else {
+                    nameError.style.display = 'none';
+                    btnSubmit.disabled = false;
+                }
+            })
+            .catch(error => console.error('Error:', error));
+    }, 300);
+}
+
 function editRow(d) {
     document.getElementById('edit_id').value = d.id;
     document.getElementById('qualification_name').value = d.qualification_name;
     document.getElementById('status').checked = (parseInt(d.status) === 1);
+    
     document.getElementById('formTitle').innerHTML = '<i class="bi bi-pencil-square text-warning me-1"></i> Edit Qualification';
     document.getElementById('btnSubmit').innerText = 'Update Qualification';
-    document.getElementById('qualification_name').focus(); // Cursor auto-focus on edit
+    
+    document.getElementById('name_error').style.display = 'none';
+    document.getElementById('btnSubmit').disabled = false;
+    document.getElementById('qualification_name').focus();
 }
+
 function resetForm() {
     document.getElementById('edit_id').value = '0';
     document.getElementById('formTitle').innerHTML = '<i class="bi bi-mortarboard text-primary me-1"></i> Add Qualification';
     document.getElementById('btnSubmit').innerText = 'Save Qualification';
-    document.getElementById('qualification_name').focus(); // Cursor auto-focus on reset
+    
+    document.getElementById('name_error').style.display = 'none';
+    document.getElementById('btnSubmit').disabled = false;
+    document.getElementById('qualification_name').focus();
 }
+
+// --- SweetAlert for Status Toggle ---
+function confirmToggle(id, currentStatus) {
+    let actionText = currentStatus === 1 ? "Deactivate" : "Activate";
+    let actionColor = currentStatus === 1 ? "#d33" : "#28a745";
+    
+    Swal.fire({
+        title: 'Are you sure?',
+        text: `Do you want to ${actionText} this qualification?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: actionColor,
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: `Yes, ${actionText} it!`
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = `?toggle_status=${id}&st=${currentStatus}`;
+        }
+    });
+}
+</script>
+
+<!-- SweetAlert Success/Error Handlers -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    <?php if (isset($_SESSION['swal_success'])): ?>
+        Swal.fire({
+            icon: 'success',
+            title: 'Success!',
+            text: '<?= addslashes($_SESSION['swal_success']) ?>',
+            timer: 3000,
+            showConfirmButton: false,
+            toast: true,
+            position: 'top-end'
+        });
+        <?php unset($_SESSION['swal_success']); ?>
+    <?php endif; ?>
+
+    <?php if (isset($_SESSION['swal_error'])): ?>
+        Swal.fire({
+            icon: 'error',
+            title: 'Error!',
+            text: '<?= addslashes($_SESSION['swal_error']) ?>',
+            confirmButtonColor: '#d33'
+        });
+        <?php unset($_SESSION['swal_error']); ?>
+    <?php endif; ?>
+});
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
