@@ -1,7 +1,12 @@
 <?php
 // admin/master_insurance_categories.php
+
+// Session start karein agar nahi hai
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 require_once __DIR__ . '/../config/tenant_db.php';
-require_once __DIR__ . '/../config/alerts.php';
 
 $page_title = "Category & Insurance Master";
 $org_id = (int)($_SESSION['org_id'] ?? 1);
@@ -11,6 +16,40 @@ $user_id = (int)($_SESSION['user_id'] ?? 1);
 // Get Last Selected Category from URL if exists (to retain selection)
 $last_cat = (int)($_GET['last_cat'] ?? 0);
 
+// ==============================================================
+// AJAX Handler: Check if Category or Insurance Already Exists
+// ==============================================================
+if (isset($_GET['check_cat'])) {
+    header('Content-Type: application/json');
+    $name = strtoupper(trim($_GET['name'] ?? ''));
+    $edit_id = (int)($_GET['edit_id'] ?? 0);
+    
+    $exists = false;
+    if (!empty($name)) {
+        $stmt = $tenant_pdo->prepare("SELECT COUNT(*) FROM master_categories WHERE category_name = ? AND id != ? AND org_id = ? AND center_id = ?");
+        $stmt->execute([$name, $edit_id, $org_id, $center_id]);
+        $exists = $stmt->fetchColumn() > 0;
+    }
+    echo json_encode(['exists' => $exists]);
+    exit;
+}
+
+if (isset($_GET['check_ins'])) {
+    header('Content-Type: application/json');
+    $name = strtoupper(trim($_GET['name'] ?? ''));
+    $cat_id = (int)($_GET['cat_id'] ?? 0);
+    $edit_id = (int)($_GET['edit_id'] ?? 0);
+    
+    $exists = false;
+    if (!empty($name)) {
+        $stmt = $tenant_pdo->prepare("SELECT COUNT(*) FROM insurance WHERE insurance_name = ? AND category_id = ? AND id != ? AND org_id = ? AND center_id = ?");
+        $stmt->execute([$name, $cat_id, $edit_id, $org_id, $center_id]);
+        $exists = $stmt->fetchColumn() > 0;
+    }
+    echo json_encode(['exists' => $exists]);
+    exit;
+}
+
 // 1. Handle Category Form Submit (Uppercase & Save/Update)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_category'])) {
     $category_name = strtoupper(trim($_POST['category_name'] ?? ''));
@@ -18,51 +57,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_category'])) {
     $edit_id       = (int)($_POST['edit_id'] ?? 0);
 
     if (empty($category_name)) {
-        set_flash_err("Category Name is required.");
+        $_SESSION['swal_error'] = "Category Name is required.";
     } else {
         try {
-            if ($edit_id > 0) {
-                $stmt = $tenant_pdo->prepare("UPDATE master_categories SET category_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
-                $stmt->execute([$category_name, $status, $edit_id, $org_id, $center_id]);
-                set_flash_msg("Category updated successfully.");
+            $dup_chk = $tenant_pdo->prepare("SELECT COUNT(*) FROM master_categories WHERE category_name = ? AND id != ? AND org_id = ? AND center_id = ?");
+            $dup_chk->execute([$category_name, $edit_id, $org_id, $center_id]);
+            
+            if ($dup_chk->fetchColumn() > 0) {
+                $_SESSION['swal_error'] = "This Category already exists!";
             } else {
-                $stmt = $tenant_pdo->prepare("INSERT INTO master_categories (org_id, center_id, category_name, status, created_by) VALUES (?, ?, ?, ?, ?)");
-                $stmt->execute([$org_id, $center_id, $category_name, $status, $user_id]);
-                set_flash_msg("New Category added successfully.");
+                if ($edit_id > 0) {
+                    $stmt = $tenant_pdo->prepare("UPDATE master_categories SET category_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
+                    $stmt->execute([$category_name, $status, $edit_id,$org_id, $center_id]);$_SESSION['swal_success'] = "Category updated successfully.";
+                } else {
+                    $stmt =$tenant_pdo->prepare("INSERT INTO master_categories (org_id, center_id, category_name, status, created_by) VALUES (?, ?, ?, ?, ?)");
+                    $stmt->execute([$org_id,$center_id, $category_name,$status, $user_id]);$_SESSION['swal_success'] = "New Category added successfully.";
+                }
             }
             header("Location: master_insurance_categories.php");
             exit;
-        } catch (PDOException $e) {
-            set_flash_err("Database Error: " . $e->getMessage());
+        } catch (PDOException $e) {$_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
         }
     }
 }
 
 // 2. Handle Insurance Form Submit (Insurance Name is Optional, Category is Retained)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_insurance'])) {
-    $category_id    = (int)($_POST['category_id'] ?? 0);
-    $insurance_name = !empty($_POST['insurance_name']) ? strtoupper(trim($_POST['insurance_name'])) : null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_insurance'])) {$category_id    = (int)($_POST['category_id'] ?? 0);$insurance_name = !empty($_POST['insurance_name']) ? strtoupper(trim($_POST['insurance_name'])) : null;
     $status         = isset($_POST['ins_status']) ? 1 : 0;
     $edit_ins_id    = (int)($_POST['edit_ins_id'] ?? 0);
 
-    if ($category_id <= 0) {
-        set_flash_err("Please select a valid Category.");
+    if ($category_id <= 0) {$_SESSION['swal_error'] = "Please select a valid Category.";
     } else {
         try {
+            if (!empty($insurance_name)) {
+                $dup_chk =$tenant_pdo->prepare("SELECT COUNT(*) FROM insurance WHERE insurance_name = ? AND category_id = ? AND id != ? AND org_id = ? AND center_id = ?");
+                $dup_chk->execute([$insurance_name, $category_id,$edit_ins_id, $org_id,$center_id]);
+                if ($dup_chk->fetchColumn() > 0) {$_SESSION['swal_error'] = "This Insurance Provider already exists in this category!";
+                    header("Location: master_insurance_categories.php?last_cat=" . $category_id);
+                    exit;
+                }
+            }
+
             if ($edit_ins_id > 0) {
-                $stmt = $tenant_pdo->prepare("UPDATE insurance SET category_id = ?, insurance_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
-                $stmt->execute([$category_id, $insurance_name, $status, $edit_ins_id, $org_id, $center_id]);
-                set_flash_msg("Insurance record updated successfully.");
+                $stmt =$tenant_pdo->prepare("UPDATE insurance SET category_id = ?, insurance_name = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
+                $stmt->execute([$category_id, $insurance_name,$status, $edit_ins_id,$org_id, $center_id]);$_SESSION['swal_success'] = "Insurance record updated successfully.";
             } else {
-                $stmt = $tenant_pdo->prepare("INSERT INTO insurance (org_id, center_id, category_id, insurance_name, status, created_by) VALUES (?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$org_id, $center_id, $category_id, $insurance_name, $status, $user_id]);
-                set_flash_msg("Insurance record mapped successfully.");
+                $stmt =$tenant_pdo->prepare("INSERT INTO insurance (org_id, center_id, category_id, insurance_name, status, created_by) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$org_id, $center_id,$category_id, $insurance_name,$status, $user_id]);$_SESSION['swal_success'] = "Insurance record mapped successfully.";
             }
             // Retain the category in URL so it stays selected
             header("Location: master_insurance_categories.php?last_cat=" . $category_id);
             exit;
-        } catch (PDOException $e) {
-            set_flash_err("Database Error: " . $e->getMessage());
+        } catch (PDOException $e) {$_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
         }
     }
 }
@@ -71,7 +117,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_insurance'])) 
 if (isset($_GET['toggle_cat'])) {
     $id = (int)$_GET['toggle_cat'];
     $st = (int)($_GET['st'] ?? 1) === 1 ? 0 : 1;
-    $tenant_pdo->prepare("UPDATE master_categories SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id, $org_id, $center_id]);
+    $tenant_pdo->prepare("UPDATE master_categories SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id,$org_id, $center_id]);$_SESSION['swal_success'] = "Category status updated!";
     header("Location: master_insurance_categories.php");
     exit;
 }
@@ -79,29 +125,32 @@ if (isset($_GET['toggle_cat'])) {
 if (isset($_GET['toggle_ins'])) {
     $id = (int)$_GET['toggle_ins'];
     $st = (int)($_GET['st'] ?? 1) === 1 ? 0 : 1;
-    $tenant_pdo->prepare("UPDATE insurance SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id, $org_id, $center_id]);
-    header("Location: master_insurance_categories.php");
+    $tenant_pdo->prepare("UPDATE insurance SET status = ? WHERE id = ? AND org_id = ? AND center_id = ?")->execute([$st, $id,$org_id, $center_id]);$_SESSION['swal_success'] = "Insurance status updated!";
+    header("Location: master_insurance_categories.php?last_cat=" . $last_cat);
     exit;
 }
 
 // Fetch Categories for Dropdown & Listing
-$cat_records = $tenant_pdo->prepare("SELECT * FROM master_categories WHERE org_id = ? AND center_id = ? ORDER BY id DESC");
-$cat_records->execute([$org_id, $center_id]);
-$category_list = $cat_records->fetchAll() ?: [];
+$cat_records =$tenant_pdo->prepare("SELECT * FROM master_categories WHERE org_id = ? AND center_id = ? ORDER BY id DESC");
+$cat_records->execute([$org_id,$center_id]);
+$category_list =$cat_records->fetchAll() ?: [];
 
 // Fetch Insurance Records with Category Name Join
-$ins_records = $tenant_pdo->prepare("
+$ins_records =$tenant_pdo->prepare("
     SELECT i.*, c.category_name 
     FROM insurance i 
     JOIN master_categories c ON i.category_id = c.id 
     WHERE i.org_id = ? AND i.center_id = ? 
     ORDER BY i.id DESC
 ");
-$ins_records->execute([$org_id, $center_id]);
-$insurance_list = $ins_records->fetchAll() ?: [];
+$ins_records->execute([$org_id,$center_id]);
+$insurance_list =$ins_records->fetchAll() ?: [];
 
 require_once __DIR__ . '/layout_header.php';
 ?>
+
+<!-- SweetAlert2 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
 <div class="row g-3">
     <!-- TOP ROW: FORMS SIDE BY SIDE (Left: Category, Right: Insurance) -->
@@ -119,7 +168,9 @@ require_once __DIR__ . '/layout_header.php';
 
                     <div class="mb-2">
                         <label class="form-label small fw-semibold text-secondary mb-1">Category Name *</label>
-                        <input type="text" name="category_name" id="category_name" class="form-control form-control-sm text-uppercase" placeholder="E.G. DEPT, TPA, GENERAL" required oninput="this.value = this.value.toUpperCase();">
+                        <!-- Added onkeyup for live duplicate check -->
+                        <input type="text" name="category_name" id="category_name" class="form-control form-control-sm text-uppercase" placeholder="E.G. DEPT, TPA, GENERAL" required onkeyup="checkCatDuplicate()" oninput="this.value = this.value.toUpperCase();">
+                        <span id="cat_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> This Category already exists!</span>
                     </div>
                     <div class="form-check form-switch mb-3">
                         <input class="form-check-input" type="checkbox" name="cat_status" id="cat_status" checked>
@@ -148,11 +199,10 @@ require_once __DIR__ . '/layout_header.php';
 
                     <div class="mb-2">
                         <label class="form-label small fw-semibold text-secondary mb-1">Select Category *</label>
-                        <select name="category_id" id="ins_category_id" class="form-select form-select-sm" required>
+                        <select name="category_id" id="ins_category_id" class="form-select form-select-sm" required onchange="checkInsDuplicate()">
                             <option value="">-- Choose Category --</option>
-                            <?php foreach ($category_list as $cat): ?>
+                            <?php foreach ($category_list as$cat): ?>
                                 <?php if ((int)$cat['status'] === 1): ?>
-                                    <!-- Keep the category selected if it matches the $last_cat parameter -->
                                     <option value="<?= $cat['id'] ?>" <?= ($last_cat === (int)$cat['id']) ? 'selected' : '' ?>>
                                         <?= htmlspecialchars($cat['category_name']) ?>
                                     </option>
@@ -163,8 +213,9 @@ require_once __DIR__ . '/layout_header.php';
 
                     <div class="mb-2">
                         <label class="form-label small fw-semibold text-secondary mb-1">Insurance / Provider Name <span class="text-muted fw-normal">(Optional)</span></label>
-                        <!-- Autofocus attribute added here -->
-                        <input type="text" name="insurance_name" id="insurance_name" class="form-control form-control-sm text-uppercase" placeholder="E.G. STAR HEALTH (Optional)" autofocus oninput="this.value = this.value.toUpperCase();">
+                        <!-- Added onkeyup for live duplicate check -->
+                        <input type="text" name="insurance_name" id="insurance_name" class="form-control form-control-sm text-uppercase" placeholder="E.G. STAR HEALTH (Optional)" autofocus onkeyup="checkInsDuplicate()" oninput="this.value = this.value.toUpperCase();">
+                        <span id="ins_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> This Insurance Provider already exists in this category!</span>
                     </div>
 
                     <div class="form-check form-switch mb-3">
@@ -202,13 +253,14 @@ require_once __DIR__ . '/layout_header.php';
                             <?php if (empty($category_list)): ?>
                                 <tr><td colspan="4" class="text-center py-3 text-muted">No categories found.</td></tr>
                             <?php else: ?>
-                                <?php foreach ($category_list as $row): ?>
+                                <?php foreach ($category_list as$row): ?>
                                     <?php $is_act = ((int)$row['status'] === 1); ?>
                                     <tr>
                                         <td class="ps-3 font-monospace">#<?= $row['id'] ?></td>
                                         <td class="fw-bold text-dark text-uppercase"><?= htmlspecialchars($row['category_name']) ?></td>
                                         <td>
-                                            <a href="?toggle_cat=<?= $row['id'] ?>&st=<?= $is_act ? 1 : 0 ?>" class="badge text-decoration-none <?= $is_act ? 'bg-success-subtle text-success border border-success' : 'bg-danger-subtle text-danger border border-danger' ?>">
+                                            <!-- SweetAlert attached to toggle -->
+                                            <a href="javascript:void(0);" onclick="confirmToggleCat(<?= $row['id'] ?>, <?=$is_act ? 1 : 0 ?>)" class="badge text-decoration-none <?= $is_act ? 'bg-success-subtle text-success border border-success' : 'bg-danger-subtle text-danger border border-danger' ?>">
                                                 <?= $is_act ? 'Active' : 'Inactive' ?>
                                             </a>
                                         </td>
@@ -249,14 +301,15 @@ require_once __DIR__ . '/layout_header.php';
                             <?php if (empty($insurance_list)): ?>
                                 <tr><td colspan="5" class="text-center py-3 text-muted">No insurance records found.</td></tr>
                             <?php else: ?>
-                                <?php foreach ($insurance_list as $ins): ?>
+                                <?php foreach ($insurance_list as$ins): ?>
                                     <?php $is_ins_act = ((int)$ins['status'] === 1); ?>
                                     <tr>
                                         <td class="ps-3 font-monospace">#<?= $ins['id'] ?></td>
                                         <td class="fw-bold text-dark text-uppercase"><?= htmlspecialchars($ins['insurance_name'] ?: '-') ?></td>
                                         <td><span class="badge bg-secondary-subtle text-dark border"><?= htmlspecialchars($ins['category_name']) ?></span></td>
                                         <td>
-                                            <a href="?toggle_ins=<?= $ins['id'] ?>&st=<?= $is_ins_act ? 1 : 0 ?>" class="badge text-decoration-none <?= $is_ins_act ? 'bg-success-subtle text-success border border-success' : 'bg-danger-subtle text-danger border border-danger' ?>">
+                                            <!-- SweetAlert attached to toggle -->
+                                            <a href="javascript:void(0);" onclick="confirmToggleIns(<?= $ins['id'] ?>, <?= $is_ins_act ? 1 : 0 ?>, <?= $last_cat ?>)" class="badge text-decoration-none <?= $is_ins_act ? 'bg-success-subtle text-success border border-success' : 'bg-danger-subtle text-danger border border-danger' ?>">
                                                 <?= $is_ins_act ? 'Active' : 'Inactive' ?>
                                             </a>
                                         </td>
@@ -277,6 +330,67 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
+// --- Live AJAX Duplicate Check for Category ---
+let catTimer;
+function checkCatDuplicate() {
+    clearTimeout(catTimer);
+    let nameInput = document.getElementById('category_name').value.trim();
+    let editId = document.getElementById('edit_id').value;
+    let errorSpan = document.getElementById('cat_error');
+    let btnSubmit = document.getElementById('btnCatSubmit');
+
+    if (nameInput.length === 0) {
+        errorSpan.style.display = 'none';
+        btnSubmit.disabled = false;
+        return;
+    }
+
+    catTimer = setTimeout(function() {
+        fetch(`master_insurance_categories.php?check_cat=1&name=${encodeURIComponent(nameInput)}&edit_id=${editId}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data.exists) {
+                    errorSpan.style.display = 'block';
+                    btnSubmit.disabled = true;
+                } else {
+                    errorSpan.style.display = 'none';
+                    btnSubmit.disabled = false;
+                }
+            });
+    }, 300);
+}
+
+// --- Live AJAX Duplicate Check for Insurance ---
+let insTimer;
+function checkInsDuplicate() {
+    clearTimeout(insTimer);
+    let nameInput = document.getElementById('insurance_name').value.trim();
+    let catId = document.getElementById('ins_category_id').value;
+    let editId = document.getElementById('edit_ins_id').value;
+    let errorSpan = document.getElementById('ins_error');
+    let btnSubmit = document.getElementById('btnInsSubmit');
+
+    if (nameInput.length === 0 || catId === "") {
+        errorSpan.style.display = 'none';
+        btnSubmit.disabled = false;
+        return;
+    }
+
+    insTimer = setTimeout(function() {
+        fetch(`master_insurance_categories.php?check_ins=1&name=${encodeURIComponent(nameInput)}&cat_id=${catId}&edit_id=${editId}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data.exists) {
+                    errorSpan.style.display = 'block';
+                    btnSubmit.disabled = true;
+                } else {
+                    errorSpan.style.display = 'none';
+                    btnSubmit.disabled = false;
+                }
+            });
+    }, 300);
+}
+
 // Live Search for Categories Table
 document.getElementById('searchCategoryInput').addEventListener('keyup', function() {
     let val = this.value.toLowerCase();
@@ -302,6 +416,9 @@ function editCategory(c) {
     
     document.getElementById('catFormTitle').innerHTML = '<i class="bi bi-pencil-square text-warning me-1"></i> Edit Category';
     document.getElementById('btnCatSubmit').innerText = 'Update Category';
+    
+    document.getElementById('cat_error').style.display = 'none';
+    document.getElementById('btnCatSubmit').disabled = false;
     document.getElementById('category_name').focus();
 }
 
@@ -312,6 +429,9 @@ function resetCatForm() {
     
     document.getElementById('catFormTitle').innerHTML = '<i class="bi bi-folder-plus text-primary me-1"></i> Add Category';
     document.getElementById('btnCatSubmit').innerText = 'Save Category';
+    
+    document.getElementById('cat_error').style.display = 'none';
+    document.getElementById('btnCatSubmit').disabled = false;
     document.getElementById('category_name').focus();
 }
 
@@ -323,6 +443,9 @@ function editInsurance(i) {
     
     document.getElementById('insFormTitle').innerHTML = '<i class="bi bi-pencil-square text-warning me-1"></i> Edit Insurance Mapping';
     document.getElementById('btnInsSubmit').innerText = 'Update Insurance';
+    
+    document.getElementById('ins_error').style.display = 'none';
+    document.getElementById('btnInsSubmit').disabled = false;
     document.getElementById('insurance_name').focus();
 }
 
@@ -335,10 +458,80 @@ function resetInsForm() {
     document.getElementById('insFormTitle').innerHTML = '<i class="bi bi-shield-plus text-success me-1"></i> Add Insurance Mapping';
     document.getElementById('btnInsSubmit').innerText = 'Save Insurance';
     
-    // Clear the URL parameter so category doesn't stay selected after a hard refresh
+    document.getElementById('ins_error').style.display = 'none';
+    document.getElementById('btnInsSubmit').disabled = false;
+    
     window.history.replaceState({}, document.title, window.location.pathname);
     document.getElementById('insurance_name').focus();
 }
+
+// --- SweetAlert for Category Toggle ---
+function confirmToggleCat(id, currentStatus) {
+    let actionText = currentStatus === 1 ? "Deactivate" : "Activate";
+    let actionColor = currentStatus === 1 ? "#d33" : "#28a745";
+    
+    Swal.fire({
+        title: 'Are you sure?',
+        text: `Do you want to ${actionText} this category?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: actionColor,
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: `Yes, ${actionText} it!`
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = `?toggle_cat=${id}&st=${currentStatus}`;
+        }
+    });
+}
+
+// --- SweetAlert for Insurance Toggle ---
+function confirmToggleIns(id, currentStatus, lastCat) {
+    let actionText = currentStatus === 1 ? "Deactivate" : "Activate";
+    let actionColor = currentStatus === 1 ? "#d33" : "#28a745";
+    
+    Swal.fire({
+        title: 'Are you sure?',
+        text: `Do you want to ${actionText} this insurance record?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: actionColor,
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: `Yes, ${actionText} it!`
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = `?toggle_ins=${id}&st=${currentStatus}&last_cat=${lastCat}`;
+        }
+    });
+}
+</script>
+
+<!-- SweetAlert Success/Error Handlers -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    <?php if (isset($_SESSION['swal_success'])): ?>
+        Swal.fire({
+            icon: 'success',
+            title: 'Success!',
+            text: '<?= addslashes($_SESSION['swal_success']) ?>',
+            timer: 3000,
+            showConfirmButton: false,
+            toast: true,
+            position: 'top-end'
+        });
+        <?php unset($_SESSION['swal_success']); ?>
+    <?php endif; ?>
+
+    <?php if (isset($_SESSION['swal_error'])): ?>
+        Swal.fire({
+            icon: 'error',
+            title: 'Error!',
+            text: '<?= addslashes($_SESSION['swal_error']) ?>',
+            confirmButtonColor: '#d33'
+        });
+        <?php unset($_SESSION['swal_error']); ?>
+    <?php endif; ?>
+});
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
