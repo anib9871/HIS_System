@@ -21,6 +21,16 @@ $opd_pages = [
 ];
 $is_opd_active = in_array($current_page, $opd_pages);
 
+// IPD Submenu Pages Check (NEW)
+$ipd_pages = [
+    'ipd_admission.php',
+    'ipd_doctor_desk.php',
+    'ipd_nurse_station.php',
+    'ipd_billing.php',
+    'ipd_discharge_summary.php'
+];
+$is_ipd_active = in_array($current_page, $ipd_pages);
+
 // Facility & Infrastructure Master Check
 $facility_pages = [
     'master_buildings.php',
@@ -112,6 +122,7 @@ $master_keys = array_merge([
 ], $rx_keys, $fac_keys);
 
 $opd_keys = ['opd_appt', 'opd_reg', 'opd_queue', 'opd_doctor', 'opd_visit_list'];
+$ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; // NEW IPD KEYS
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -373,12 +384,12 @@ $opd_keys = ['opd_appt', 'opd_reg', 'opd_queue', 'opd_doctor', 'opd_visit_list']
         }
 
         /* Sidebar menu text capitalization fix */
-.sidebar-menu .sidebar-link,
-.sidebar-menu .submenu-items a,
-.sidebar-menu .nested-submenu-items a,
-.sidebar-menu .nested-toggle-btn {
-    text-transform: none !important;
-}
+        .sidebar-menu .sidebar-link,
+        .sidebar-menu .submenu-items a,
+        .sidebar-menu .nested-submenu-items a,
+        .sidebar-menu .nested-toggle-btn {
+            text-transform: none !important;
+        }
     </style>
 </head>
 <body>
@@ -688,6 +699,10 @@ $opd_keys = ['opd_appt', 'opd_reg', 'opd_queue', 'opd_doctor', 'opd_visit_list']
                                 <?php if (has_access('fac_rooms', $is_full_admin, $user_menus)): ?>
                                 <li><a href="master_rooms.php" class="<?= ($current_page == 'master_rooms.php') ? 'active-child' : '' ?>"><i class="bi bi-door-open"></i> Rooms Master</a></li>
                                 <?php endif; ?>
+
+                                <?php if (has_access('fac_bed', $is_full_admin, $user_menus)): ?>
+                                <li><a href="master_beds.php" class="<?= ($current_page == 'master_beds.php') ? 'active-child' : '' ?>"><i class="bi bi-door-open"></i> Bed Master</a></li>
+                                <?php endif; ?>
                             </ul>
                         </div>
                     </li>
@@ -738,6 +753,49 @@ $opd_keys = ['opd_appt', 'opd_reg', 'opd_queue', 'opd_doctor', 'opd_visit_list']
             </div>
         </li>
         <?php endif; ?>
+
+        <!-- 4. IPD MODULE (NEW) -->
+        <?php if (has_any_access($ipd_keys, $is_full_admin, $user_menus)): ?>
+        <li>
+            <button class="sidebar-link <?= $is_ipd_active ? 'text-white' : '' ?>" 
+                    type="button" 
+                    data-bs-toggle="collapse" 
+                    data-bs-target="#ipdMainSubmenu" 
+                    aria-expanded="<?= $is_ipd_active ? 'true' : 'false' ?>" 
+                    aria-controls="ipdMainSubmenu">
+                <div class="link-inner">
+                    <i class="bi bi-hospital text-danger"></i>
+                    <span>IPD Services</span>
+                </div>
+                <i class="bi bi-chevron-down submenu-arrow"></i>
+            </button>
+
+            <div class="collapse <?= $is_ipd_active ? 'show' : '' ?>" id="ipdMainSubmenu">
+                <ul class="submenu-items">
+                    <?php if (has_access('ipd_adm', $is_full_admin, $user_menus)): ?>
+                    <li><a href="ipd_admission.php" class="<?= ($current_page == 'ipd_admission.php') ? 'active-child' : '' ?>"><i class="bi bi-door-open"></i> Admission & Bed</a></li>
+                    <?php endif; ?>
+
+                    <?php if (has_access('ipd_doc', $is_full_admin, $user_menus)): ?>
+                    <li><a href="ipd_doctor_desk.php" class="<?= ($current_page == 'ipd_doctor_desk.php') ? 'active-child' : '' ?>"><i class="bi bi-clipboard2-pulse"></i> Doctor Desk (Rounds)</a></li>
+                    <?php endif; ?>
+
+                    <?php if (has_access('ipd_nurse', $is_full_admin, $user_menus)): ?>
+                    <li><a href="ipd_nurse_station.php" class="<?= ($current_page == 'ipd_nurse_station.php') ? 'active-child' : '' ?>"><i class="bi bi-heart-pulse"></i> Nurse Station</a></li>
+                    <?php endif; ?>
+
+                    <?php if (has_access('ipd_bill', $is_full_admin, $user_menus)): ?>
+                    <li><a href="ipd_billing.php" class="<?= ($current_page == 'ipd_billing.php') ? 'active-child' : '' ?>"><i class="bi bi-receipt"></i> IPD Billing</a></li>
+                    <?php endif; ?>
+                    
+                    <?php if (has_access('ipd_discharge', $is_full_admin, $user_menus)): ?>
+                    <li><a href="ipd_discharge_summary.php" class="<?= ($current_page == 'ipd_discharge_summary.php') ? 'active-child' : '' ?>"><i class="bi bi-file-earmark-medical"></i> Discharge Summary</a></li>
+                    <?php endif; ?>
+                </ul>
+            </div>
+        </li>
+        <?php endif; ?>
+
     </ul>
 </aside>
 
@@ -770,7 +828,7 @@ $opd_keys = ['opd_appt', 'opd_reg', 'opd_queue', 'opd_doctor', 'opd_visit_list']
     
     <main class="content">
 
-<!-- <script>
+<script>
 document.addEventListener('DOMContentLoaded', function () {
     // Mobile Drawer Toggle Handler
     const sidebar = document.getElementById('sidebarMenu');
@@ -800,4 +858,4 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
 });
-</script> -->
+</script>
