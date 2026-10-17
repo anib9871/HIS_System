@@ -49,6 +49,7 @@ $general_master_pages = [
     'master_financial_year.php',
     'master_centers.php', 
     'users.php', 
+    'patient_master.php', // ADDED PATIENT MASTER HERE
     'master_doctors.php', 
     'master_departments.php',
     'master_qualifications.php', 
@@ -115,7 +116,7 @@ $fac_keys = [
 
 $master_keys = array_merge([
     'masters_org', 'masters_states', 'masters_city', 'masters_financial_year',
-    'masters_centers', 'masters_users', 'masters_doctors', 'masters_departments',
+    'masters_centers', 'masters_users', 'masters_patients', 'masters_doctors', 'masters_departments', // ADDED 'masters_patients'
     'masters_qualifications', 'masters_specializations', 'masters_days',
     'masters_payment_modes', 'masters_insurance_categories', 'masters_doctor_services',
     'masters_doctor_tariff'
@@ -478,6 +479,15 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
                     <li>
                         <a href="users.php" class="<?= ($current_page == 'users.php') ? 'active-child' : '' ?>">
                             <i class="bi bi-people"></i> Staff & Users
+                        </a>
+                    </li>
+                    <?php endif; ?>
+
+                    <!-- ADDED PATIENT MASTER -->
+                    <?php if (has_access('masters_patients', $is_full_admin, $user_menus)): ?>
+                    <li>
+                        <a href="patient_master.php" class="<?= ($current_page == 'patient_master.php') ? 'active-child' : '' ?>">
+                            <i class="bi bi-person-lines-fill"></i> Patient Master
                         </a>
                     </li>
                     <?php endif; ?>
