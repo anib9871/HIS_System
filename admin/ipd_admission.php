@@ -10,6 +10,54 @@ $center_id = (int)($_SESSION['center_id'] ?? 1);
 $created_by = (int)($_SESSION['user_id'] ?? 1);
 
 // ==============================================================
+// 0. AJAX: ADD NEW MASTER DATA FROM POP-UP
+// ==============================================================
+if (isset($_POST['ajax_add_master'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $type = trim($_POST['type'] ?? '');
+    $name = trim(strtoupper($_POST['name'] ?? ''));
+    $parent_id = (int)($_POST['parent_id'] ?? 0);
+    
+    if (empty($name)) {
+        echo json_encode(['success' => false, 'message' => 'Name cannot be empty.']);
+        exit;
+    }
+    
+    try {
+        $id = 0;
+        if ($type === 'department') {
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_departments (org_id, dept_name, status) VALUES (?, ?, 1)");
+            $stmt->execute([$org_id, $name]);
+            $id = $tenant_pdo->lastInsertId();
+        } elseif ($type === 'doctor') {
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_doctors (org_id, full_name, department_id, status) VALUES (?, ?, ?, 1)");
+            $stmt->execute([$org_id, $name, $parent_id]);
+            $id = $tenant_pdo->lastInsertId();
+        } elseif ($type === 'service') {
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_doctor_services (org_id, service_name, status) VALUES (?, ?, 1)");
+            $stmt->execute([$org_id, $name]);
+            $id = $tenant_pdo->lastInsertId();
+        } elseif ($type === 'category') {
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_categories (org_id, category_name, status) VALUES (?, ?, 1)");
+            $stmt->execute([$org_id, $name]);
+            $id = $tenant_pdo->lastInsertId();
+        } elseif ($type === 'insurance') {
+            $stmt = $tenant_pdo->prepare("INSERT INTO insurance (org_id, insurance_name, category_id, status) VALUES (?, ?, ?, 1)");
+            $stmt->execute([$org_id, $name, $parent_id]);
+            $id = $tenant_pdo->lastInsertId();
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Invalid master type.']);
+            exit;
+        }
+        
+        echo json_encode(['success' => true, 'id' => $id, 'name' => $name, 'parent_id' => $parent_id]);
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'message' => 'DB Error: ' . $e->getMessage()]);
+    }
+    exit;
+}
+
+// ==============================================================
 // 0. AUTO-UPDATE SCHEMA FOR CATEGORY, INSURANCE & SERVICE
 // ==============================================================
 try {
@@ -303,8 +351,8 @@ if ($edit_id > 0) {
 // ============================================================
 // 5. EXACT SCHEMA MATCH FETCHING
 // ============================================================
-$departments = $tenant_pdo->query("SELECT id, dept_name FROM master_departments WHERE org_id = $org_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC);
-$doctors = $tenant_pdo->query("SELECT id, full_name, department_id FROM master_doctors WHERE org_id = $org_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC);
+$departments = $tenant_pdo->query("SELECT id, dept_name FROM master_departments WHERE org_id = $org_id AND status = 1 ORDER BY dept_name ASC")->fetchAll(PDO::FETCH_ASSOC);
+$doctors = $tenant_pdo->query("SELECT id, full_name, department_id FROM master_doctors WHERE org_id = $org_id AND status = 1 ORDER BY full_name ASC")->fetchAll(PDO::FETCH_ASSOC);
 
 $services = [];
 try { 
@@ -313,12 +361,12 @@ try {
 
 $categories = [];
 try { 
-    $categories = $tenant_pdo->query("SELECT id, category_name FROM master_categories WHERE org_id = $org_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC); 
+    $categories = $tenant_pdo->query("SELECT id, category_name FROM master_categories WHERE org_id = $org_id AND status = 1 ORDER BY category_name ASC")->fetchAll(PDO::FETCH_ASSOC); 
 } catch (Exception $e) {}
 
 $insurances = [];
 try { 
-    $insurances = $tenant_pdo->query("SELECT id, insurance_name, category_id FROM insurance WHERE org_id = $org_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC); 
+    $insurances = $tenant_pdo->query("SELECT id, insurance_name, category_id FROM insurance WHERE org_id = $org_id AND status = 1 ORDER BY insurance_name ASC")->fetchAll(PDO::FETCH_ASSOC); 
 } catch (Exception $e) {}
 
 $payment_modes = $tenant_pdo->query("SELECT id, mode_name FROM master_payment_modes WHERE status = 1 ORDER BY id ASC")->fetchAll(PDO::FETCH_ASSOC);
@@ -340,11 +388,12 @@ $available_beds->execute([$org_id, $org_id, $current_bed_id]);
 $beds = $available_beds->fetchAll(PDO::FETCH_GROUP|PDO::FETCH_ASSOC);
 
 $today_admissions = $tenant_pdo->query("
-    SELECT a.*, p.uhid, p.fullname, p.mobile, bd.bed_no, r.room_no 
+    SELECT a.*, p.uhid, p.fullname, p.mobile, bd.bed_no, r.room_no, ins.insurance_name 
     FROM ipd_admissions a
     JOIN patient_master p ON a.patient_id = p.patient_id
     JOIN master_beds bd ON a.bed_id = bd.id
     JOIN master_rooms r ON bd.room_id = r.id
+    LEFT JOIN insurance ins ON a.insurance_id = ins.id
     WHERE a.org_id = $org_id AND a.status = 1
     ORDER BY a.ipd_id DESC
 ")->fetchAll(PDO::FETCH_ASSOC);
@@ -352,28 +401,42 @@ $today_admissions = $tenant_pdo->query("
 // ============================================================
 // 6. DASHBOARD STATISTICS & BED STATUS QUERY
 // ============================================================
+
+try { 
+    $tenant_pdo->exec("ALTER TABLE master_rooms ADD COLUMN IF NOT EXISTS category_id INT NULL AFTER building_id");
+} catch (Exception $e) { }
+
+$room_categories = [];
+try { 
+    $room_categories = $tenant_pdo->query("SELECT id, category_name FROM master_room_categories WHERE org_id = $org_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC); 
+} catch (Exception $e) { }
+
 $bed_status_query = $tenant_pdo->prepare("
     SELECT 
         b.building_name AS ward_name, 
         r.room_no, 
         bd.id AS bed_id, 
         bd.bed_no, 
-        dept.dept_name AS category,
+        dept.dept_name AS department_name,
         a.ipd_no,
+        a.ipd_id,
         p.fullname AS patient_name,
         p.age,
         p.gender,
         a.admission_date,
-        d.full_name AS doctor_name
+        d.full_name AS doctor_name,
+        rc.category_name AS room_category_name,
+        rc.id AS room_category_id
     FROM master_beds bd
     JOIN master_rooms r ON bd.room_id = r.id
     JOIN master_buildings b ON r.building_id = b.id
+    LEFT JOIN master_room_categories rc ON r.category_id = rc.id
     LEFT JOIN ipd_admissions a ON bd.id = a.bed_id AND a.status = 1 AND a.org_id = bd.org_id
     LEFT JOIN patient_master p ON a.patient_id = p.patient_id
     LEFT JOIN master_doctors d ON a.doctor_id = d.id
     LEFT JOIN master_departments dept ON a.department_id = dept.id
     WHERE bd.org_id = ? AND bd.status = 1
-    ORDER BY b.building_name, r.room_no, bd.bed_no
+    ORDER BY b.building_name, rc.category_name, r.room_no, bd.bed_no
 ");
 $bed_status_query->execute([$org_id]);
 $all_beds_status = $bed_status_query->fetchAll(PDO::FETCH_ASSOC);
@@ -424,15 +487,34 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
     <div id="opdRegistrationErrorMessage" class="d-none"><?= htmlspecialchars($err) ?></div>
 <?php endif; ?>
 
-<!-- TOP TABS NAVIGATION -->
-<ul class="nav nav-pills mb-3 bg-white p-2 rounded-3 shadow-sm border" id="pills-tab" role="tablist">
-    <li class="nav-item" role="presentation">
-        <button class="nav-link <?= !$is_edit ? 'active' : '' ?> px-4" id="nav-dashboard-tab" data-bs-toggle="pill" data-bs-target="#nav-dashboard" type="button" role="tab"><i class="bi bi-grid-fill me-2"></i>Live Bed Dashboard</button>
-    </li>
-    <li class="nav-item" role="presentation">
-        <button class="nav-link <?= $is_edit ? 'active' : '' ?> px-4" id="nav-admission-tab" data-bs-toggle="pill" data-bs-target="#nav-admission" type="button" role="tab"><i class="bi bi-hospital me-2"></i>Admission Desk & List</button>
-    </li>
-</ul>
+<!-- TOP TABS NAVIGATION & FILTERS -->
+<div class="bg-white p-2 rounded-3 shadow-sm border mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <!-- Tabs (Left) -->
+    <ul class="nav nav-pills" id="pills-tab" role="tablist" style="margin: 0;">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link <?= !$is_edit ? 'active' : '' ?> px-4" id="nav-dashboard-tab" data-bs-toggle="pill" data-bs-target="#nav-dashboard" type="button" role="tab"><i class="bi bi-grid-fill me-2"></i>Live Bed Dashboard</button>
+        </li>
+        <li class="nav-item d-none" role="presentation">
+            <button class="nav-link <?= $is_edit ? 'active' : '' ?> px-4" id="nav-admission-tab" data-bs-toggle="pill" data-bs-target="#nav-admission" type="button" role="tab"><i class="bi bi-hospital me-2"></i>Admission Desk & List</button>
+        </li>
+    </ul>
+
+    <!-- Filters (Right) -->
+    <div class="d-flex gap-2 align-items-center <?= $is_edit ? 'd-none' : '' ?>">
+        <select id="filterStatus" class="form-select form-select-sm w-auto border-secondary fw-bold" onchange="filterBedTable()">
+            <option value="">All Status</option>
+            <option value="occupied">Occupied</option>
+            <option value="available">Available</option>
+        </select>
+        <select id="filterRoomCategory" class="form-select form-select-sm w-auto fw-bold" onchange="filterBedTable()">
+            <option value="">All Categories</option>
+            <?php foreach($room_categories as $rcat): ?>
+                <option value="<?= $rcat['id'] ?>"><?= htmlspecialchars($rcat['category_name']) ?></option>
+            <?php endforeach; ?>
+        </select>
+        <input type="text" id="searchBed" class="form-control form-control-sm w-auto" style="min-width: 220px;" placeholder="Search Bed, Room, Patient..." onkeyup="filterBedTable()">
+    </div>
+</div>
 
 <div class="tab-content" id="pills-tabContent">
 
@@ -471,39 +553,45 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
         </div>
 
         <div class="card border-0 shadow-sm rounded-3">
-            <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
-                <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-hospital-fill text-primary me-2"></i>Live Ward & Bed Status</h6>
-                <input type="text" id="searchBed" class="form-control form-control-sm w-25" placeholder="Search Bed, Room, Patient...">
+            <div class="card-header bg-white py-2 px-3 border-bottom">
+                <h6 class="mb-0 fw-bold text-dark small text-nowrap"><i class="bi bi-hospital-fill text-primary me-2"></i>Live Ward & Bed Status</h6>
             </div>
             <div class="table-responsive" style="max-height: 500px;">
                 <table class="table table-hover align-middle mb-0 small" id="bedTable">
                     <thead class="table-light sticky-top">
                         <tr>
-                            <th class="ps-3">Ward / Building</th>
-                            <th>Room No.</th>
+                            <th class="ps-3">Room No.</th>
                             <th>Bed No.</th>
-                            <th class="text-center">Status</th>
+                            <th>Department</th>
                             <th>Patient Details</th>
                             <th>Admitting Doctor</th>
                             <th>Admission Date</th>
+                            <th class="text-end pe-3">Action</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php if(empty($all_beds_status)): ?>
                             <tr><td colspan="7" class="text-center py-4 text-muted">No beds found. Add beds in master settings.</td></tr>
                         <?php else: ?>
-                            <?php foreach($all_beds_status as $room): ?>
-                                <tr class="<?= !empty($room['patient_name']) ? 'table-danger bg-opacity-10' : '' ?>">
-                                    <td class="ps-3 fw-bold text-dark"><?= htmlspecialchars($room['ward_name']) ?></td>
-                                    <td class="fw-semibold text-secondary"><?= htmlspecialchars($room['room_no']) ?></td>
-                                    <td class="fw-bold text-primary font-monospace"><?= htmlspecialchars($room['bed_no']) ?></td>
-                                    <td class="text-center">
-                                        <?php if(!empty($room['patient_name'])): ?>
-                                            <span class="badge bg-danger-subtle text-danger border border-danger px-2"><i class="bi bi-circle-fill status-blink me-1" style="font-size: 8px;"></i> OCCUPIED</span>
-                                        <?php else: ?>
-                                            <span class="badge bg-success-subtle text-success border border-success px-2"><i class="bi bi-check-circle me-1"></i> AVAILABLE</span>
-                                        <?php endif; ?>
+                            <?php 
+                            $current_group = "";
+                            foreach($all_beds_status as $room): 
+                                // Grouping Logic by Category & Ward
+                                $group_name = strtoupper($room['ward_name'] . ' - ' . ($room['room_category_name'] ?? 'GENERAL WARD'));
+                                if ($current_group !== $group_name):
+                                    $current_group = $group_name;
+                            ?>
+                                <tr class="table-secondary group-header border-top border-dark" data-category-id="<?= $room['room_category_id'] ?? '' ?>">
+                                    <td colspan="7" class="fw-bold text-dark py-2 ps-3">
+                                        <i class="bi bi-diagram-3-fill text-primary me-2"></i><?= htmlspecialchars($group_name) ?>
                                     </td>
+                                </tr>
+                            <?php endif; ?>
+                            
+                                <tr class="bed-row <?= !empty($room['patient_name']) ? 'table-danger bg-opacity-10' : '' ?>" data-category-id="<?= $room['room_category_id'] ?? '' ?>" data-status="<?= !empty($room['patient_name']) ? 'occupied' : 'available' ?>">
+                                    <td class="ps-3 fw-semibold text-secondary"><?= htmlspecialchars($room['room_no']) ?></td>
+                                    <td class="fw-bold text-primary font-monospace"><?= htmlspecialchars($room['bed_no']) ?></td>
+                                    <td class="fw-bold text-secondary"><?= htmlspecialchars($room['department_name'] ?? 'N/A') ?></td>
                                     <td>
                                         <?php if(!empty($room['patient_name'])): ?>
                                             <div class="fw-bold text-dark"><?= htmlspecialchars($room['patient_name']) ?></div>
@@ -517,6 +605,17 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                     </td>
                                     <td class="fw-semibold text-secondary"><?= !empty($room['doctor_name']) ? 'DR. '.htmlspecialchars($room['doctor_name']) : '-' ?></td>
                                     <td class="text-muted font-monospace"><?= !empty($room['admission_date']) ? date('d-M-Y h:i A', strtotime($room['admission_date'])) : '-' ?></td>
+                                    <td class="text-end pe-3">
+                                        <?php if(empty($room['patient_name'])): ?>
+                                            <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 fw-bold d-inline-flex align-items-center" style="font-size: 10px;" onclick="admitToBed(<?= $room['bed_id'] ?>)">
+                                                <i class="bi bi-plus-circle me-1"></i> ADMIT
+                                            </button>
+                                        <?php else: ?>
+                                            <a href="ipd_discharge_summary.php?ipd_id=<?= $room['ipd_id'] ?? 0 ?>" class="btn btn-sm btn-outline-danger py-0 px-2 fw-bold d-inline-flex align-items-center" style="font-size: 10px;" title="Discharge Patient">
+                                                <i class="bi bi-box-arrow-right me-1"></i> DISCHARGE SUMMARY
+                                            </a>
+                                        <?php endif; ?>
+                                    </td>
                                 </tr>
                             <?php endforeach; ?>
                         <?php endif; ?>
@@ -539,6 +638,9 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                             <a href="ipd_admission.php" class="btn btn-sm btn-outline-secondary fw-bold px-2 py-0" style="font-size: 10px;">CANCEL EDIT</a>
                         <?php else: ?>
                             <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-hospital text-primary me-2"></i>New IPD Admission</h6>
+                            <button type="button" class="btn btn-sm btn-outline-dark fw-bold px-2 py-0" style="font-size: 10px;" onclick="document.getElementById('nav-dashboard-tab').click()">
+                                <i class="bi bi-arrow-left me-1"></i> BACK TO BEDS
+                            </button>
                         <?php endif; ?>
                     </div>
                     <div class="card-body p-3">
@@ -556,7 +658,7 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                 <input type="hidden" name="primary_payment_mode_id" id="primary_payment_mode_id" value="<?= $default_mode_id ?>">
                             <?php endif; ?>
 
-                            <!-- Patient Info Row (CUSTOM FLEXBOX FOR PERFECT SIZING) -->
+                            <!-- Patient Info Row -->
                             <div class="d-flex flex-wrap gap-2 mb-3 pb-3 border-bottom">
                                 <div style="flex: 1 1 13%; min-width: 120px;">
                                     <label class="form-label small fw-semibold text-secondary mb-1">Admission Date *</label>
@@ -628,7 +730,10 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                     <!-- Row 1 of inputs -->
                                     <div class="row g-2">
                                         <div class="col-md-4">
-                                            <label class="form-label small fw-semibold text-primary mb-1">Department</label>
+                                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                                <label class="form-label small fw-semibold text-primary mb-0">Department</label>
+                                                <button type="button" class="btn btn-sm py-0 px-1 btn-outline-primary" style="font-size: 10px; line-height: 1;" onclick="openMasterPopup('department', 'Add New Department')" title="Quick Add"><i class="bi bi-plus-lg"></i></button>
+                                            </div>
                                             <select name="department_id" id="department_id" class="form-select form-select-sm" onchange="filterDoctors()">
                                                 <option value="">-- Select --</option>
                                                 <?php foreach ($departments as $dept): ?>
@@ -637,7 +742,10 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                             </select>
                                         </div>
                                         <div class="col-md-4">
-                                            <label class="form-label small fw-semibold text-primary mb-1">Admitting Doctor *</label>
+                                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                                <label class="form-label small fw-semibold text-primary mb-0">Admitting Doctor *</label>
+                                                <button type="button" class="btn btn-sm py-0 px-1 btn-outline-primary" style="font-size: 10px; line-height: 1;" onclick="openMasterPopup('doctor', 'Add New Doctor')" title="Quick Add"><i class="bi bi-plus-lg"></i></button>
+                                            </div>
                                             <select name="doctor_id" id="doctor_id" class="form-select form-select-sm" required>
                                                 <option value="">-- Select --</option>
                                                 <?php foreach ($doctors as $doc): ?>
@@ -646,7 +754,10 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                             </select>
                                         </div>
                                         <div class="col-md-4">
-                                            <label class="form-label small fw-semibold text-primary mb-1">Service *</label>
+                                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                                <label class="form-label small fw-semibold text-primary mb-0">Service *</label>
+                                                <button type="button" class="btn btn-sm py-0 px-1 btn-outline-primary" style="font-size: 10px; line-height: 1;" onclick="openMasterPopup('service', 'Add New Service')" title="Quick Add"><i class="bi bi-plus-lg"></i></button>
+                                            </div>
                                             <select name="service_id" id="service_id" class="form-select form-select-sm" required>
                                                 <option value="">-- Select --</option>
                                                 <?php foreach ($services as $srv): 
@@ -662,7 +773,10 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                     <!-- Row 2 of inputs -->
                                     <div class="row g-2 mt-3">
                                         <div class="col-md-4">
-                                            <label class="form-label small fw-semibold text-primary mb-1">Category *</label>
+                                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                                <label class="form-label small fw-semibold text-primary mb-0">Category *</label>
+                                                <button type="button" class="btn btn-sm py-0 px-1 btn-outline-primary" style="font-size: 10px; line-height: 1;" onclick="openMasterPopup('category', 'Add New Category')" title="Quick Add"><i class="bi bi-plus-lg"></i></button>
+                                            </div>
                                             <select name="category_id" id="category_id" class="form-select form-select-sm" required>
                                                 <option value="">-- Select --</option>
                                                 <?php foreach ($categories as $cat): ?>
@@ -671,7 +785,10 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                             </select>
                                         </div>
                                         <div class="col-md-4">
-                                            <label class="form-label small fw-semibold text-primary mb-1">Insurance / Provider</label>
+                                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                                <label class="form-label small fw-semibold text-primary mb-0">Insurance / Provider</label>
+                                                <button type="button" class="btn btn-sm py-0 px-1 btn-outline-primary" style="font-size: 10px; line-height: 1;" onclick="openMasterPopup('insurance', 'Add New Insurance')" title="Quick Add"><i class="bi bi-plus-lg"></i></button>
+                                            </div>
                                             <select name="insurance_id" id="insurance_id" class="form-select form-select-sm">
                                                 <option value="">-- BASE (NO INSURANCE) --</option>
                                                 <?php foreach ($insurances as $ins): ?>
@@ -757,7 +874,11 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                         <td><?= date('d-m-Y h:i A', strtotime($adm['admission_date'])) ?></td>
                                         <td>
                                             <div class="fw-bold"><?= htmlspecialchars($adm['fullname']) ?></div>
-                                            <small class="text-muted"><?= htmlspecialchars($adm['uhid']) ?> | <?= htmlspecialchars($adm['mobile']) ?></small>
+                                            <small class="text-muted"><?= htmlspecialchars($adm['uhid']) ?> | <?= htmlspecialchars($adm['mobile']) ?></small><br>
+                                            <!-- Insurance Display -->
+                                            <span class="badge bg-info-subtle text-info border border-info px-1 mt-1" style="font-size: 9px;">
+                                                <i class="bi bi-shield-check me-1"></i><?= !empty($adm['insurance_name']) ? htmlspecialchars($adm['insurance_name']) : 'CASH / BASE' ?>
+                                            </span>
                                         </td>
                                         <td><span class="badge bg-primary-subtle text-primary border border-primary px-2"><?= htmlspecialchars($adm['room_no'] . ' - ' . $adm['bed_no']) ?></span></td>
                                         <td>
@@ -794,8 +915,10 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
 </div>
 
 <!-- ============================================================== -->
-<!-- MODALS (PAYMENT & SEARCH) -->
+<!-- MODALS (PAYMENT, SEARCH & MASTER QUICK ADD) -->
 <!-- ============================================================== -->
+
+<!-- Payment Modal -->
 <div class="modal fade" id="paymentModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered modal-sm">
         <div class="modal-content border-0 shadow rounded-3">
@@ -835,6 +958,7 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
     </div>
 </div>
 
+<!-- Patient Selection Modal -->
 <div class="modal fade" id="patientSelectionModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered modal-sm">
         <div class="modal-content overflow-hidden">
@@ -847,12 +971,133 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
     </div>
 </div>
 
+<!-- Quick Add Master Modal -->
+<div class="modal fade" id="quickMasterModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content border-0 shadow rounded-3">
+            <div class="modal-header bg-light py-2 px-3 border-bottom">
+                <h6 class="modal-title fw-bold text-primary m-0" id="quickMasterTitle">Add New Master</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-3">
+                <form id="quickMasterForm" onsubmit="submitQuickMaster(event)">
+                    <input type="hidden" id="quickMasterType" name="type">
+                    <input type="hidden" id="quickMasterParentId" name="parent_id">
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Name *</label>
+                        <input type="text" id="quickMasterName" name="name" class="form-control form-control-sm text-uppercase" required placeholder="Enter Name">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm w-100 fw-bold" id="quickMasterSaveBtn">SAVE</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <script>
+// =========================================================
+// QUICK ADD MASTER FUNCTIONALITY
+// =========================================================
+function openMasterPopup(type, title) {
+    let parentId = 0;
+    
+    // Dependency Checks
+    if (type === 'doctor') {
+        let deptId = document.getElementById('department_id').value;
+        if (!deptId) {
+            Swal.fire({icon: 'warning', title: 'Action Required', text: 'Please select a Department first before adding a Doctor.'});
+            return;
+        }
+        parentId = deptId;
+    } else if (type === 'insurance') {
+        let catId = document.getElementById('category_id').value;
+        if (!catId) {
+            Swal.fire({icon: 'warning', title: 'Action Required', text: 'Please select a Category first before adding Insurance.'});
+            return;
+        }
+        parentId = catId;
+    }
+
+    document.getElementById('quickMasterType').value = type;
+    document.getElementById('quickMasterParentId').value = parentId;
+    document.getElementById('quickMasterTitle').innerText = title;
+    document.getElementById('quickMasterName').value = '';
+    
+    let m = new bootstrap.Modal(document.getElementById('quickMasterModal'));
+    m.show();
+    
+    document.getElementById('quickMasterModal').addEventListener('shown.bs.modal', function () {
+        document.getElementById('quickMasterName').focus();
+    }, {once: true});
+}
+
+function submitQuickMaster(e) {
+    e.preventDefault();
+    let btn = document.getElementById('quickMasterSaveBtn');
+    let form = document.getElementById('quickMasterForm');
+    let type = document.getElementById('quickMasterType').value;
+    let formData = new FormData(form);
+    formData.append('ajax_add_master', '1');
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Saving...';
+
+    fetch(window.location.href, {
+        method: 'POST',
+        body: formData,
+        headers: {'X-Requested-With': 'XMLHttpRequest'}
+    })
+    .then(res => res.json())
+    .then(data => {
+        btn.disabled = false;
+        btn.innerHTML = 'SAVE';
+        
+        if (data.success) {
+            let selectEl = document.getElementById(type + '_id');
+            if (selectEl) {
+                let opt = document.createElement('option');
+                opt.value = data.id;
+                opt.text = data.name.toUpperCase();
+                opt.selected = true;
+                
+                if (type === 'doctor') opt.setAttribute('data-dept', data.parent_id);
+                if (type === 'insurance') opt.setAttribute('data-cat', data.parent_id);
+                
+                selectEl.appendChild(opt);
+                
+                // Trigger change to update UI dependencies
+                let evt = new Event('change');
+                selectEl.dispatchEvent(evt);
+            }
+            bootstrap.Modal.getInstance(document.getElementById('quickMasterModal')).hide();
+            
+            Swal.fire({
+                toast: true,
+                position: 'top-end',
+                icon: 'success',
+                title: data.name + ' Added Successfully!',
+                showConfirmButton: false,
+                timer: 2000
+            });
+        } else {
+            Swal.fire({icon: 'error', title: 'Error', text: data.message});
+        }
+    })
+    .catch(err => {
+        btn.disabled = false;
+        btn.innerHTML = 'SAVE';
+        Swal.fire({icon: 'error', title: 'Error', text: 'Network request failed. Please try again.'});
+    });
+}
+
+
+// =========================================================
 // Category to Insurance Automation Logic
+// =========================================================
 document.getElementById('category_id')?.addEventListener('change', function() {
     let catId = this.value;
-    let catText = this.options[this.selectedIndex].text.toUpperCase().trim();
+    let catText = this.options[this.selectedIndex]?.text.toUpperCase().trim() || '';
     let insSelect = document.getElementById('insurance_id');
     
     if(!insSelect) return;
@@ -863,15 +1108,12 @@ document.getElementById('category_id')?.addEventListener('change', function() {
     for(let i = 0; i < insSelect.options.length; i++) {
         let opt = insSelect.options[i];
         
-        // Always show the "Base (No Insurance)" option
         if(opt.value === "") {
             opt.style.display = '';
             continue;
         }
         
         let optCat = opt.getAttribute('data-cat');
-        
-        // Only show insurance options that belong to the selected category
         if(catId === "" || optCat == catId) {
             opt.style.display = '';
             visibleCount++;
@@ -881,13 +1123,12 @@ document.getElementById('category_id')?.addEventListener('change', function() {
         }
     }
     
-    // Auto-select logic
     if (catText === 'GENERAL' || catText === 'NORMAL') {
-        insSelect.value = ""; // Default to BASE (no insurance)
+        insSelect.value = ""; 
     } else if (visibleCount === 1) {
-        insSelect.value = autoSelectVal; // Auto-select if only 1 matching insurance
+        insSelect.value = autoSelectVal; 
     } else {
-        insSelect.value = ""; // Reset if multiple so user must choose
+        insSelect.value = ""; 
     }
 });
 
@@ -902,13 +1143,47 @@ function filterDoctors() {
     docSelect.value = "";
 }
 
-// Search for Bed List Table
-document.getElementById('searchBed')?.addEventListener('keyup', function() {
-    let val = this.value.toLowerCase();
-    document.querySelectorAll('#bedTable tbody tr').forEach(row => {
-        row.style.display = row.innerText.toLowerCase().includes(val) ? '' : 'none';
+// Function for Custom Category, Status & Text Search in Bed Table
+function filterBedTable() {
+    let textVal = (document.getElementById('searchBed')?.value || '').toLowerCase();
+    let catVal = document.getElementById('filterRoomCategory')?.value || '';
+    let statusVal = document.getElementById('filterStatus')?.value || '';
+
+    document.querySelectorAll('#bedTable tbody tr.bed-row').forEach(row => {
+        let matchesText = row.innerText.toLowerCase().includes(textVal);
+        let matchesCat = catVal === '' || row.getAttribute('data-category-id') === catVal;
+        let matchesStatus = statusVal === '' || row.getAttribute('data-status') === statusVal;
+        
+        row.style.display = (matchesText && matchesCat && matchesStatus) ? '' : 'none';
     });
-});
+
+    // Hide/Show Group Headers based on Category Filter
+    document.querySelectorAll('#bedTable tbody tr.group-header').forEach(header => {
+        let matchesCat = catVal === '' || header.getAttribute('data-category-id') === catVal;
+        header.style.display = matchesCat ? '' : 'none';
+    });
+}
+
+// Direct Admit Button logic
+function admitToBed(bedId) {
+    let tabBtn = document.querySelector('button[data-bs-target="#nav-admission"]');
+    if (tabBtn) {
+        let tabInstance = bootstrap.Tab.getOrCreateInstance(tabBtn);
+        tabInstance.show();
+    }
+    
+    let bedSelect = document.querySelector('select[name="bed_id"]');
+    if (bedSelect) {
+        bedSelect.value = bedId;
+        bedSelect.focus();
+        bedSelect.classList.add('border-danger', 'bg-danger-subtle');
+        setTimeout(() => {
+            bedSelect.classList.remove('border-danger', 'bg-danger-subtle');
+        }, 1500);
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
 
 // Search for Admitted Patients Table
 document.getElementById('searchAdmitted')?.addEventListener('keyup', function() {
@@ -1103,20 +1378,16 @@ function lookupPatientByMobile(mobile) {
     patientLookupTimer = setTimeout(function() { fetch('ipd_admission.php?lookup_patient_mobile=' + encodeURIComponent(mobile), { headers: { 'X-Requested-With': 'XMLHttpRequest' } }).then(res => res.json()).then(data => { if(data.success) renderPatientLookupResults(data.patients || []); }).catch(err => console.error(err)); }, 300);
 }
 
-// Preserve tabs on reload (especially useful for editing)
+// Preserve tabs on reload
 document.addEventListener("DOMContentLoaded", function() {
     let hash = window.location.hash; 
     if (hash) { 
         let triggerEl = document.querySelector(`button[data-bs-target="${hash}"]`); 
         if (triggerEl) {
-            // Using click() to avoid 'bootstrap is not defined' error if JS loads late
-            setTimeout(function() {
-                triggerEl.click();
-            }, 50);
+            setTimeout(function() { triggerEl.click(); }, 50);
         }
     }
     
-    // Add event listener to capture tab changes and update the URL hash
     let tabButtons = document.querySelectorAll('button[data-bs-toggle="pill"]');
     tabButtons.forEach(btn => {
         btn.addEventListener('shown.bs.tab', function(e) {
@@ -1130,7 +1401,6 @@ document.addEventListener("DOMContentLoaded", function() {
 document.addEventListener('DOMContentLoaded', function () {
     setupDobField(); setupAgeField(); calculateAgeFromDobUI();
     
-    // Convert text inputs to uppercase, but ignore autofocus warning by removing autofocus logic from HTML
     document.querySelectorAll('input[type="text"]:not(#dob_display):not(.mob-input), textarea').forEach(field => {
         field.addEventListener('input', function () { 
             const start = this.selectionStart; 
@@ -1142,6 +1412,23 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 });
+
+
+// =========================================================
+// Prevent Multiple Form Submissions (Double Click Lock)
+// =========================================================
+document.getElementById('opdForm')?.addEventListener('submit', function(e) {
+    let submitBtn = this.querySelector('button[type="submit"]');
+    if (submitBtn) {
+        if (submitBtn.disabled) {
+            e.preventDefault();
+            return false;
+        }
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Please Wait...';
+    }
+});
+
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
