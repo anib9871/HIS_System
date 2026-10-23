@@ -63,7 +63,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             exit;
         }
         if ($_POST['ajax_action'] === 'add_qual') {
-            $qual_name = strtoupper(trim($_POST['qualification_name'] ?? '')));
+            $qual_name = strtoupper(trim($_POST['qualification_name'] ?? ''));
             $status = isset($_POST['status']) ? 1 : 0;
             
             // Check if exists
@@ -167,7 +167,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_doctor'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_schedule'])) {
     $doctor_id    = (int)($_POST['doctor_id'] ?? 0);
     $days_selected= $_POST['days_of_week'] ?? [];
-    $shift_name   = trim($_POST['shift_name'] ?? 'Morning');
+    $shift_name   = trim($_POST['shift_name'] ?? '');
     $start_time   = $_POST['start_time'] ?? '09:00:00';
     $end_time     = $_POST['end_time'] ?? '13:00:00';
     $consult_time = (int)($_POST['avg_consult_time_mins'] ?? 10);
@@ -299,7 +299,14 @@ try {
 } catch (Exception $e) {
     $doctors = $tenant_pdo->query("SELECT * FROM master_doctors ORDER BY id DESC")->fetchAll() ?: [];
 }
-$active_doctors = array_filter($doctors, fn($d) => (int)$d['status'] === 1);
+
+// Ensure compatibility with older PHP versions
+$active_doctors = [];
+foreach ($doctors as $d) {
+    if (isset($d['status']) && (int)$d['status'] === 1) {
+        $active_doctors[] = $d;
+    }
+}
 
 $schedules = [];
 try {
@@ -549,7 +556,7 @@ require_once __DIR__ . '/layout_header.php';
                             </div>
                             <div class="mb-2">
                                 <label class="form-label small fw-semibold text-secondary mb-1">Shift Name</label>
-                                <input type="text" name="shift_name" id="shift_name" class="form-control form-control-sm text-capitalize" value="Morning">
+                                <input type="text" name="shift_name" id="shift_name" class="form-control form-control-sm text-capitalize">
                             </div>
                             <div class="row g-2 mb-2">
                                 <div class="col-6">
@@ -852,7 +859,7 @@ function resetSchForm() {
     document.querySelectorAll('.day-checkbox').forEach(cb => cb.checked = false);
     document.getElementById('selectAllDays').checked = false;
     
-    document.getElementById('shift_name').value = 'Morning';
+    document.getElementById('shift_name').value = '';
     document.getElementById('start_time').value = '09:00';
     document.getElementById('end_time').value = '13:00';
     document.getElementById('avg_consult_time_mins').value = '10';
