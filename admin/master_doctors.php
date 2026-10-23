@@ -63,7 +63,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_action'])) {
             exit;
         }
         if ($_POST['ajax_action'] === 'add_qual') {
-            $qual_name = strtoupper(trim($_POST['qualification_name'] ?? ''));
+            $qual_name = strtoupper(trim($_POST['qualification_name'] ?? '')));
             $status = isset($_POST['status']) ? 1 : 0;
             
             // Check if exists
@@ -356,19 +356,17 @@ require_once __DIR__ . '/layout_header.php';
                     <div class="row g-2 mb-2">
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Doc Code</label>
-                            <input type="text" name="doc_code" id="doc_code" class="form-control form-control-sm font-monospace text-uppercase" placeholder="Auto" onkeyup="checkDuplicateDoc()">
-                            <!-- Updated warning text -->
+                            <input type="text" name="doc_code" id="doc_code" class="form-control form-control-sm font-monospace text-uppercase" onkeyup="checkDuplicateDoc()">
                             <span id="code_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> This Doc Code already exists!</span>
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Reg. No. *</label>
-                            <input type="text" name="registration_no" id="registration_no" class="form-control form-control-sm font-monospace text-uppercase" placeholder="MCI-45892" required onkeyup="checkDuplicateDoc()">
-                            <!-- Updated warning text -->
+                            <input type="text" name="registration_no" id="registration_no" class="form-control form-control-sm font-monospace text-uppercase" required onkeyup="checkDuplicateDoc()">
                             <span id="reg_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> This Registration No. already exists!</span>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold text-secondary mb-1">Full Name *</label>
-                            <input type="text" name="full_name" id="full_name" class="form-control form-control-sm fw-semibold text-capitalize" placeholder="Dr. Sameer Khan" required autofocus>
+                            <input type="text" name="full_name" id="full_name" class="form-control form-control-sm fw-semibold text-capitalize" required autofocus>
                         </div>
                     </div>
 
@@ -427,14 +425,14 @@ require_once __DIR__ . '/layout_header.php';
                         </div>
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold text-secondary mb-1">Mobile No.</label>
-                            <input type="text" name="mobile" id="mobile" class="form-control form-control-sm" placeholder="9876543210">
+                            <input type="text" name="mobile" id="mobile" class="form-control form-control-sm">
                         </div>
                     </div>
 
                     <div class="row g-2 align-items-end">
                         <div class="col-md-6">
                             <label class="form-label small fw-semibold text-secondary mb-1">Email Address</label>
-                            <input type="email" name="email" id="email" class="form-control form-control-sm text-lowercase" placeholder="doc@hospital.com">
+                            <input type="email" name="email" id="email" class="form-control form-control-sm text-lowercase">
                         </div>
                         <div class="col-md-2 d-flex justify-content-center">
                             <div class="form-check form-switch mb-2">
@@ -656,11 +654,11 @@ require_once __DIR__ . '/layout_header.php';
                     <div class="row g-2 mb-3">
                         <div class="col-8">
                             <label class="form-label small text-secondary fw-semibold mb-1">Department Name *</label>
-                            <input type="text" name="dept_name" class="form-control form-control-sm" placeholder="E.G. Cardiology" required>
+                            <input type="text" name="dept_name" class="form-control form-control-sm" required>
                         </div>
                         <div class="col-4">
                             <label class="form-label small text-secondary fw-semibold mb-1">Prefix *</label>
-                            <input type="text" name="dept_prefix" class="form-control form-control-sm text-uppercase" placeholder="CARD" required>
+                            <input type="text" name="dept_prefix" class="form-control form-control-sm text-uppercase" required>
                         </div>
                     </div>
                     <div class="form-check form-switch m-0 border-bottom pb-3">
@@ -689,7 +687,7 @@ require_once __DIR__ . '/layout_header.php';
                 <div class="modal-body p-3">
                     <div class="mb-3">
                         <label class="form-label small text-secondary fw-semibold mb-1">Qualification Name *</label>
-                        <input type="text" name="qualification_name" class="form-control form-control-sm text-uppercase" placeholder="MBBS, MD" required>
+                        <input type="text" name="qualification_name" class="form-control form-control-sm text-uppercase" required>
                     </div>
                     <div class="form-check form-switch m-0 border-bottom pb-3">
                         <input class="form-check-input" type="checkbox" name="status" id="qualStatus" checked>
@@ -717,7 +715,7 @@ require_once __DIR__ . '/layout_header.php';
                 <div class="modal-body p-3">
                     <div class="mb-3">
                         <label class="form-label small text-secondary fw-semibold mb-1">Specialization Name *</label>
-                        <input type="text" name="specialization_name" class="form-control form-control-sm text-capitalize" placeholder="Cardiologist" required>
+                        <input type="text" name="specialization_name" class="form-control form-control-sm text-capitalize" required>
                     </div>
                     <div class="form-check form-switch m-0 border-bottom pb-3">
                         <input class="form-check-input" type="checkbox" name="status" id="specStatus" checked>
