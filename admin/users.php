@@ -196,7 +196,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         INSERT INTO tenant_users (center_id, role_id, fullname, username, password, mobile, menu_access, is_admin, status)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ");
-                    $stmt->execute([$center_id, $role_id, $fullname, $username, $password, $mobile, $selected_menus, $is_admin, $status]);
+                    $stmt->execute([$center_id, $role_id, $fullname, $username, password_hash($password, PASSWORD_DEFAULT), $mobile, $selected_menus, $is_admin, $status]);
                     $_SESSION['swal_success'] = "Staff user successfully ban gaya!";
                     header("Location: users.php");
                     exit;
@@ -213,28 +213,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         SET center_id = ?, role_id = ?, fullname = ?, username = ?, password = ?, mobile = ?, menu_access = ?, is_admin = ?, status = ?
                         WHERE user_id = ?
                     ");
-                    $stmt->execute([$center_id, $role_id, $fullname,$username, $password,$mobile, $selected_menus,$is_admin, $status,$user_id]);
+                    $stmt->execute([$center_id, $role_id, $fullname, $username, password_hash($password, PASSWORD_DEFAULT), $mobile, $selected_menus, $is_admin, $status, $user_id]);
                 } else {
-                    $stmt =$tenant_pdo->prepare("
+                    $stmt = $tenant_pdo->prepare("
                         UPDATE tenant_users 
                         SET center_id = ?, role_id = ?, fullname = ?, username = ?, mobile = ?, menu_access = ?, is_admin = ?, status = ?
                         WHERE user_id = ?
                     ");
-                    $stmt->execute([$center_id, $role_id,$fullname, $username,$mobile, $selected_menus,$is_admin, $status,$user_id]);
+                    $stmt->execute([$center_id, $role_id, $fullname, $username, $mobile, $selected_menus, $is_admin, $status, $user_id]);
                 }
                 $_SESSION['swal_success'] = "User permissions update ho gayi!";
                 header("Location: users.php");
                 exit;
-            } catch (PDOException $e) {$_SESSION['swal_error'] = "Update failed: " . $e->getMessage();
+            } catch (PDOException $e) {
+                $_SESSION['swal_error'] = "Update failed: " . $e->getMessage();
             }
         }
     }
 }
 
 // Fetch Roles, Centers & All Users
-$roles =$tenant_pdo->query("SELECT * FROM tenant_roles WHERE status = 1")->fetchAll();
-$centers =$tenant_pdo->query("SELECT * FROM master_centers WHERE status = 1")->fetchAll();
-$users =$tenant_pdo->query("
+$roles = $tenant_pdo->query("SELECT * FROM tenant_roles WHERE status = 1")->fetchAll();
+$centers = $tenant_pdo->query("SELECT * FROM master_centers WHERE status = 1")->fetchAll();
+$users = $tenant_pdo->query("
     SELECT u.*, r.role_name, c.center_name 
     FROM tenant_users u 
     LEFT JOIN tenant_roles r ON u.role_id = r.role_id 
@@ -326,8 +327,8 @@ require_once __DIR__ . '/layout_header.php';
                                 <label class="form-label small fw-semibold">Role *</label>
                                 <select name="role_id" class="form-select form-select-sm" required>
                                     <option value="">Select Role</option>
-                                    <?php foreach ($roles as$r): ?>
-                                        <option value="<?= $r['role_id'] ?>" <?= (isset($edit_data['role_id']) && $edit_data['role_id'] ==$r['role_id']) ? 'selected' : '' ?>>
+                                    <?php foreach ($roles as $r): ?>
+                                        <option value="<?= $r['role_id'] ?>" <?= (isset($edit_data['role_id']) && $edit_data['role_id'] == $r['role_id']) ? 'selected' : '' ?>>
                                             <?= htmlspecialchars($r['role_name']) ?>
                                         </option>
                                     <?php endforeach; ?>
@@ -336,8 +337,8 @@ require_once __DIR__ . '/layout_header.php';
                             <div class="col-6">
                                 <label class="form-label small fw-semibold">Branch Center</label>
                                 <select name="center_id" class="form-select form-select-sm">
-                                    <?php foreach ($centers as$c): ?>
-                                        <option value="<?= $c['center_id'] ?>" <?= (isset($edit_data['center_id']) && $edit_data['center_id'] ==$c['center_id']) ? 'selected' : '' ?>>
+                                    <?php foreach ($centers as $c): ?>
+                                        <option value="<?= $c['center_id'] ?>" <?= (isset($edit_data['center_id']) && $edit_data['center_id'] == $c['center_id']) ? 'selected' : '' ?>>
                                             <?= htmlspecialchars($c['center_name']) ?>
                                         </option>
                                     <?php endforeach; ?>
@@ -348,16 +349,15 @@ require_once __DIR__ . '/layout_header.php';
                         <div class="row g-2 mb-3">
                             <div class="col-6">
                                 <label class="form-label small fw-semibold">Username / Email *</label>
-                                <!-- Added onkeyup="checkUsername()" for live validation -->
                                 <input type="text" name="username" id="username" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['username'] ?? '') ?>" required onkeyup="checkUsername()">
                                 <span id="username_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> Username already taken!</span>
                             </div>
                             <div class="col-6">
-                                <label class="form-label small fw-semibold"><?= $edit_data ? 'Change Password' : 'Password *' ?></label>
+                                <label class="form-label small fw-semibold">
+                                    <?= $edit_data ? 'Change Password' : 'Password *' ?> 
+                                    <?php if($edit_data): ?><span class="text-muted fw-normal" style="font-size: 0.7rem;">(Leave blank to keep same)</span><?php endif; ?>
+                                </label>
                                 <input type="password" name="password" class="form-control form-control-sm" <?= $edit_data ? '' : 'required' ?>>
-                                <?php if ($edit_data): ?>
-                                    <div class="form-text mt-1 text-muted" style="font-size: 0.7rem;">Leave blank to keep same</div>
-                                <?php endif; ?>
                             </div>
                         </div>
 
@@ -382,7 +382,7 @@ require_once __DIR__ . '/layout_header.php';
                                 <div class="text-muted" style="font-size: 0.72rem;">Grant all permissions without restrictions</div>
                             </div>
                             <div class="form-check form-switch m-0">
-                                <input class="form-check-input" type="checkbox" name="is_admin" value="1" id="is_admin_flag" <?= (!empty($edit_data['is_admin']) &&$edit_data['is_admin'] == 1) ? 'checked' : '' ?> onchange="handleAdminToggle(this.checked)">
+                                <input class="form-check-input" type="checkbox" name="is_admin" value="1" id="is_admin_flag" <?= (!empty($edit_data['is_admin']) && $edit_data['is_admin'] == 1) ? 'checked' : '' ?> onchange="handleAdminToggle(this.checked)">
                             </div>
                         </div>
 
@@ -399,7 +399,7 @@ require_once __DIR__ . '/layout_header.php';
                             </div>
 
                             <div class="p-2 bg-light border rounded-3" style="max-height: 380px; overflow-y: auto;">
-                                <?php foreach ($module_hierarchy as $parent_key =>$parent_val): ?>
+                                <?php foreach ($module_hierarchy as $parent_key => $parent_val): ?>
                                     <div class="accordion-module-card">
                                         <div class="accordion-module-header active" onclick="toggleAccordion('<?= $parent_key ?>_body', '<?= $parent_key ?>_arrow', this)">
                                             <div class="d-flex align-items-center gap-2">
@@ -413,10 +413,11 @@ require_once __DIR__ . '/layout_header.php';
                                         </div>
 
                                         <div id="<?= $parent_key ?>_body" class="accordion-module-body" style="display: block;">
-                                            <?php foreach ($parent_val['submenus'] as $sub_key =>$sub_val): ?>
+                                            <?php foreach ($parent_val['submenus'] as $sub_key => $sub_val): ?>
                                                 <?php 
                                                     $checked = false;
-                                                    if ($edit_data) {$checked = in_array($sub_key,$user_assigned_menus);
+                                                    if ($edit_data) {
+                                                        $checked = in_array($sub_key, $user_assigned_menus);
                                                     } else {
                                                         $checked = in_array($sub_key, ['opd_reg', 'opd_queue']);
                                                     }
@@ -457,8 +458,8 @@ require_once __DIR__ . '/layout_header.php';
             <div class="card border-0 shadow-sm rounded-3">
                 <div class="p-3 border-bottom d-flex justify-content-between align-items-center gap-3 bg-white rounded-top-3">
                     <h6 class="fw-bold text-dark m-0"><i class="bi bi-people-fill text-primary me-2"></i>Staff & Access Directory</h6>
-                    <!-- Removed placeholder from here as well -->
-                    <input type="text" id="searchUserInput" class="form-control form-control-sm w-50">
+                    <!-- Search bar placeholder wapas pehle jaisa -->
+                    <input type="text" id="searchUserInput" class="form-control form-control-sm w-50" placeholder="Search by name, role or username...">
                 </div>
                 <div class="table-responsive">
                     <table class="table table-hover align-middle mb-0" id="userTable">
@@ -475,7 +476,7 @@ require_once __DIR__ . '/layout_header.php';
                             <?php if (empty($users)): ?>
                                 <tr><td colspan="5" class="text-center text-muted py-4">No staff users created yet.</td></tr>
                             <?php else: ?>
-                                <?php foreach ($users as$u): ?>
+                                <?php foreach ($users as $u): ?>
                                     <?php 
                                         $u_menus = json_decode($u['menu_access'] ?? '[]', true) ?: [];
                                     ?>
@@ -493,7 +494,7 @@ require_once __DIR__ . '/layout_header.php';
                                                 <span class="badge bg-danger">Full Admin Axis</span>
                                             <?php else: ?>
                                                 <div style="max-width: 250px; max-height: 80px; overflow-y: auto;">
-                                                    <?php foreach ($u_menus as$m_key): ?>
+                                                    <?php foreach ($u_menus as $m_key): ?>
                                                         <?php if ($m_key !== 'dashboard'): ?>
                                                             <span class="badge-axis"><?= $flat_submenus[$m_key] ?? $m_key ?></span>
                                                         <?php endif; ?>
@@ -511,11 +512,10 @@ require_once __DIR__ . '/layout_header.php';
                                                 <a href="users.php?edit=<?= $u['user_id'] ?>" class="btn-action-edit" title="Edit Axis">
                                                     <i class="bi bi-pencil-fill" style="font-size: 0.85rem;"></i>
                                                 </a>
-                                                <!-- SweetAlert attached to toggle switch -->
                                                 <div class="form-check form-switch m-0" title="Toggle Status">
                                                     <input class="form-check-input" type="checkbox" role="switch" 
                                                            <?= (int)$u['status'] === 1 ? 'checked' : '' ?> 
-                                                           onclick="event.preventDefault(); confirmToggle(<?= $u['user_id'] ?>, <?=$u['status'] ?>)">
+                                                           onclick="event.preventDefault(); confirmToggle(<?= $u['user_id'] ?>, <?= $u['status'] ?>)">
                                                 </div>
                                             </div>
                                         </td>
@@ -531,7 +531,6 @@ require_once __DIR__ . '/layout_header.php';
 </div>
 
 <script>
-// --- Live AJAX Username Check ---
 let typingTimer;
 function checkUsername() {
     clearTimeout(typingTimer);
@@ -549,106 +548,85 @@ function checkUsername() {
 
     typingTimer = setTimeout(function() {
         fetch(`users.php?check_username=${encodeURIComponent(usernameInput)}&edit_id=${editId}`)
-            .then(response => response.json())
-            .then(data => {
-                if (data.exists) {
-                    errorSpan.style.display = 'block';
-                    btnSubmit.disabled = true;
-                } else {
-                    errorSpan.style.display = 'none';
-                    btnSubmit.disabled = false;
-                }
-            })
-            .catch(error => console.error('Error:', error));
-    }, 300);
+        .then(response => response.json())
+        .then(data => {
+            if (data.exists) {
+                errorSpan.style.display = 'block';
+                btnSubmit.disabled = true;
+            } else {
+                errorSpan.style.display = 'none';
+                btnSubmit.disabled = false;
+            }
+        })
+        .catch(error => console.error("Error checking username:", error));
+    }, 500);
 }
 
-// --- SweetAlert for Status Toggle ---
-function confirmToggle(id, currentStatus) {
-    let actionText = currentStatus === 1 ? "Deactivate" : "Activate";
-    let actionColor = currentStatus === 1 ? "#d33" : "#28a745";
+function toggleAccordion(bodyId, arrowId, headerEl) {
+    let body = document.getElementById(bodyId);
+    let arrow = document.getElementById(arrowId);
+    if (body.style.display === 'none' || body.style.display === '') {
+        body.style.display = 'block';
+        arrow.classList.add('rotated');
+        headerEl.classList.add('active');
+    } else {
+        body.style.display = 'none';
+        arrow.classList.remove('rotated');
+        headerEl.classList.remove('active');
+    }
+}
+
+function toggleAllMenus(checked) {
+    let switches = document.querySelectorAll('.menu-toggle-switch');
+    switches.forEach(sw => sw.checked = checked);
+}
+
+function handleAdminToggle(isAdmin) {
+    let switches = document.querySelectorAll('.menu-toggle-switch');
+    let masterToggle = document.getElementById('masterToggle');
     
+    if (isAdmin) {
+        switches.forEach(sw => { sw.checked = true; sw.disabled = true; });
+        if(masterToggle) { masterToggle.checked = true; masterToggle.disabled = true; }
+    } else {
+        switches.forEach(sw => sw.disabled = false);
+        if(masterToggle) { masterToggle.disabled = false; }
+    }
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    let adminFlag = document.getElementById('is_admin_flag');
+    if(adminFlag && adminFlag.checked) {
+        handleAdminToggle(true);
+    }
+});
+
+function confirmToggle(userId, currentStatus) {
+    let actionTxt = currentStatus === 1 ? 'Deactivate' : 'Activate';
     Swal.fire({
-        title: 'Are you sure?',
-        text: `Do you want to ${actionText} this user?`,
+        title: `Are you sure?`,
+        text: `Do you want to ${actionTxt} this user?`,
         icon: 'warning',
         showCancelButton: true,
-        confirmButtonColor: actionColor,
+        confirmButtonColor: currentStatus === 1 ? '#d33' : '#198754',
         cancelButtonColor: '#6c757d',
-        confirmButtonText: `Yes, ${actionText} it!`
+        confirmButtonText: `Yes, ${actionTxt}!`
     }).then((result) => {
         if (result.isConfirmed) {
-            window.location.href = `?toggle_status=${id}&current=${currentStatus}`;
+            window.location.href = `users.php?toggle_status=${userId}&current=${currentStatus}`;
         }
     });
 }
 
-// Live Search Bar for Staff Directory
 document.getElementById('searchUserInput').addEventListener('keyup', function() {
-    let val = this.value.toLowerCase();
+    let filter = this.value.toLowerCase();
     let rows = document.querySelectorAll('#userTable tbody tr');
+    
     rows.forEach(row => {
-        row.style.display = row.innerText.toLowerCase().includes(val) ? '' : 'none';
+        if(row.cells.length > 1) { 
+            let text = row.innerText.toLowerCase();
+            row.style.display = text.includes(filter) ? '' : 'none';
+        }
     });
 });
-
-// Accordion Click Toggle
-function toggleAccordion(bodyId, arrowId, headerElem) {
-    const body = document.getElementById(bodyId);
-    const arrow = document.getElementById(arrowId);
-    if (body.style.display === 'none') {
-        body.style.display = 'block';
-        arrow.classList.add('rotated');
-        headerElem.classList.add('active');
-    } else {
-        body.style.display = 'none';
-        arrow.classList.remove('rotated');
-        headerElem.classList.remove('active');
-    }
-}
-
-// Master Toggle Switch (Select / Deselect All)
-function toggleAllMenus(isChecked) {
-    document.querySelectorAll('.menu-toggle-switch').forEach(toggle => {
-        toggle.checked = isChecked;
-    });
-}
-
-// When Full Admin toggle is turned on -> All menu toggles activate
-function handleAdminToggle(isAdminChecked) {
-    if (isAdminChecked) {
-        document.getElementById('masterToggle').checked = true;
-        toggleAllMenus(true);
-    }
-}
 </script>
-
-<!-- SweetAlert Success/Error Handlers -->
-<script>
-document.addEventListener("DOMContentLoaded", function() {
-    <?php if (isset($_SESSION['swal_success'])): ?>
-        Swal.fire({
-            icon: 'success',
-            title: 'Success!',
-            text: '<?= addslashes($_SESSION['swal_success']) ?>',
-            timer: 3000,
-            showConfirmButton: false,
-            toast: true,
-            position: 'top-end'
-        });
-        <?php unset($_SESSION['swal_success']); ?>
-    <?php endif; ?>
-
-    <?php if (isset($_SESSION['swal_error'])): ?>
-        Swal.fire({
-            icon: 'error',
-            title: 'Error!',
-            text: '<?= addslashes($_SESSION['swal_error']) ?>',
-            confirmButtonColor: '#d33'
-        });
-        <?php unset($_SESSION['swal_error']); ?>
-    <?php endif; ?>
-});
-</script>
-
-<?php require_once __DIR__ . '/layout_footer.php'; ?>
