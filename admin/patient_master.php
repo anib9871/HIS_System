@@ -191,10 +191,10 @@ input[type="number"], input[type="date"], input[inputmode="numeric"], .mob-input
                     </div>
 
                     <div class="d-grid mt-4">
-                        <button type="submit" class="btn btn-primary btn-sm fw-bold">
-                            <i class="bi bi-save me-1"></i> <?= $is_edit ? 'UPDATE PATIENT' : 'SAVE PATIENT' ?>
-                        </button>
-                    </div>
+    <button type="submit" class="btn btn-primary btn-sm fw-bold">
+        <i class="bi bi-save me-1"></i> <?= $is_edit ? 'UPDATE' : 'SAVE' ?>
+    </button>
+</div>
                 </form>
             </div>
         </div>
