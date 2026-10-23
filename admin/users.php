@@ -213,29 +213,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         SET center_id = ?, role_id = ?, fullname = ?, username = ?, password = ?, mobile = ?, menu_access = ?, is_admin = ?, status = ?
                         WHERE user_id = ?
                     ");
-                    $stmt->execute([$center_id, $role_id, $fullname, $username, $password, $mobile, $selected_menus, $is_admin, $status, $user_id]);
+                    $stmt->execute([$center_id, $role_id, $fullname,$username, $password,$mobile, $selected_menus,$is_admin, $status,$user_id]);
                 } else {
-                    $stmt = $tenant_pdo->prepare("
+                    $stmt =$tenant_pdo->prepare("
                         UPDATE tenant_users 
                         SET center_id = ?, role_id = ?, fullname = ?, username = ?, mobile = ?, menu_access = ?, is_admin = ?, status = ?
                         WHERE user_id = ?
                     ");
-                    $stmt->execute([$center_id, $role_id, $fullname, $username, $mobile, $selected_menus, $is_admin, $status, $user_id]);
+                    $stmt->execute([$center_id, $role_id,$fullname, $username,$mobile, $selected_menus,$is_admin, $status,$user_id]);
                 }
                 $_SESSION['swal_success'] = "User permissions update ho gayi!";
                 header("Location: users.php");
                 exit;
-            } catch (PDOException $e) {
-                $_SESSION['swal_error'] = "Update failed: " . $e->getMessage();
+            } catch (PDOException $e) {$_SESSION['swal_error'] = "Update failed: " . $e->getMessage();
             }
         }
     }
 }
 
 // Fetch Roles, Centers & All Users
-$roles = $tenant_pdo->query("SELECT * FROM tenant_roles WHERE status = 1")->fetchAll();
-$centers = $tenant_pdo->query("SELECT * FROM master_centers WHERE status = 1")->fetchAll();
-$users = $tenant_pdo->query("
+$roles =$tenant_pdo->query("SELECT * FROM tenant_roles WHERE status = 1")->fetchAll();
+$centers =$tenant_pdo->query("SELECT * FROM master_centers WHERE status = 1")->fetchAll();
+$users =$tenant_pdo->query("
     SELECT u.*, r.role_name, c.center_name 
     FROM tenant_users u 
     LEFT JOIN tenant_roles r ON u.role_id = r.role_id 
@@ -319,7 +318,7 @@ require_once __DIR__ . '/layout_header.php';
 
                         <div class="mb-3">
                             <label class="form-label small fw-semibold">Full Name *</label>
-                            <input type="text" name="fullname" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['fullname'] ?? '') ?>" placeholder="Dr. Sameer Khan / Reena Staff" required>
+                            <input type="text" name="fullname" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['fullname'] ?? '') ?>" required>
                         </div>
 
                         <div class="row g-2 mb-3">
@@ -350,19 +349,22 @@ require_once __DIR__ . '/layout_header.php';
                             <div class="col-6">
                                 <label class="form-label small fw-semibold">Username / Email *</label>
                                 <!-- Added onkeyup="checkUsername()" for live validation -->
-                                <input type="text" name="username" id="username" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['username'] ?? '') ?>" placeholder="user@clinic.com" required onkeyup="checkUsername()">
+                                <input type="text" name="username" id="username" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['username'] ?? '') ?>" required onkeyup="checkUsername()">
                                 <span id="username_error" class="text-danger small mt-1 fw-bold" style="display: none;"><i class="bi bi-exclamation-triangle"></i> Username already taken!</span>
                             </div>
                             <div class="col-6">
                                 <label class="form-label small fw-semibold"><?= $edit_data ? 'Change Password' : 'Password *' ?></label>
-                                <input type="password" name="password" class="form-control form-control-sm" placeholder="<?= $edit_data ? 'Leave blank to keep same' : '1234' ?>" <?= $edit_data ? '' : 'required' ?>>
+                                <input type="password" name="password" class="form-control form-control-sm" <?= $edit_data ? '' : 'required' ?>>
+                                <?php if ($edit_data): ?>
+                                    <div class="form-text mt-1 text-muted" style="font-size: 0.7rem;">Leave blank to keep same</div>
+                                <?php endif; ?>
                             </div>
                         </div>
 
                         <div class="row g-2 mb-3">
                             <div class="col-6">
                                 <label class="form-label small fw-semibold">Mobile No.</label>
-                                <input type="text" name="mobile" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['mobile'] ?? '') ?>" placeholder="9876543210">
+                                <input type="text" name="mobile" class="form-control form-control-sm" value="<?= htmlspecialchars($edit_data['mobile'] ?? '') ?>">
                             </div>
                             <div class="col-6">
                                 <label class="form-label small fw-semibold">Status *</label>
@@ -455,7 +457,8 @@ require_once __DIR__ . '/layout_header.php';
             <div class="card border-0 shadow-sm rounded-3">
                 <div class="p-3 border-bottom d-flex justify-content-between align-items-center gap-3 bg-white rounded-top-3">
                     <h6 class="fw-bold text-dark m-0"><i class="bi bi-people-fill text-primary me-2"></i>Staff & Access Directory</h6>
-                    <input type="text" id="searchUserInput" class="form-control form-control-sm w-50" placeholder="Search by name, role or username...">
+                    <!-- Removed placeholder from here as well -->
+                    <input type="text" id="searchUserInput" class="form-control form-control-sm w-50">
                 </div>
                 <div class="table-responsive">
                     <table class="table table-hover align-middle mb-0" id="userTable">
