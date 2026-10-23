@@ -815,9 +815,6 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
             <button class="btn btn-sm btn-outline-secondary d-lg-none" id="sidebarToggleBtn" type="button">
                 <i class="bi bi-list fs-5"></i>
             </button>
-            <span class="fw-semibold text-secondary d-none d-sm-inline">
-                <i class="bi bi-hospital me-1 text-primary"></i> <?= htmlspecialchars($_SESSION['org_name'] ?? 'Hospital Admin') ?>
-            </span>
         </div>
         
         <div class="d-flex align-items-center gap-2 gap-sm-3">
