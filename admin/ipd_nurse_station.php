@@ -116,11 +116,13 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
 .patient-list-item { cursor: pointer; transition: 0.2s; border-left: 4px solid transparent; }
 .patient-list-item:hover { background-color: #f8fbff; border-left-color: #cbd5e1; }
 .patient-list-item.active { background-color: #eff6ff; border-left-color: #0d6efd; }
-.dd-patient-banner { background:linear-gradient(135deg,#eff6ff,#ffffff); border:1px solid #dbeafe; border-radius:9px; padding:9px 10px; margin-bottom: .55rem; }
-.vital-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px; }
-.vital-label { font-size: 9px; font-weight: 800; color: #64748b; margin-bottom: 3px; display: block; }
+.dd-patient-banner { background:linear-gradient(135deg,#eff6ff,#ffffff); border:1px solid #dbeafe; border-radius:9px; padding:12px 15px; margin-bottom: 1rem; }
+.vital-box { background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; height: 100%; }
+.vital-label { font-size: 9px; font-weight: 800; color: #475569; margin-bottom: 5px; display: block; }
 .compact-input { min-height: 28px; height: 28px; font-size: 11px; padding: 2px 8px; }
-.rx-card { border: 1px solid #bfdbfe; background: #fff; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+.rx-card { border: 1px solid #e2e8f0; background: #fff; border-radius: 8px; padding: 12px; margin-bottom: 10px; transition: 0.2s; }
+.rx-card:hover { border-color: #93c5fd; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+.doctor-notes-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 12px; margin-bottom: 15px; }
 </style>
 
 <div class="row g-3">
@@ -132,10 +134,13 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                 <span class="badge bg-primary-subtle text-primary border"><?= count($admitted_patients) ?></span>
             </div>
             <div class="card-body p-0" style="max-height: 85vh; overflow-y: auto;">
+                <div class="p-2 border-bottom">
+                    <input type="text" id="patientSearch" class="form-control form-control-sm compact-input" placeholder="SEARCH PATIENT...">
+                </div>
                 <?php if(empty($admitted_patients)): ?>
                     <div class="p-4 text-center text-muted small fw-bold">NO PATIENTS IN WARD</div>
                 <?php else: ?>
-                    <div class="list-group list-group-flush">
+                    <div class="list-group list-group-flush" id="patientListContainer">
                         <?php foreach($admitted_patients as $pt): ?>
                             <a href="?ipd_id=<?= $pt['ipd_id'] ?>" class="list-group-item list-group-item-action patient-list-item p-3 <?= $selected_ipd_id == $pt['ipd_id'] ? 'active' : '' ?>">
                                 <div class="d-flex justify-content-between align-items-center mb-1">
@@ -166,38 +171,49 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
         <?php else: ?>
             <div class="card border-0 shadow-sm mb-3">
                 <div class="card-body" style="padding:.65rem;">
+                    
                     <!-- PATIENT BANNER -->
                     <div class="dd-patient-banner d-flex justify-content-between gap-3 flex-wrap align-items-center">
                         <div>
-                            <div class="fw-bold fs-5 text-dark"><?= htmlspecialchars($selected['fullname']) ?></div>
+                            <div class="fw-bold fs-5 text-dark mb-1">
+                                <?= htmlspecialchars($selected['fullname']) ?> 
+                                <span class="text-secondary fs-6 ms-1">(<?= $selected['age'] ?> Y, <?= substr($selected['gender'], 0, 1) ?>)</span>
+                            </div>
                             <div class="text-primary font-monospace fw-bold" style="font-size: 11px;"><?= htmlspecialchars($selected['uhid']) ?></div>
                         </div>
                         <div class="text-end d-flex flex-column align-items-end">
-                            <div class="fw-bold text-danger fs-6">BED: <?= htmlspecialchars($selected['room_no'] . ' - ' . $selected['bed_no']) ?></div>
-                            <div class="small text-dark fw-bold mb-1" style="font-size:9px;">DR. <?= htmlspecialchars(strtoupper($selected['doctor_name'])) ?></div>
+                            <div class="fw-bold text-danger fs-6 mb-1">BED: <?= htmlspecialchars($selected['room_no'] . ' - ' . $selected['bed_no']) ?></div>
+                            <div class="small text-dark fw-bold" style="font-size:10px;">DR. <?= htmlspecialchars(strtoupper($selected['doctor_name'])) ?></div>
                         </div>
                     </div>
 
-                    <div class="row g-3 mt-1">
+                    <?php if(!empty($latest_notes)): ?>
+                        <div class="doctor-notes-box">
+                            <h6 class="fw-bold text-dark small mb-1"><i class="bi bi-chat-square-text-fill text-warning me-2"></i>DOCTOR'S INSTRUCTIONS / NOTES</h6>
+                            <p class="mb-0 text-dark" style="font-size: 12px; font-weight: 500; text-transform: none;"><?= nl2br(htmlspecialchars($latest_notes)) ?></p>
+                        </div>
+                    <?php endif; ?>
+
+                    <div class="row g-3">
                         <!-- DOCTOR'S ACTIVE ORDERS & MAR -->
                         <div class="col-md-6">
                             <div class="card border h-100">
                                 <div class="card-header bg-light py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
                                     <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-capsule text-danger me-2"></i>ACTIVE DOCTOR ORDERS</h6>
                                 </div>
-                                <div class="card-body p-2" style="background: #f8fafc;">
+                                <div class="card-body p-3" style="background: #f8fafc; max-height: 450px; overflow-y: auto;">
                                     <?php if(empty($latest_rx_items)): ?>
                                         <div class="text-center text-muted small py-4 fw-bold">NO ACTIVE MEDICINES PRESCRIBED.</div>
                                     <?php else: ?>
                                         <?php foreach($latest_rx_items as $rx): ?>
-                                            <div class="rx-card d-flex justify-content-between align-items-center">
+                                            <div class="rx-card d-flex justify-content-between align-items-center shadow-sm">
                                                 <div>
-                                                    <div class="fw-bold text-primary" style="font-size: 12px;"><?= htmlspecialchars($rx['name'] ?? $rx['medicine_name']) ?></div>
-                                                    <div class="text-dark fw-bold" style="font-size: 10px;"><?= htmlspecialchars($rx['dose']) ?></div>
-                                                    <span class="badge bg-secondary mt-1" style="font-size: 8px;"><?= htmlspecialchars($rx['freq'] ?? $rx['frequency']) ?></span>
+                                                    <div class="fw-bold text-primary" style="font-size: 13px;"><?= htmlspecialchars($rx['name'] ?? $rx['medicine_name']) ?></div>
+                                                    <div class="text-dark fw-bold mt-1" style="font-size: 11px;">DOSE: <?= htmlspecialchars($rx['dose']) ?></div>
+                                                    <span class="badge bg-secondary mt-1" style="font-size: 9px;"><?= htmlspecialchars($rx['freq'] ?? $rx['frequency']) ?></span>
                                                 </div>
-                                                <button class="btn btn-sm btn-success fw-bold" style="font-size: 10px; padding: 4px 12px;" onclick="openGiveModal('<?= htmlspecialchars($rx['name'] ?? $rx['medicine_name'], ENT_QUOTES) ?>', '<?= htmlspecialchars($rx['dose'], ENT_QUOTES) ?>')">
-                                                    <i class="bi bi-check2-circle"></i> GIVE
+                                                <button class="btn btn-sm btn-success fw-bold px-3 py-1" style="font-size: 11px;" onclick="openGiveModal('<?= htmlspecialchars($rx['name'] ?? $rx['medicine_name'], ENT_QUOTES) ?>', '<?= htmlspecialchars($rx['dose'], ENT_QUOTES) ?>')">
+                                                    <i class="bi bi-check2-circle me-1"></i> GIVE
                                                 </button>
                                             </div>
                                         <?php endforeach; ?>
@@ -210,14 +226,14 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                         <div class="col-md-6">
                             <div class="card border h-100">
                                 <div class="card-header bg-light py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
-                                    <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-heart-pulse text-danger me-2"></i>NURSING VITALS</h6>
+                                    <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-heart-pulse-fill text-danger me-2"></i>RECORD NURSING VITALS</h6>
                                 </div>
                                 <div class="card-body p-3">
                                     <form method="POST">
                                         <input type="hidden" name="nurse_action" value="save_vitals">
                                         <input type="hidden" name="ipd_id" value="<?= $selected_ipd_id ?>">
                                         <div class="mb-3">
-                                            <label class="form-label" style="font-size: 9px; font-weight: 800;">RECORD TIME *</label>
+                                            <label class="form-label" style="font-size: 10px; font-weight: 800;">RECORD TIME *</label>
                                             <input type="datetime-local" name="recorded_time" class="form-control compact-input fw-bold" value="<?= date('Y-m-d\TH:i') ?>" required>
                                         </div>
                                         <div class="row g-2 mb-3">
@@ -225,12 +241,12 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                                                 <div class="col-6">
                                                     <div class="vital-box">
                                                         <span class="vital-label"><?= htmlspecialchars($v['vital_name']) ?> <?= $v['unit'] ? '('.htmlspecialchars($v['unit']).')' : '' ?></span>
-                                                        <input type="text" name="vitals[<?= htmlspecialchars($v['vital_key']) ?>]" class="form-control compact-input border-0 bg-white shadow-sm text-none text-uppercase" placeholder="<?= htmlspecialchars($v['placeholder']) ?>">
+                                                        <input type="text" inputmode="text" name="vitals[<?= htmlspecialchars($v['vital_key']) ?>]" class="form-control compact-input border-0 bg-white shadow-sm fw-bold text-dark text-uppercase" placeholder="<?= htmlspecialchars($v['placeholder']) ?>">
                                                     </div>
                                                 </div>
                                             <?php endforeach; ?>
                                         </div>
-                                        <button type="submit" class="btn btn-primary btn-sm w-100 fw-bold"><i class="bi bi-save me-1"></i> SAVE VITALS</button>
+                                        <button type="submit" class="btn btn-primary btn-sm w-100 fw-bold py-2 shadow-sm"><i class="bi bi-save me-1"></i> SAVE VITALS</button>
                                     </form>
                                 </div>
                             </div>
@@ -238,21 +254,21 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                     </div>
 
                     <!-- HISTORY TIMELINES -->
-                    <div class="row g-3 mt-1">
+                    <div class="row g-3 mt-2">
                         <div class="col-md-6">
-                            <div class="card border">
-                                <div class="card-header bg-white py-2 px-3 border-bottom"><h6 class="mb-0 fw-bold small text-secondary">MEDICATION HISTORY</h6></div>
+                            <div class="card border shadow-none">
+                                <div class="card-header bg-white py-2 px-3 border-bottom"><h6 class="mb-0 fw-bold small text-secondary">MEDICATION HISTORY (LAST 20)</h6></div>
                                 <div class="card-body p-0" style="max-height: 250px; overflow-y: auto;">
-                                    <table class="table table-sm table-hover mb-0" style="font-size: 10px;">
-                                        <thead class="table-light sticky-top"><tr><th>TIME</th><th>MEDICINE</th><th>DOSE</th></tr></thead>
+                                    <table class="table table-sm table-hover mb-0" style="font-size: 11px;">
+                                        <thead class="table-light sticky-top"><tr><th class="ps-3">TIME</th><th>MEDICINE</th><th>DOSE</th></tr></thead>
                                         <tbody>
                                             <?php if(empty($medication_logs)): ?>
-                                                <tr><td colspan="3" class="text-center text-muted py-2">NO RECORDS.</td></tr>
+                                                <tr><td colspan="3" class="text-center text-muted py-3 fw-bold">NO RECORDS FOUND.</td></tr>
                                             <?php else: foreach($medication_logs as $log): ?>
                                                 <tr>
-                                                    <td class="text-nowrap fw-bold text-success"><?= date('d-m-Y H:i', strtotime($log['given_time'])) ?></td>
-                                                    <td class="fw-bold"><?= htmlspecialchars($log['medicine_name']) ?></td>
-                                                    <td><?= htmlspecialchars($log['dose_given']) ?></td>
+                                                    <td class="text-nowrap fw-bold text-success ps-3"><?= date('d-m-Y H:i', strtotime($log['given_time'])) ?></td>
+                                                    <td class="fw-bold text-dark"><?= htmlspecialchars($log['medicine_name']) ?></td>
+                                                    <td class="text-secondary fw-semibold"><?= htmlspecialchars($log['dose_given']) ?></td>
                                                 </tr>
                                             <?php endforeach; endif; ?>
                                         </tbody>
@@ -262,20 +278,20 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                         </div>
 
                         <div class="col-md-6">
-                            <div class="card border">
-                                <div class="card-header bg-white py-2 px-3 border-bottom"><h6 class="mb-0 fw-bold small text-secondary">VITALS HISTORY</h6></div>
+                            <div class="card border shadow-none">
+                                <div class="card-header bg-white py-2 px-3 border-bottom"><h6 class="mb-0 fw-bold small text-secondary">VITALS HISTORY (LAST 10)</h6></div>
                                 <div class="card-body p-2" style="max-height: 250px; overflow-y: auto;">
                                     <?php if(empty($nursing_vitals)): ?>
-                                        <div class="text-center text-muted small py-2">NO VITALS RECORDED YET.</div>
+                                        <div class="text-center text-muted small py-3 fw-bold">NO VITALS RECORDED YET.</div>
                                     <?php else: foreach($nursing_vitals as $nv): ?>
                                         <div class="border rounded p-2 mb-2 bg-light">
-                                            <div class="fw-bold text-primary mb-1" style="font-size: 10px;"><i class="bi bi-clock"></i> <?= date('d-m-Y h:i A', strtotime($nv['recorded_time'])) ?></div>
+                                            <div class="fw-bold text-primary mb-2" style="font-size: 11px;"><i class="bi bi-clock me-1"></i> <?= date('d-m-Y h:i A', strtotime($nv['recorded_time'])) ?></div>
                                             <div class="d-flex flex-wrap gap-1">
                                                 <?php 
                                                 $vDecoded = json_decode($nv['vitals_json'], true); 
                                                 if($vDecoded) {
                                                     foreach($vDecoded as $k => $v) {
-                                                        if(trim($v) !== '') echo '<span class="badge bg-white text-dark border border-secondary" style="font-size:8px;"><strong>'.strtoupper(str_replace('_', ' ', $k)).':</strong> '.htmlspecialchars($v).'</span>';
+                                                        if(trim($v) !== '') echo '<span class="badge bg-white text-dark border border-secondary" style="font-size:9px;"><strong>'.strtoupper(str_replace('_', ' ', $k)).':</strong> '.htmlspecialchars($v).'</span>';
                                                     }
                                                 }
                                                 ?>
@@ -297,7 +313,7 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
     <div class="modal-dialog modal-dialog-centered modal-sm">
         <div class="modal-content border-0 shadow-lg rounded-3">
             <div class="modal-header py-2 bg-success text-white">
-                <h6 class="modal-title fw-bold"><i class="bi bi-check-circle me-1"></i> GIVE MEDICINE</h6>
+                <h6 class="modal-title fw-bold"><i class="bi bi-check-circle me-1"></i> CONFIRM MEDICATION</h6>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body p-3">
@@ -306,22 +322,22 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                     <input type="hidden" name="ipd_id" value="<?= $selected_ipd_id ?>">
                     
                     <div class="mb-2">
-                        <label class="form-label small fw-bold">MEDICINE</label>
+                        <label class="form-label small fw-bold text-secondary">MEDICINE</label>
                         <input type="text" name="medicine_name" id="modal_med_name" class="form-control form-control-sm fw-bold text-primary bg-light" readonly>
                     </div>
                     <div class="mb-2">
-                        <label class="form-label small fw-bold">DOSE</label>
-                        <input type="text" name="dose" id="modal_med_dose" class="form-control form-control-sm text-uppercase bg-light" readonly>
+                        <label class="form-label small fw-bold text-secondary">DOSE</label>
+                        <input type="text" name="dose" id="modal_med_dose" class="form-control form-control-sm text-uppercase bg-light fw-bold" readonly>
                     </div>
                     <div class="mb-2">
-                        <label class="form-label small fw-bold">GIVEN TIME *</label>
+                        <label class="form-label small fw-bold text-secondary">GIVEN TIME *</label>
                         <input type="datetime-local" name="given_time" class="form-control form-control-sm fw-bold" value="<?= date('Y-m-d\TH:i') ?>" required>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label small fw-bold">REMARKS (OPTIONAL)</label>
-                        <input type="text" name="remarks" class="form-control form-control-sm text-uppercase" placeholder="E.g., After food">
+                        <label class="form-label small fw-bold text-secondary">REMARKS (OPTIONAL)</label>
+                        <input type="text" name="remarks" class="form-control form-control-sm" placeholder="E.g., After food" style="text-transform: none;">
                     </div>
-                    <button type="submit" class="btn btn-success btn-sm w-100 fw-bold">MARK AS GIVEN</button>
+                    <button type="submit" class="btn btn-success btn-sm w-100 fw-bold py-2"><i class="bi bi-check2-all me-1"></i> MARK AS GIVEN</button>
                 </form>
             </div>
         </div>
@@ -331,8 +347,22 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <script>
 <?php if (isset($_SESSION['swal_success'])): ?>
-    Swal.fire({icon: 'success', title: 'Saved!', text: '<?= $_SESSION['swal_success'] ?>', timer: 1500, showConfirmButton: false});
+    Swal.fire({
+        icon: 'success', 
+        title: 'Success', 
+        text: <?= json_encode($_SESSION['swal_success']) ?>, 
+        timer: 2000, 
+        showConfirmButton: false
+    });
     <?php unset($_SESSION['swal_success']); ?>
+<?php endif; ?>
+
+<?php if (!empty($err)): ?>
+    Swal.fire({
+        icon: 'error', 
+        title: 'Error', 
+        text: <?= json_encode($err) ?>
+    });
 <?php endif; ?>
 
 function openGiveModal(medName, medDose) {
@@ -340,6 +370,16 @@ function openGiveModal(medName, medDose) {
     document.getElementById('modal_med_dose').value = medDose;
     bootstrap.Modal.getOrCreateInstance(document.getElementById('giveMedicineModal')).show();
 }
+
+// Simple search for left panel
+document.getElementById('patientSearch')?.addEventListener('keyup', function() {
+    let filter = this.value.toUpperCase();
+    let items = document.querySelectorAll('.patient-list-item');
+    items.forEach(item => {
+        let text = item.innerText.toUpperCase();
+        item.style.display = text.indexOf(filter) > -1 ? '' : 'none';
+    });
+});
 </script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
