@@ -611,9 +611,16 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                                 <i class="bi bi-plus-circle me-1"></i> ADMIT
                                             </button>
                                         <?php else: ?>
-                                            <a href="ipd_discharge_summary.php?ipd_id=<?= $room['ipd_id'] ?? 0 ?>" class="btn btn-sm btn-outline-danger py-0 px-2 fw-bold d-inline-flex align-items-center" style="font-size: 10px;" title="Discharge Patient">
-                                                <i class="bi bi-box-arrow-right me-1"></i> DISCHARGE SUMMARY
-                                            </a>
+                                            <div class="dropdown">
+                                                <button class="btn btn-sm btn-primary dropdown-toggle py-0 px-2 fw-bold" style="font-size: 10px;" type="button" data-bs-toggle="dropdown">
+                                                    MANAGE PATIENT
+                                                </button>
+                                                <ul class="dropdown-menu dropdown-menu-end shadow-sm border-0 mt-1" style="font-size: 11px;">
+                                                    <li><a class="dropdown-item fw-bold py-2 text-dark" href="ipd_nurse_station.php?ipd_id=<?= $room['ipd_id'] ?>"><i class="bi bi-heart-pulse text-danger me-2"></i>Nurse Station</a></li>
+                                                    <li><a class="dropdown-item fw-bold py-2 text-dark" href="ipd_billing.php?ipd_id=<?= $room['ipd_id'] ?>"><i class="bi bi-receipt text-primary me-2"></i>Billing & Discharge</a></li>
+                                                    <li><a class="dropdown-item fw-bold py-2 text-dark" href="ipd_discharge_summary.php?ipd_id=<?= $room['ipd_id'] ?>"><i class="bi bi-journal-text text-success me-2"></i>Discharge Summary</a></li>
+                                                </ul>
+                                            </div>
                                         <?php endif; ?>
                                     </td>
                                 </tr>
@@ -893,13 +900,18 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                             <?php endif; ?>
                                         </td>
                                         <td class="text-end pe-3 align-middle">
-                                            <div class="d-flex justify-content-end gap-2">
-                                                <a href="?edit_id=<?= $adm['ipd_id'] ?>" class="btn btn-sm <?= ($edit_id == $adm['ipd_id']) ? 'btn-warning text-dark' : 'btn-outline-primary' ?> d-flex align-items-center justify-content-center" style="width: 28px; height: 28px;" title="Edit Admission">
-                                                    <i class="bi bi-pencil" style="font-size: 12px; margin: 0; padding: 0;"></i>
-                                                </a>
-                                                <a href="?action=print&ipd_id=<?= $adm['ipd_id'] ?>" target="_blank" class="btn btn-sm btn-outline-dark d-flex align-items-center justify-content-center" style="width: 28px; height: 28px;" title="Print Admission">
-                                                    <i class="bi bi-printer" style="font-size: 12px; margin: 0; padding: 0;"></i>
-                                                </a>
+                                            <div class="dropdown">
+                                                <button class="btn btn-sm btn-outline-dark dropdown-toggle py-1 px-2 fw-bold" style="font-size: 10px;" type="button" data-bs-toggle="dropdown">
+                                                    OPTIONS
+                                                </button>
+                                                <ul class="dropdown-menu dropdown-menu-end shadow-sm border-0 mt-1" style="font-size: 11px;">
+                                                    <li><a class="dropdown-item fw-bold py-2 text-dark" href="ipd_nurse_station.php?ipd_id=<?= $adm['ipd_id'] ?>"><i class="bi bi-heart-pulse text-danger me-2"></i>Nurse Station</a></li>
+                                                    <li><a class="dropdown-item fw-bold py-2 text-dark" href="ipd_billing.php?ipd_id=<?= $adm['ipd_id'] ?>"><i class="bi bi-receipt text-primary me-2"></i>Billing & Discharge</a></li>
+                                                    <li><a class="dropdown-item fw-bold py-2 text-dark" href="ipd_discharge_summary.php?ipd_id=<?= $adm['ipd_id'] ?>"><i class="bi bi-journal-text text-success me-2"></i>Discharge Summary</a></li>
+                                                    <li><hr class="dropdown-divider"></li>
+                                                    <li><a class="dropdown-item fw-bold py-2 text-warning bg-warning-subtle" href="?edit_id=<?= $adm['ipd_id'] ?>"><i class="bi bi-pencil me-2"></i>Edit Admission</a></li>
+                                                    <li><a class="dropdown-item fw-bold py-2 text-secondary bg-light" href="?action=print&ipd_id=<?= $adm['ipd_id'] ?>" target="_blank"><i class="bi bi-printer me-2"></i>Print Receipt</a></li>
+                                                </ul>
                                             </div>
                                         </td>
                                     </tr>
@@ -927,9 +939,9 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body p-3">
-                <?php foreach($payment_modes as$pm): ?>
+                <?php foreach($payment_modes as $pm): ?>
                     <?php 
-                        $pm_id =$pm['id'];
+                        $pm_id = $pm['id'];
                         $pm_name = htmlspecialchars(strtoupper($pm['mode_name']));
                         $is_cash = (strtolower($pm['mode_name']) === 'cash'); 
                     ?>
@@ -938,7 +950,7 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                             <input class="form-check-input pay-check" type="checkbox" id="check_mode_<?= $pm_id ?>" value="<?= $pm_id ?>" data-name="<?= $pm_name ?>" <?= $pm_id == $default_mode_id ? 'checked' : '' ?> onchange="togglePaymentInputs(<?= $pm_id ?>)">
                             <label class="form-check-label fw-bold small" for="check_mode_<?= $pm_id ?>"><?= $pm_name ?></label>
                         </div>
-                        <div id="div_input_mode_<?= $pm_id ?>" class="ps-4" style="display: <?= $pm_id ==$default_mode_id ? 'block' : 'none' ?>;">
+                        <div id="div_input_mode_<?= $pm_id ?>" class="ps-4" style="display: <?= $pm_id == $default_mode_id ? 'block' : 'none' ?>;">
                             <div class="input-group input-group-sm mb-1">
                                 <span class="input-group-text bg-white fw-bold">₹</span>
                                 <input type="number" id="amt_mode_<?= $pm_id ?>" class="form-control pay-amt fw-bold text-dark" placeholder="0" onkeyup="calculateModalTotals()">
