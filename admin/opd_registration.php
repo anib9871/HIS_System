@@ -1,8 +1,24 @@
 <?php
 // admin/opd_registration.php
-$page_title = "OPD Registration & Billing";
+$page_title = "OPD Payment";
 require_once __DIR__ . '/../config/tenant_db.php';
 require_once __DIR__ . '/../config/alerts.php'; 
+
+// ==============================================================
+// AJAX: REFRESH MASTERS (TPA, CATEGORY, TARIFF)
+// ==============================================================
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_masters') {
+    header('Content-Type: application/json; charset=utf-8');
+    $org_id = (int)($_SESSION['org_id'] ?? 1);
+    $center_id = (int)($_SESSION['center_id'] ?? 1);
+    
+    $cats = $tenant_pdo->query("SELECT id, category_name FROM master_categories WHERE org_id = $org_id AND center_id = $center_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC);
+    $ins = $tenant_pdo->query("SELECT id, category_id, insurance_name FROM insurance WHERE org_id = $org_id AND center_id = $center_id AND status = 1 AND insurance_name IS NOT NULL")->fetchAll(PDO::FETCH_ASSOC);
+    $tar = $tenant_pdo->query("SELECT doctor_id, service_id, category_id, insurance_id, rate FROM doctor_tariff_master WHERE org_id = $org_id AND center_id = $center_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC);
+    
+    echo json_encode(['categories' => $cats, 'insurances' => $ins, 'tariffs' => $tar]);
+    exit;
+}
 
 // ==============================================================
 // SMART FINANCIAL YEAR LOGIC
@@ -48,9 +64,6 @@ function calculateAgeFromDob($dob, $as_of_date = null) {
 
 // AUTO-ADD REQUIRED COLUMNS
 try {
-    // SAME MOBILE NUMBER CAN BE SHARED BY MULTIPLE FAMILY MEMBERS.
-    // Remove any UNIQUE index on patient_master.mobile so direct registration
-    // of another family member with the same mobile does not fail.
     try {
         $idxStmt = $tenant_pdo->query("SHOW INDEX FROM patient_master");
         $mobileUniqueIndexes = [];
@@ -68,9 +81,7 @@ try {
             $safeKeyName = str_replace('`', '``', $keyName);
             $tenant_pdo->exec("ALTER TABLE patient_master DROP INDEX `{$safeKeyName}`");
         }
-    } catch (Exception $e) {
-        // Do not block registration if an optional schema cleanup fails.
-    }
+    } catch (Exception $e) { }
 
     $tenant_pdo->exec("ALTER TABLE patient_master ADD COLUMN IF NOT EXISTS dob DATE NULL AFTER fullname");
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS department_id INT NULL AFTER doctor_id");
@@ -86,16 +97,44 @@ try {
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(10,2) DEFAULT 0");
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) NOT NULL DEFAULT 0 AFTER discount_amount");
     $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS receipt_no BIGINT UNSIGNED NULL AFTER token_no");
+    // Ensure appointment_id exists on MySQL versions that do not support
+    // ALTER TABLE ... ADD COLUMN IF NOT EXISTS. This links one appointment
+    // to at most one OPD visit/bill and avoids the reported unknown-column error.
+    $appointmentColumnCheck = $tenant_pdo->prepare("
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'opd_visits'
+          AND COLUMN_NAME = 'appointment_id'
+    ");
+    $appointmentColumnCheck->execute();
+    if ((int)$appointmentColumnCheck->fetchColumn() === 0) {
+        $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN appointment_id INT NULL AFTER patient_id");
+    }
 
-    // Existing records were using token_no as the visible bill/receipt serial.
-    // Preserve those old receipt numbers in the new receipt_no column.
+    // Check index by name first so repeated page loads do not rely on a failing CREATE.
+    $appointmentIndexCheck = $tenant_pdo->prepare("
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'opd_visits'
+          AND INDEX_NAME = 'uq_opd_visits_appointment'
+    ");
+    $appointmentIndexCheck->execute();
+    if ((int)$appointmentIndexCheck->fetchColumn() === 0) {
+        try {
+            $tenant_pdo->exec("CREATE UNIQUE INDEX uq_opd_visits_appointment ON opd_visits (org_id, center_id, appointment_id)");
+        } catch (Exception $indexEx) {
+            // The application still performs a transaction-locked duplicate check below.
+        }
+    }
+
     $tenant_pdo->exec("
         UPDATE opd_visits
         SET receipt_no = token_no
         WHERE receipt_no IS NULL
     ");
 
-    // Backfill discount percentage for old rows.
     $tenant_pdo->exec("
         UPDATE opd_visits
         SET discount_percent = CASE
@@ -105,7 +144,6 @@ try {
         WHERE discount_percent = 0
     ");
 
-    // Normalize all old/new rows: 1 = Paid, 2 = Partial, 3 = Not Paid.
     $tenant_pdo->exec("
         UPDATE opd_visits
         SET payment_status = CASE
@@ -127,53 +165,34 @@ $token_generated = null;
 $org_id = (int)($_SESSION['org_id'] ?? 1);
 $center_id = (int)($_SESSION['center_id'] ?? 1);
 $org_name = $_SESSION['org_name'] ?? 'City Care Multispeciality Hospital';
+$embedded_mode = (isset($_GET['embedded']) && $_GET['embedded'] === '1');
+$followup_validity_days = 7; // Follow-up validity window; adjust here if hospital policy differs.
+
 
 
 // ============================================================
 // AJAX: FIND REGISTERED PATIENT BY MOBILE NUMBER
 // ============================================================
-// A mobile number is NOT a unique patient ID.
-// Multiple family members may share the same mobile number.
 if (isset($_GET['lookup_patient_mobile'])) {
     header('Content-Type: application/json; charset=utf-8');
 
     $lookup_mobile = preg_replace('/\D+/', '', (string)($_GET['lookup_patient_mobile'] ?? ''));
 
     if (strlen($lookup_mobile) !== 10) {
-        echo json_encode([
-            'success' => false,
-            'patients' => []
-        ], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['success' => false, 'patients' => []], JSON_UNESCAPED_UNICODE);
         exit;
     }
 
     try {
         $lookup_stmt = $tenant_pdo->prepare("
-            SELECT
-                patient_id,
-                uhid,
-                fullname,
-                mobile,
-                dob,
-                age,
-                gender
+            SELECT patient_id, uhid, fullname, mobile, dob, age, gender
             FROM patient_master
-            WHERE org_id = ?
-              AND center_id = ?
-              AND status = 1
-              AND (
-                    mobile = ?
-                    OR FIND_IN_SET(?, REPLACE(mobile, ' ', '')) > 0
-                  )
+            WHERE org_id = ? AND center_id = ? AND status = 1
+              AND (mobile = ? OR FIND_IN_SET(?, REPLACE(mobile, ' ', '')) > 0)
             ORDER BY patient_id DESC
         ");
 
-        $lookup_stmt->execute([
-            $org_id,
-            $center_id,
-            $lookup_mobile,
-            $lookup_mobile
-        ]);
+        $lookup_stmt->execute([$org_id, $center_id, $lookup_mobile, $lookup_mobile]);
 
         $patients = $lookup_stmt->fetchAll(PDO::FETCH_ASSOC);
         foreach ($patients as &$lookupPatient) {
@@ -182,16 +201,9 @@ if (isset($_GET['lookup_patient_mobile'])) {
         }
         unset($lookupPatient);
 
-        echo json_encode([
-            'success' => true,
-            'patients' => $patients
-        ], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['success' => true, 'patients' => $patients], JSON_UNESCAPED_UNICODE);
     } catch (Exception $e) {
-        echo json_encode([
-            'success' => false,
-            'patients' => [],
-            'error' => $e->getMessage()
-        ], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['success' => false, 'patients' => [], 'error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
     }
 
     exit;
@@ -219,6 +231,7 @@ try {
     if (!empty(trim($fetched_inst))) $receipt_instructions = trim($fetched_inst);
 } catch (Exception $e) {}
 
+// UHID is generated only during successful registration (not while booking an appointment), so unused appointments do not consume patient IDs.
 // --- SECURE UHID GENERATOR ---
 function generateSecureUHID($tenant_pdo, $center_id, $fy_code) {
     $org_prefix = 'MAX';
@@ -254,23 +267,55 @@ $appointment_id = (int)($_GET['appointment_id'] ?? 0);
 if ($appointment_id > 0 && $edit_visit_id <= 0) {
     try {
         $ap_stmt = $tenant_pdo->prepare("
-            SELECT a.*,
-                   p.uhid AS master_uhid,
-                   p.fullname AS master_fullname,
-                   p.mobile AS master_mobile,
-                   p.dob AS master_dob,
-                   p.age AS master_age,
-                   p.gender AS master_gender
+            SELECT a.*, p.uhid AS master_uhid, p.fullname AS master_fullname, p.mobile AS master_mobile, p.dob AS master_dob, p.age AS master_age, p.gender AS master_gender
             FROM opd_appointments a
             LEFT JOIN patient_master p ON a.uhid = p.uhid
-            WHERE a.appointment_id = ?
-              AND a.org_id = ?
-              AND a.center_id = ?
-            LIMIT 1
+            WHERE a.appointment_id = ? AND a.org_id = ? AND a.center_id = ? LIMIT 1
         ");
         $ap_stmt->execute([$appointment_id, $org_id, $center_id]);
         $appointment_prefill = $ap_stmt->fetch(PDO::FETCH_ASSOC) ?: null;
-    } catch (Exception $e) {}
+
+        // Backfill legacy appointments that were created before UHID-at-appointment was enabled.
+        if ($appointment_prefill && empty($appointment_prefill['master_uhid']) && empty($appointment_prefill['uhid'])) {
+            $tenant_pdo->beginTransaction();
+            $lockAppt = $tenant_pdo->prepare("SELECT appointment_id, uhid, patient_name, mobile, age, gender, appointment_date FROM opd_appointments WHERE appointment_id = ? AND org_id = ? AND center_id = ? LIMIT 1 FOR UPDATE");
+            $lockAppt->execute([$appointment_id, $org_id, $center_id]);
+            $lockedAppt = $lockAppt->fetch(PDO::FETCH_ASSOC);
+            if ($lockedAppt && empty($lockedAppt['uhid'])) {
+                $fyTs = strtotime((string)$lockedAppt['appointment_date']);
+                $fyYear = (int)date('Y', $fyTs); $fyMonth = (int)date('m', $fyTs);
+                $fyStart = $fyMonth >= 4 ? $fyYear : $fyYear - 1; $fyCode = substr((string)$fyStart, -2) . substr((string)($fyStart + 1), -2);
+                $orgPrefix = 'MAX'; $centerCode = 'LKO';
+                try { $x = $tenant_pdo->query("SELECT mnemonic FROM org_profile LIMIT 1")->fetchColumn(); if ($x) $orgPrefix = strtoupper(trim($x)); } catch (Exception $ignore) {}
+                try { $x = $tenant_pdo->prepare("SELECT center_code FROM master_centers WHERE center_id = ?"); $x->execute([$center_id]); $v = $x->fetchColumn(); if ($v) $centerCode = strtoupper(trim($v)); } catch (Exception $ignore) {}
+                $base = $orgPrefix . '-' . $centerCode . '-' . $fyCode . '-';
+                $last = $tenant_pdo->prepare("SELECT uhid FROM patient_master WHERE org_id = ? AND center_id = ? AND uhid LIKE ? ORDER BY patient_id DESC LIMIT 1 FOR UPDATE");
+                $last->execute([$org_id, $center_id, $base . '%']); $lastUhid = (string)($last->fetchColumn() ?: '');
+                $serial = $lastUhid !== '' ? ((int)substr($lastUhid, strlen($base)) + 1) : 1; $newUhid = $base . $serial;
+                $newPatient = $tenant_pdo->prepare("INSERT INTO patient_master (org_id, center_id, uhid, fullname, dob, gender, age, mobile, status) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 1)");
+                $newPatient->execute([$org_id, $center_id, $newUhid, $lockedAppt['patient_name'], $lockedAppt['gender'], (int)$lockedAppt['age'], preg_replace('/\D+/', '', (string)$lockedAppt['mobile'])]);
+                $tenant_pdo->prepare("UPDATE opd_appointments SET uhid = ? WHERE appointment_id = ? AND org_id = ? AND center_id = ? AND (uhid IS NULL OR uhid = '')")->execute([$newUhid, $appointment_id, $org_id, $center_id]);
+            }
+            $tenant_pdo->commit();
+            // Re-fetch the appointment with the newly linked UHID/patient master details.
+            $ap_stmt->execute([$appointment_id, $org_id, $center_id]);
+            $appointment_prefill = $ap_stmt->fetch(PDO::FETCH_ASSOC) ?: $appointment_prefill;
+        }
+    } catch (Exception $e) { if ($tenant_pdo->inTransaction()) $tenant_pdo->rollBack(); }
+}
+
+// Existing-patient follow-up eligibility for the selected doctor (default validity: 7 days).
+$followup_eligible = false;
+$followup_last_date = '';
+$prefill_uhid = trim((string)($appointment_prefill['master_uhid'] ?? $appointment_prefill['uhid'] ?? ''));
+$prefill_doctor_id = (int)($appointment_prefill['doctor_id'] ?? 0);
+if ($prefill_uhid !== '' && $prefill_doctor_id > 0) {
+    try {
+        $fu = $tenant_pdo->prepare("SELECT v.visit_date FROM opd_visits v JOIN patient_master p ON p.patient_id = v.patient_id WHERE p.uhid = ? AND v.org_id = ? AND v.center_id = ? AND v.doctor_id = ? AND v.visit_date <= CURDATE() AND v.visit_date >= DATE_SUB(CURDATE(), INTERVAL {$followup_validity_days} DAY) ORDER BY v.visit_date DESC, v.visit_id DESC LIMIT 1");
+        $fu->execute([$prefill_uhid, $org_id, $center_id, $prefill_doctor_id]);
+        $followup_last_date = (string)($fu->fetchColumn() ?: '');
+        $followup_eligible = $followup_last_date !== '';
+    } catch (Exception $e) { $followup_eligible = false; }
 }
 
 if ($edit_visit_id > 0) {
@@ -294,8 +339,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
     
     $age_post = trim((string)($_POST['age'] ?? ''));
 
-    // If Age is entered directly, convert it to a DOB first.
-    // Only DOB is stored in patient_master, so age can be recalculated every year.
     if ($dob === '' && $age_post !== '') {
         if (!preg_match('/^\\d{1,3}$/', $age_post)) {
             $err = "Please enter a valid age.";
@@ -317,13 +360,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
         }
     }
 
-    // Multiple mobile numbers handle logic
     $mobile_post = $_POST['mobile'] ?? [];
     $mobile = is_array($mobile_post) ? implode(', ', array_filter(array_map('trim', $mobile_post), fn($v) => $v !== '')) : trim((string)$mobile_post);
     
     $visit_date    = !empty($_POST['visit_date']) ? $_POST['visit_date'] : date('Y-m-d');
 
-    // DOB remains the source of truth after Age is normalized into DOB.
     $age = calculateAgeFromDob($dob, $visit_date);
     if ($age === null) {
         $err = "Please enter a valid Date of Birth or Age. DOB cannot be in the future.";
@@ -366,8 +407,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
     $post_edit_id  = (int)($_POST['post_edit_id'] ?? 0);
     $appointment_id = (int)($_POST['appointment_id'] ?? 0);
 
-    // PAYMENT DEFAULT: when receptionist does not select any payment mode,
-    // automatically treat the payable amount as CASH at save/receipt time.
     $payment_mode_lower = strtolower(trim($pay_mode));
     $is_payment_unselected = (
         $pay_mode === '' ||
@@ -384,7 +423,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
         ], JSON_UNESCAPED_UNICODE);
     }
 
-    // 1 = Paid, 2 = Partial, 3 = Not Paid.
     if ($payable <= 0) $pay_status = 1;
     elseif ($total_paid >= $payable) $pay_status = 1;
     elseif ($total_paid > 0) $pay_status = 2;
@@ -431,19 +469,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
 
                 $tenant_pdo->commit();
                 if (function_exists('set_flash_msg')) set_flash_msg("OPD Record updated successfully!");
-                header("Location: opd_registration.php");
+                header("Location: opd_registration.php" . ($embedded_mode ? "?embedded=1&saved=1" : ""));
                 exit;
             } else {
                 // INSERT NEW REGISTRATION
-                // IMPORTANT: A MOBILE NUMBER IS NOT A UNIQUE PATIENT ID.
-                // Multiple family members are allowed to share the same mobile number.
-                //
-                // Appointment flow:
-                //   1) Existing registered patient selected -> use that patient's UHID.
-                //   2) New family member appointment (uhid = NULL) -> create a NEW patient + UHID NOW, at registration.
-                //
-                // Direct registration without an appointment -> ALWAYS create a NEW patient + UHID,
-                // even when the mobile number already exists for another family member.
                 $patient_id = 0;
                 $uhid = '';
 
@@ -452,8 +481,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                         SELECT appointment_id, uhid, status
                         FROM opd_appointments
                         WHERE appointment_id = ? AND org_id = ? AND center_id = ?
-                        LIMIT 1
-                        FOR UPDATE
+                        LIMIT 1 FOR UPDATE
                     ");
                     $appt_lock->execute([$appointment_id, $org_id, $center_id]);
                     $appt_row = $appt_lock->fetch(PDO::FETCH_ASSOC);
@@ -462,15 +490,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                         throw new Exception("Appointment not found.");
                     }
 
-                    // Existing registered patient: keep the original patient record / UHID.
+                    // One appointment can create at most one OPD visit/bill.
+                    $dupVisit = $tenant_pdo->prepare("SELECT visit_id, receipt_no FROM opd_visits WHERE org_id = ? AND center_id = ? AND appointment_id = ? LIMIT 1 FOR UPDATE");
+                    $dupVisit->execute([$org_id, $center_id, $appointment_id]);
+                    $alreadyBilled = $dupVisit->fetch(PDO::FETCH_ASSOC);
+                    if ($alreadyBilled) {
+                        throw new Exception("IS APPOINTMENT KA OPD BILL PEHLE HI BAN CHUKA HAI (Receipt: " . (string)($alreadyBilled['receipt_no'] ?? $alreadyBilled['visit_id']) . "). Duplicate bill nahi banaya gaya.");
+                    }
+
                     if (!empty($appt_row['uhid'])) {
                         $appt_uhid = trim((string)$appt_row['uhid']);
                         $p_stmt = $tenant_pdo->prepare("
                             SELECT patient_id, uhid
                             FROM patient_master
                             WHERE uhid = ? AND org_id = ? AND center_id = ?
-                            LIMIT 1
-                            FOR UPDATE
+                            LIMIT 1 FOR UPDATE
                         ");
                         $p_stmt->execute([$appt_uhid, $org_id, $center_id]);
                         $existing_for_appt = $p_stmt->fetch(PDO::FETCH_ASSOC);
@@ -482,42 +516,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                         $patient_id = (int)$existing_for_appt['patient_id'];
                         $uhid = $existing_for_appt['uhid'];
                     } else {
-                        // NEW FAMILY MEMBER: create a separate patient row even if the mobile is already used.
                         $uhid = generateSecureUHID($tenant_pdo, $center_id, $current_fy_code);
                         $stmt = $tenant_pdo->prepare("
-                            INSERT INTO patient_master
-                                (org_id, center_id, uhid, fullname, dob, gender, age, mobile, status)
+                            INSERT INTO patient_master (org_id, center_id, uhid, fullname, dob, gender, age, mobile, status)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                         ");
                         $stmt->execute([$org_id, $center_id, $uhid, $fullname, $dob, $gender, $age, $mobile]);
                         $patient_id = (int)$tenant_pdo->lastInsertId();
                     }
                 } else {
-                    // DIRECT REGISTRATION:
-                    // If a registered patient was selected/found by mobile lookup,
-                    // continue with that existing patient and keep the same UHID.
-                    // Otherwise create a new patient. This still allows multiple
-                    // family members to share one mobile number.
-
                     $existing_patient_id = (int)($_POST['existing_patient_id'] ?? 0);
 
                     if ($existing_patient_id > 0) {
                         $existing_patient_stmt = $tenant_pdo->prepare("
                             SELECT patient_id, uhid
                             FROM patient_master
-                            WHERE patient_id = ?
-                              AND org_id = ?
-                              AND center_id = ?
-                              AND status = 1
-                            LIMIT 1
-                            FOR UPDATE
+                            WHERE patient_id = ? AND org_id = ? AND center_id = ? AND status = 1
+                            LIMIT 1 FOR UPDATE
                         ");
-                        $existing_patient_stmt->execute([
-                            $existing_patient_id,
-                            $org_id,
-                            $center_id
-                        ]);
-
+                        $existing_patient_stmt->execute([$existing_patient_id, $org_id, $center_id]);
                         $existing_patient = $existing_patient_stmt->fetch(PDO::FETCH_ASSOC);
 
                         if (!$existing_patient) {
@@ -527,67 +544,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                         $patient_id = (int)$existing_patient['patient_id'];
                         $uhid = (string)$existing_patient['uhid'];
 
-                        // Keep the master patient information updated with the
-                        // values currently shown on the registration screen.
                         $tenant_pdo->prepare("
                             UPDATE patient_master
                             SET fullname = ?, dob = ?, gender = ?, age = ?, mobile = ?
-                            WHERE patient_id = ?
-                              AND org_id = ?
-                              AND center_id = ?
-                        ")->execute([
-                            $fullname,
-                            $dob,
-                            $gender,
-                            $age,
-                            $mobile,
-                            $patient_id,
-                            $org_id,
-                            $center_id
-                        ]);
+                            WHERE patient_id = ? AND org_id = ? AND center_id = ?
+                        ")->execute([$fullname, $dob, $gender, $age, $mobile, $patient_id, $org_id, $center_id]);
                     } else {
-                        // New patient / new family member.
                         $uhid = generateSecureUHID($tenant_pdo, $center_id, $current_fy_code);
-
                         $stmt = $tenant_pdo->prepare("
-                            INSERT INTO patient_master
-                                (org_id, center_id, uhid, fullname, dob, gender, age, mobile, status)
+                            INSERT INTO patient_master (org_id, center_id, uhid, fullname, dob, gender, age, mobile, status)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                         ");
-                        $stmt->execute([
-                            $org_id,
-                            $center_id,
-                            $uhid,
-                            $fullname,
-                            $dob,
-                            $gender,
-                            $age,
-                            $mobile
-                        ]);
+                        $stmt->execute([$org_id, $center_id, $uhid, $fullname, $dob, $gender, $age, $mobile]);
                         $patient_id = (int)$tenant_pdo->lastInsertId();
                     }
                 }
 
-                // ==========================================================
-                // SEPARATE TOKEN NO. AND RECEIPT NO.
-                //
-                // TOKEN NO.   = DAILY OPD QUEUE TOKEN (1, 2, 3...)
-                // RECEIPT NO. = FINANCIAL-YEAR BILL/RECEIPT SERIAL (1, 2, 3...)
-                // ==========================================================
+                // Backward-compatible duplicate guard for bills created before appointment_id was added.
+                if ($appointment_id > 0 && isset($appt_row) && ($appt_row['status'] ?? '') === 'Checked In') {
+                    $legacyDup = $tenant_pdo->prepare("SELECT visit_id, receipt_no FROM opd_visits WHERE org_id = ? AND center_id = ? AND patient_id = ? AND doctor_id = ? AND visit_date = ? LIMIT 1 FOR UPDATE");
+                    $legacyDup->execute([$org_id, $center_id, $patient_id, $doctor_id, $visit_date]);
+                    $legacyExisting = $legacyDup->fetch(PDO::FETCH_ASSOC);
+                    if ($legacyExisting) {
+                        throw new Exception("IS APPOINTMENT KA BILL/OPD VISIT PEHLE HI SAVE HAI (Receipt: " . (string)($legacyExisting['receipt_no'] ?? $legacyExisting['visit_id']) . "). Duplicate entry rok di gayi.");
+                    }
+                }
 
-                // Daily token: new token for the patient's queue position.
-                // Existing historical rows remain untouched.
-                $token_stmt = $tenant_pdo->prepare("
-                    SELECT COUNT(*)
-                    FROM opd_visits
-                    WHERE visit_date = ?
-                      AND org_id = ?
-                      AND center_id = ?
-                ");
+                // Billing mode is enforced server-side. Follow-up is free only when the same patient
+                // has a visit with the same doctor within the configured validity window.
+                $billing_mode = (string)($_POST['billing_mode'] ?? 'regular');
+                if ($billing_mode === 'followup') {
+                    $fuCheck = $tenant_pdo->prepare("SELECT v.visit_date FROM opd_visits v WHERE v.patient_id = ? AND v.org_id = ? AND v.center_id = ? AND v.doctor_id = ? AND v.visit_date <= ? AND v.visit_date >= DATE_SUB(?, INTERVAL {$followup_validity_days} DAY) ORDER BY v.visit_date DESC, v.visit_id DESC LIMIT 1");
+                    $fuCheck->execute([$patient_id, $org_id, $center_id, $doctor_id, $visit_date, $visit_date]);
+                    $validFollowupDate = (string)($fuCheck->fetchColumn() ?: '');
+                    if ($validFollowupDate === '') {
+                        throw new Exception("Follow-up without consultation fee is allowed only within {$followup_validity_days} days of a previous visit with the same doctor.");
+                    }
+                    $fee = 0;
+                    $discount = 0;
+                    $discount_percent = 0;
+                    $payable = 0;
+                    $total_paid = 0;
+                    $change_ret = 0;
+                    $pay_mode = 'FOLLOW-UP - NO CHARGE';
+                    $pay_breakdown = json_encode(['Follow-up' => ['amount' => 0]], JSON_UNESCAPED_UNICODE);
+                    $pay_status = 1;
+                }
+
+                $token_stmt = $tenant_pdo->prepare("SELECT COUNT(*) FROM opd_visits WHERE visit_date = ? AND org_id = ? AND center_id = ?");
                 $token_stmt->execute([$visit_date, $org_id, $center_id]);
                 $next_token = ((int)$token_stmt->fetchColumn()) + 1;
 
-                // Financial-year receipt number.
                 $visitTs = strtotime($visit_date);
                 $visitYear = (int)date('Y', $visitTs);
                 $visitMonth = (int)date('m', $visitTs);
@@ -600,42 +607,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     $fyEndDate   = $visitYear . '-03-31';
                 }
 
-                // Receipt No. is independent from Token No.
-                // It continues for the complete financial year.
-                $receipt_stmt = $tenant_pdo->prepare("
-                    SELECT COALESCE(MAX(receipt_no), 0)
-                    FROM opd_visits
-                    WHERE visit_date BETWEEN ? AND ?
-                      AND org_id = ?
-                      AND center_id = ?
-                ");
+                $receipt_stmt = $tenant_pdo->prepare("SELECT COALESCE(MAX(receipt_no), 0) FROM opd_visits WHERE visit_date BETWEEN ? AND ? AND org_id = ? AND center_id = ?");
                 $receipt_stmt->execute([$fyStartDate, $fyEndDate, $org_id, $center_id]);
                 $last_receipt_no = (int)$receipt_stmt->fetchColumn();
                 $next_receipt_no = $last_receipt_no + 1;
 
                 $v_stmt = $tenant_pdo->prepare("
-                    INSERT INTO opd_visits
-                    (
-                        org_id, center_id, patient_id, doctor_id, department_id, service_id,
+                    INSERT INTO opd_visits (
+                        org_id, center_id, patient_id, appointment_id, doctor_id, department_id, service_id,
                         category_id, insurance_id, token_no, receipt_no, visit_date,
                         consultation_fee, discount_amount, discount_percent, remark,
-                        payment_mode, amount_paid, change_return, payment_breakdown,
-                        payment_status, status
-                    )
-                    VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Waiting')
+                        payment_mode, amount_paid, change_return, payment_breakdown, payment_status, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Waiting')
                 ");
 
-                if (count([
-                    $org_id, $center_id, $patient_id, $doctor_id, $department_id, $service_id,
-                    $category_id, $insurance_id, $next_token, $next_receipt_no, $visit_date,
-                    $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid,
-                    $change_ret, $pay_breakdown, $pay_status
-                ]) !== 20) {
-                    throw new Exception("OPD VISITS INSERT PARAMETER COUNT ERROR");
-                }
-
-                $v_stmt->execute([$org_id, $center_id, $patient_id, $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $next_token, $next_receipt_no, $visit_date, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status]);
+                $v_stmt->execute([$org_id, $center_id, $patient_id, ($appointment_id > 0 ? $appointment_id : null), $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $next_token, $next_receipt_no, $visit_date, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status]);
 
                 if ($appointment_id > 0) {
                     $tenant_pdo->prepare("
@@ -646,7 +632,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                 }
 
                 $tenant_pdo->commit();
-                                $display_token = (string)$next_token;
+                $display_token = (string)$next_token;
                 $display_receipt = $display_fy . '/' . str_pad($next_receipt_no, 2, '0', STR_PAD_LEFT);
                 $doc_name = "General OPD";
                 if ($doctor_id > 0) {
@@ -655,7 +641,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     $doc_name = $d_stmt->fetchColumn() ?: $doc_name;
                 }
 
-                // Prepare Token Generated Data for Modal
                 $token_generated = [
                     'token'        => $next_token,
                     'token_display'=> $display_token,
@@ -702,243 +687,77 @@ $today_date = date('Y-m-d');
 $today_visits = [];
 
 try {
-    // BILLING LIST: show ALL OPD bills for this organisation/center.
-    // Never limit this list to today's date.
-    //
-    // DOB is used when available so the displayed age stays current.
-    // If the DOB column is unavailable on an older database, fall back to
-    // the existing age column so the billing list NEVER disappears.
     try {
         $tenant_pdo->exec("ALTER TABLE patient_master ADD COLUMN IF NOT EXISTS dob DATE NULL AFTER fullname");
-    } catch (Exception $schemaEx) {
-        // Older MySQL versions may not support ADD COLUMN IF NOT EXISTS.
-        // The SELECT below has a safe fallback in that case.
-    }
+    } catch (Exception $schemaEx) { }
 
     try {
         $tv_stmt = $tenant_pdo->prepare("
-            SELECT v.*,
-                   p.uhid,
-                   p.fullname,
-                   p.mobile,
-                   p.dob,
-                   CASE
-                       WHEN p.dob IS NOT NULL AND p.dob <> ''
-                       THEN TIMESTAMPDIFF(YEAR, p.dob, CURDATE())
-                       ELSE p.age
-                   END AS age,
-                   p.gender,
-                   d.full_name AS doctor_name
+            SELECT v.*, p.uhid, p.fullname, p.mobile, p.dob,
+                   CASE WHEN p.dob IS NOT NULL AND p.dob <> '' THEN TIMESTAMPDIFF(YEAR, p.dob, CURDATE()) ELSE p.age END AS age,
+                   p.gender, d.full_name AS doctor_name
             FROM opd_visits v
-            JOIN patient_master p
-              ON v.patient_id = p.patient_id
-            LEFT JOIN master_doctors d
-              ON v.doctor_id = d.id
-            WHERE v.org_id = ?
-              AND v.center_id = ?
+            JOIN patient_master p ON v.patient_id = p.patient_id
+            LEFT JOIN master_doctors d ON v.doctor_id = d.id
+            WHERE v.org_id = ? AND v.center_id = ?
             ORDER BY v.visit_id DESC
         ");
         $tv_stmt->execute([$org_id, $center_id]);
         $today_visits = $tv_stmt->fetchAll() ?: [];
     } catch (Exception $billingEx) {
-        // IMPORTANT: If the DOB column is not available for any reason,
-        // still show the complete existing billing list.
         $tv_stmt = $tenant_pdo->prepare("
-            SELECT v.*,
-                   p.uhid,
-                   p.fullname,
-                   p.mobile,
-                   p.age,
-                   p.gender,
-                   d.full_name AS doctor_name
+            SELECT v.*, p.uhid, p.fullname, p.mobile, p.age, p.gender, d.full_name AS doctor_name
             FROM opd_visits v
-            JOIN patient_master p
-              ON v.patient_id = p.patient_id
-            LEFT JOIN master_doctors d
-              ON v.doctor_id = d.id
-            WHERE v.org_id = ?
-              AND v.center_id = ?
+            JOIN patient_master p ON v.patient_id = p.patient_id
+            LEFT JOIN master_doctors d ON v.doctor_id = d.id
+            WHERE v.org_id = ? AND v.center_id = ?
             ORDER BY v.visit_id DESC
         ");
         $tv_stmt->execute([$org_id, $center_id]);
         $today_visits = $tv_stmt->fetchAll() ?: [];
     }
 } catch (Exception $e) {
-    // Keep the page working even if the billing query has an unexpected issue.
     $today_visits = [];
 }
 
-require_once __DIR__ . '/layout_header.php';
+if ($embedded_mode) {
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>OPD Payment</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"><style>body{margin:0!important;padding:12px!important;background:#fff!important;overflow-x:hidden!important}.main-content,main,.content-wrapper,.page-content{margin:0!important;padding:0!important;width:100%!important;max-width:100%!important}.sidebar,.sidebar-wrapper,.topbar,.navbar,.app-sidebar,.main-sidebar,.clinic-sidebar,.layout-sidebar,header.app-header{display:none!important}body>.container,body>.container-fluid{width:100%!important;max-width:100%!important;padding:0!important}</style></head><body class="opd-embedded-frame">';
+} else {
+    require_once __DIR__ . '/layout_header.php';
+}
 ?>
 
 <style>
-/* =========================================================
-   GLOBAL UI: DISPLAY TEXT IN UPPERCASE
-   User-entered text fields are also normalized to uppercase
-   by JavaScript, except numeric/date/mobile fields.
-   ========================================================= */
-body,
-.card,
-.card-header,
-.card-body,
-.form-label,
-.form-select,
-.form-control,
-.form-check-label,
-.btn,
-.badge,
-.table,
-.modal,
-.modal-title,
-.modal-body,
-.modal-footer,
-.alert,
-.small,
-.text-muted,
-.text-secondary,
-.text-primary,
-.text-danger,
-.text-success,
-label,
-th,
-td {
-    text-transform: uppercase;
-}
-
-input[type="number"],
-input[type="date"],
-input[inputmode="numeric"],
-.mob-input,
-#visit_date_display {
-    text-transform: none;
-}
-
-.visit-date-picker-wrap {
-    position: relative;
-}
-
-.native-date-picker {
-    position: absolute;
-    right: 0;
-    top: 0;
-    width: 38px;
-    height: 31px;
-    opacity: 0;
-    cursor: pointer;
-    z-index: 10;
-    pointer-events: auto;
-}
-
-/* Receipt is always uppercase for printed/displayed content. */
-.receipt-preview-wrap,
-.receipt-preview-wrap * {
-    text-transform: uppercase;
-}
-
+body, .card, .card-header, .card-body, .form-label, .form-select, .form-control, .form-check-label,
+.btn, .badge, .table, .modal, .modal-title, .modal-body, .modal-footer, .alert, .small, .text-muted,
+.text-secondary, .text-primary, .text-danger, .text-success, label, th, td { text-transform: uppercase; }
+input[type="number"], input[type="date"], input[inputmode="numeric"], .mob-input, #visit_date_display { text-transform: none; }
+.visit-date-picker-wrap { position: relative; }
+.native-date-picker { position: absolute; right: 0; top: 0; width: 38px; height: 31px; opacity: 0; cursor: pointer; z-index: 10; pointer-events: auto; }
+.receipt-preview-wrap, .receipt-preview-wrap * { text-transform: uppercase; }
 @media print {
     @page { size: A5 portrait; margin: 0; }
     body * { visibility: hidden; }
     #hospitalReceipt, #hospitalReceipt * { visibility: visible; }
-    #hospitalReceipt { 
-        position: absolute; left: 0; top: 0; width: 148mm; height: 210mm; /* Strict A5 Size */
-        margin: 0; padding: 6mm; box-sizing: border-box; background: #fff; 
-        border: none !important; box-shadow: none !important; overflow: hidden;
-    }
+    #hospitalReceipt { position: absolute; left: 0; top: 0; width: 148mm; height: 210mm; margin: 0; padding: 6mm; box-sizing: border-box; background: #fff; border: none !important; box-shadow: none !important; overflow: hidden; }
     .no-print { display: none !important; }
 }
 .tariff-box { background-color: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px; padding: 15px; text-align: center; }
-.patient-lookup-box {
-    font-size: 10px;
-    line-height: 1.25;
-}
-
-#patientSelectionModal .modal-content {
-    border: 0;
-    border-radius: 14px;
-    box-shadow: 0 15px 45px rgba(15, 23, 42, .22);
-}
-#patientSelectionModal .modal-header {
-    background: #eff6ff;
-    border-bottom: 1px solid #dbeafe;
-}
-.patient-popup-item {
-    width: 100%;
-    text-align: left;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    background: #fff;
-    padding: 10px 12px;
-    margin-bottom: 8px;
-    transition: .15s ease;
-    cursor: pointer;
-}
-.patient-popup-item:hover {
-    border-color: #60a5fa;
-    background: #f8fbff;
-    transform: translateY(-1px);
-}
-.patient-popup-item .name {
-    font-weight: 900;
-    font-size: 12px;
-    color: #0f172a;
-}
-.patient-popup-item .meta {
-    font-size: 10px;
-    color: #64748b;
-    margin-top: 3px;
-}
-.patient-popup-item .uhid {
-    font-size: 10px;
-    color: #2563eb;
-    font-weight: 800;
-    margin-top: 4px;
-}
-.patient-lookup-box .patient-option {
-    cursor: pointer;
-}
-.patient-lookup-box .patient-option:hover {
-    background: #eef6ff;
-}
-#patient_lookup_result {
-    position: relative;
-    z-index: 20;
-}
-.modal-a5 {
-    width: 158mm;
-    max-width: calc(100vw - 24px);
-    margin: 20px auto;
-}
-.modal-a5 .modal-content {
-    max-height: calc(100vh - 40px);
-    overflow: hidden;
-    border-radius: 10px;
-}
-.modal-a5 .modal-body {
-    overflow: auto;
-    padding: 8px;
-    background: #e9ecef;
-}
-.receipt-preview-wrap {
-    width: 148mm;
-    height: 210mm;
-    max-width: none;
-    min-width: 148mm;
-    margin: 0 auto;
-    padding: 8mm;
-    background: #fff;
-    box-shadow: 0 2px 14px rgba(0,0,0,.18);
-    overflow: hidden;
-    box-sizing: border-box;
-}
-.receipt-preview-wrap .receipt-sheet {
-    width: 100%;
-    max-width: none;
-    min-height: 100%;
-    margin: 0;
-    font-family: Arial, sans-serif;
-    color: #111;
-    font-size: 10.5px;
-}
+.patient-lookup-box { font-size: 10px; line-height: 1.25; }
+#patientSelectionModal .modal-content { border: 0; border-radius: 14px; box-shadow: 0 15px 45px rgba(15, 23, 42, .22); }
+#patientSelectionModal .modal-header { background: #eff6ff; border-bottom: 1px solid #dbeafe; }
+.patient-popup-item { width: 100%; text-align: left; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; padding: 10px 12px; margin-bottom: 8px; transition: .15s ease; cursor: pointer; }
+.patient-popup-item:hover { border-color: #60a5fa; background: #f8fbff; transform: translateY(-1px); }
+.patient-popup-item .name { font-weight: 900; font-size: 12px; color: #0f172a; }
+.patient-popup-item .meta, .patient-popup-item .uhid { font-size: 10px; color: #64748b; margin-top: 3px; }
+.patient-popup-item .uhid { color: #2563eb; font-weight: 800; margin-top: 4px; }
+.patient-lookup-box .patient-option { cursor: pointer; }
+.patient-lookup-box .patient-option:hover { background: #eef6ff; }
+#patient_lookup_result { position: relative; z-index: 20; }
+.modal-a5 { width: 158mm; max-width: calc(100vw - 24px); margin: 20px auto; }
+.modal-a5 .modal-content { max-height: calc(100vh - 40px); overflow: hidden; border-radius: 10px; }
+.modal-a5 .modal-body { overflow: auto; padding: 8px; background: #e9ecef; }
+.receipt-preview-wrap { width: 148mm; height: 210mm; max-width: none; min-width: 148mm; margin: 0 auto; padding: 8mm; background: #fff; box-shadow: 0 2px 14px rgba(0,0,0,.18); overflow: hidden; box-sizing: border-box; }
 .receipt-preview-wrap .receipt-sheet { width:100%; max-width:138mm; margin:0 auto; font-family:Arial,sans-serif; color:#111; font-size:11px; }
 .receipt-preview-wrap .receipt-header { text-align:center; border-bottom:2px solid #111; padding-bottom:8px; margin-bottom:9px; }
 .receipt-preview-wrap .hospital { font-size:18px; font-weight:800; text-transform:uppercase; }
@@ -958,389 +777,173 @@ input[inputmode="numeric"],
 .receipt-preview-wrap .discount { color:#c62828; }
 .receipt-preview-wrap .grand td { font-weight:800; background:#f3f4f6; }
 .receipt-preview-wrap .instructions { margin-top:12px; padding-top:7px; border-top:1px dashed #999; font-size:9px; line-height:1.45; }
-
-@media (max-width: 800px) {
-    .modal-a5 {
-        width: calc(100vw - 16px);
-        max-width: calc(100vw - 16px);
-        margin: 8px auto;
-    }
-    .modal-a5 .modal-content {
-        max-height: calc(100vh - 16px);
-    }
-    .modal-a5 .modal-body {
-        padding: 4px;
-    }
-    .receipt-preview-wrap {
-        width: 148mm;
-        height: 210mm;
-        transform-origin: top left;
-        /* The modal can scroll horizontally/vertically on smaller screens. */
-    }
-}
-
-/* =========================================================
-   ACTION BUTTON ALIGNMENT
-   Keep PRINT and EDIT buttons perfectly centered in the Actions cell.
-   ========================================================= */
-.no-print #parcheTable td.text-end.pe-3 {
-    vertical-align: middle !important;
-    white-space: nowrap;
-}
-
-.no-print #parcheTable td.text-end.pe-3 > .btn,
-.no-print #parcheTable td.text-end.pe-3 > a.btn {
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    vertical-align: middle !important;
-    position: relative !important;
-    top: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
-    line-height: 1 !important;
-}
-
-.no-print #parcheTable td.text-end.pe-3 > a.btn {
-    margin-left: 4px !important;
-}
-
-/* =========================================================
-   COMPACT OPD UI OVERRIDES
-   Keeps existing functionality unchanged.
-   ========================================================= */
-.no-print .card {
-    border-radius: 8px !important;
-}
-
-.no-print .card-header,
-.no-print > .col-12 > .card > .py-2 {
-    min-height: 36px;
-    padding: 6px 10px !important;
-}
-
-.no-print .card-body {
-    padding: 10px !important;
-}
-
-/* tighter bootstrap gutters */
-.no-print .row.g-3 {
-    --bs-gutter-x: .65rem;
-    --bs-gutter-y: .55rem;
-}
-
-.no-print .row.g-2 {
-    --bs-gutter-x: .5rem;
-    --bs-gutter-y: .4rem;
-}
-
-.no-print .form-label {
-    font-size: 10px !important;
-    line-height: 1.15;
-    margin-bottom: 3px !important;
-}
-
-.no-print .form-control,
-.no-print .form-select,
-.no-print .input-group-text,
-.no-print .btn {
-    min-height: 30px;
-    height: 30px;
-    font-size: 11px !important;
-    padding-top: 3px;
-    padding-bottom: 3px;
-}
-
-.no-print .input-group-sm > .form-control,
-.no-print .input-group-sm > .form-select,
-.no-print .input-group-sm > .input-group-text,
-.no-print .input-group-sm > .btn {
-    min-height: 30px;
-    height: 30px;
-}
-
-.no-print .form-control::placeholder {
-    font-size: 10px;
-}
-
-.no-print .form-text,
-.no-print small {
-    line-height: 1.15;
-}
-
-.no-print #mobile_wrapper .mob-row {
-    margin-bottom: 3px !important;
-}
-
-.no-print #mobile_wrapper .input-group-text {
-    min-width: 40px !important;
-    font-size: 9px !important;
-}
-
-.no-print #patient_lookup_result {
-    font-size: 10px;
-}
-
-.no-print .border-bottom.pb-3 {
-    padding-bottom: 8px !important;
-    margin-bottom: 8px !important;
-}
-
-/* Fee / payment panel: compact instead of large box */
-.no-print .tariff-box {
-    padding: 8px 10px !important;
-    border-radius: 7px !important;
-}
-
-.no-print .tariff-box .text-secondary {
-    font-size: 9px !important;
-    line-height: 1.1;
-}
-
-.no-print #display_tariff_fee {
-    font-size: 1.45rem !important;
-    line-height: 1;
-    margin: 4px 0 8px !important;
-}
-
-.no-print .tariff-box .btn {
-    margin-bottom: 5px !important;
-}
-
-.no-print .tariff-box .btn-success {
-    padding-top: 5px !important;
-    padding-bottom: 5px !important;
-}
-
-/* OPD bills table */
-.no-print #parcheTable {
-    font-size: 10px !important;
-}
-
-.no-print #parcheTable th,
-.no-print #parcheTable td {
-    padding: 5px 6px !important;
-    line-height: 1.15;
-    white-space: nowrap;
-}
-
-.no-print #parcheTable th {
-    font-size: 9px !important;
-    font-weight: 700;
-}
-
-.no-print #parcheTable td .fs-6 {
-    font-size: 12px !important;
-}
-
-.no-print #parcheTable .btn {
-    min-width: 28px;
-    padding-left: 6px !important;
-    padding-right: 6px !important;
-}
-
-.no-print #searchParcheInput {
-    max-width: 240px;
-}
-
-/* Registration section spacing */
-.no-print #opdForm > .row {
-    margin-bottom: 6px !important;
-}
-
-/* Registration top row alignment */
-.no-print #opdForm > .row:first-of-type {
-    align-items: flex-start;
-}
-
-.no-print #opdForm > .row:first-of-type > [class*="col-md-"] {
-    align-self: flex-start;
-}
-
-/* Keep UHID, Mobile and Gender controls on the same top baseline. */
-.no-print #patient_uhid,
-.no-print #gender,
-.no-print #primary_mobile {
-    margin-top: 0 !important;
-}
-
-.no-print #mobile_wrapper .mob-row {
-    margin-top: 0 !important;
-}
-
-/* Mobile gets extra horizontal space; helper text stays below the input. */
-.no-print #mobile_wrapper .mob-input {
-    min-width: 0;
-}
-
-.no-print #mobile_wrapper .input-group {
-    width: 100%;
-}
-
-.no-print #opdForm .mb-3 {
-    margin-bottom: 7px !important;
-}
-
-.no-print #opdForm .mb-2 {
-    margin-bottom: 5px !important;
-}
-
-/* Patient-selection popup */
-#patientSelectionModal .modal-header {
-    padding: 8px 10px !important;
-}
-
-#patientSelectionModal .modal-body {
-    padding: 10px !important;
-}
-
-#patientSelectionModal .patient-popup-item {
-    padding: 7px 9px;
-    margin-bottom: 5px;
-    border-radius: 7px;
-}
-
-#patientSelectionModal .patient-popup-item .name {
-    font-size: 11px;
-}
-
-#patientSelectionModal .patient-popup-item .meta,
-#patientSelectionModal .patient-popup-item .uhid {
-    font-size: 9px;
-}
-
-/* Payment modal compact */
-#paymentModal .modal-content {
-    border-radius: 8px !important;
-}
-
-#paymentModal .modal-header {
-    padding: 6px 10px !important;
-}
-
-#paymentModal .modal-body {
-    padding: 10px !important;
-}
-
-#paymentModal .row.g-2 {
-    --bs-gutter-x: .5rem;
-    --bs-gutter-y: .4rem;
-}
-
-#paymentModal .mb-3 {
-    margin-bottom: 7px !important;
-}
-
-#paymentModal .mb-2 {
-    margin-bottom: 5px !important;
-}
-
-#paymentModal .p-2 {
-    padding: 6px !important;
-}
-
-/* Success popup compact */
-#successPrintModal .modal-body {
-    padding: 14px !important;
-}
-
-#successPrintModal .mb-3 {
-    margin-bottom: 7px !important;
-}
-
-#successPrintModal .row.g-2 {
-    --bs-gutter-x: .4rem;
-    --bs-gutter-y: .4rem;
-}
-
-#successPrintModal .bg-light.rounded-3 {
-    padding: 6px !important;
-    border-radius: 6px !important;
-}
-
-#successPrintModal h4 {
-    font-size: 1.2rem !important;
-}
-
-#successPrintModal .btn {
-    min-height: 30px;
-    height: 30px;
-}
-
-
-/* EXTRA COMPACT DATE CONTROLS ONLY */
-.no-print #visit_date_display,
-.no-print #dob_display {
-    height: 25px !important;
-    min-height: 25px !important;
-    font-size: 9px !important;
-    padding: 1px 5px !important;
-}
-.no-print #visit_date_calendar_btn,
-.no-print #dob_calendar_btn {
-    height: 25px !important;
-    min-height: 25px !important;
-    width: 27px !important;
-    padding: 1px 4px !important;
-}
+@media (max-width: 800px) { .modal-a5 { width: calc(100vw - 16px); max-width: calc(100vw - 16px); margin: 8px auto; } .modal-a5 .modal-content { max-height: calc(100vh - 16px); } .modal-a5 .modal-body { padding: 4px; } .receipt-preview-wrap { width: 148mm; height: 210mm; transform-origin: top left; } }
+.no-print #parcheTable td.text-end.pe-3 { vertical-align: middle !important; white-space: nowrap; }
+.no-print #parcheTable td.text-end.pe-3 > .btn, .no-print #parcheTable td.text-end.pe-3 > a.btn { display: inline-flex !important; align-items: center !important; justify-content: center !important; vertical-align: middle !important; position: relative !important; top: 0 !important; margin-top: 0 !important; margin-bottom: 0 !important; line-height: 1 !important; }
+.no-print #parcheTable td.text-end.pe-3 > a.btn { margin-left: 4px !important; }
+.no-print .card { border-radius: 8px !important; }
+.no-print .card-header, .no-print > .col-12 > .card > .py-2 { min-height: 36px; padding: 6px 10px !important; }
+.no-print .card-body { padding: 10px !important; }
+.no-print .row.g-3 { --bs-gutter-x: .65rem; --bs-gutter-y: .55rem; }
+.no-print .row.g-2 { --bs-gutter-x: .5rem; --bs-gutter-y: .4rem; }
+.no-print .form-label { font-size: 10px !important; line-height: 1.15; margin-bottom: 3px !important; }
+.no-print .form-control, .no-print .form-select, .no-print .input-group-text, .no-print .btn { min-height: 30px; height: 30px; font-size: 11px !important; padding-top: 3px; padding-bottom: 3px; }
+.no-print .input-group-sm > .form-control, .no-print .input-group-sm > .form-select, .no-print .input-group-sm > .input-group-text, .no-print .input-group-sm > .btn { min-height: 30px; height: 30px; }
+.no-print .form-control::placeholder { font-size: 10px; }
+.no-print .form-text, .no-print small { line-height: 1.15; }
+.no-print #mobile_wrapper .mob-row { margin-bottom: 3px !important; }
+.no-print #mobile_wrapper .input-group-text { min-width: 40px !important; font-size: 9px !important; }
+.no-print #patient_lookup_result { font-size: 10px; }
+.no-print .border-bottom.pb-3 { padding-bottom: 8px !important; margin-bottom: 8px !important; }
+.no-print .tariff-box { padding: 8px 10px !important; border-radius: 7px !important; }
+.no-print .tariff-box .text-secondary { font-size: 9px !important; line-height: 1.1; }
+.no-print #display_tariff_fee { font-size: 1.45rem !important; line-height: 1; margin: 4px 0 8px !important; }
+.no-print .tariff-box .btn { margin-bottom: 5px !important; }
+.no-print .tariff-box .btn-success { padding-top: 5px !important; padding-bottom: 5px !important; }
+.no-print #parcheTable { font-size: 10px !important; }
+.no-print #parcheTable th, .no-print #parcheTable td { padding: 5px 6px !important; line-height: 1.15; white-space: nowrap; }
+.no-print #parcheTable th { font-size: 9px !important; font-weight: 700; }
+.no-print #parcheTable td .fs-6 { font-size: 12px !important; }
+.no-print #parcheTable .btn { min-width: 28px; padding-left: 6px !important; padding-right: 6px !important; }
+.no-print #searchParcheInput { max-width: 240px; }
+.no-print #opdForm > .row { margin-bottom: 6px !important; }
+.no-print #opdForm > .row:first-of-type { align-items: flex-start; }
+.no-print #opdForm > .row:first-of-type > [class*="col-md-"] { align-self: flex-start; }
+.no-print #patient_uhid, .no-print #gender, .no-print #primary_mobile { margin-top: 0 !important; }
+.no-print #mobile_wrapper .mob-row { margin-top: 0 !important; }
+.no-print #mobile_wrapper .mob-input { min-width: 0; }
+.no-print #mobile_wrapper .input-group { width: 100%; }
+.no-print #opdForm .mb-3 { margin-bottom: 7px !important; }
+.no-print #opdForm .mb-2 { margin-bottom: 5px !important; }
+#patientSelectionModal .modal-header { padding: 8px 10px !important; }
+#patientSelectionModal .modal-body { padding: 10px !important; }
+#patientSelectionModal .patient-popup-item { padding: 7px 9px; margin-bottom: 5px; border-radius: 7px; }
+#patientSelectionModal .patient-popup-item .name { font-size: 11px; }
+#patientSelectionModal .patient-popup-item .meta, #patientSelectionModal .patient-popup-item .uhid { font-size: 9px; }
+#paymentModal .modal-content { border-radius: 8px !important; }
+#paymentModal .modal-header { padding: 6px 10px !important; }
+#paymentModal .modal-body { padding: 10px !important; }
+#paymentModal .row.g-2 { --bs-gutter-x: .5rem; --bs-gutter-y: .4rem; }
+#paymentModal .mb-3 { margin-bottom: 7px !important; }
+#paymentModal .mb-2 { margin-bottom: 5px !important; }
+#paymentModal .p-2 { padding: 6px !important; }
+#successPrintModal .modal-body { padding: 14px !important; }
+#successPrintModal .mb-3 { margin-bottom: 7px !important; }
+#successPrintModal .row.g-2 { --bs-gutter-x: .4rem; --bs-gutter-y: .4rem; }
+#successPrintModal .bg-light.rounded-3 { padding: 6px !important; border-radius: 6px !important; }
+#successPrintModal h4 { font-size: 1.2rem !important; }
+#successPrintModal .btn { min-height: 30px; height: 30px; }
+.no-print #visit_date_display, .no-print #dob_display { height: 25px !important; min-height: 25px !important; font-size: 9px !important; padding: 1px 5px !important; }
+.no-print #visit_date_calendar_btn, .no-print #dob_calendar_btn { height: 25px !important; min-height: 25px !important; width: 27px !important; padding: 1px 4px !important; }
 .no-print #dob_display { text-transform: none !important; }
+.no-print .dob-age-row { display: flex; align-items: flex-start; gap: 6px; width: 100%; }
+.no-print .dob-age-row .dob-control { width: 185px !important; max-width: 185px !important; flex: 0 0 185px !important; min-width: 185px !important; }
+.no-print .dob-age-row .dob-control .input-group { width: 185px !important; max-width: 185px !important; }
+.no-print .dob-age-row .dob-control #dob_display { width: 158px !important; max-width: 158px !important; flex: 0 0 158px !important; }
+.no-print .dob-age-row .age-control { width: 92px; flex: 0 0 92px; }
+.no-print .dob-age-row .age-entry-label { display: none !important; }
+.no-print .dob-age-row .age-control { width: 92px !important; flex: 0 0 92px !important; padding-top: 0 !important; margin-top: 0 !important; }
+.no-print .dob-age-row .age-control .input-group { margin-top: 0 !important; height: 31px !important; }
+.no-print .dob-age-row .age-control .form-control { height: 31px !important; min-height: 31px !important; }
+.no-print .dob-age-row .age-control .input-group-text { font-size: 8px !important; padding-left: 4px !important; padding-right: 4px !important; height: 31px !important; }
 
-/* DOB OR AGE: either can be entered; DOB remains the DB source of truth. */
-.no-print .dob-age-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 6px;
-    width: 100%;
-}
-.no-print .dob-age-row .dob-control {
-    width: 185px !important;
-    max-width: 185px !important;
-    flex: 0 0 185px !important;
-    min-width: 185px !important;
-}
-.no-print .dob-age-row .dob-control .input-group {
-    width: 185px !important;
-    max-width: 185px !important;
-}
-.no-print .dob-age-row .dob-control #dob_display {
-    width: 158px !important;
-    max-width: 158px !important;
-    flex: 0 0 158px !important;
-}
-.no-print .dob-age-row .age-control {
-    width: 92px;
-    flex: 0 0 92px;
-}
-.no-print .dob-age-row .age-entry-label {
-    display: none !important;
-}
-.no-print .dob-age-row .age-control {
-    width: 92px !important;
-    flex: 0 0 92px !important;
-    padding-top: 0 !important;
-    margin-top: 0 !important;
-}
-.no-print .dob-age-row .age-control .input-group {
-    margin-top: 0 !important;
-    height: 31px !important;
-}
-.no-print .dob-age-row .age-control .form-control {
-    height: 31px !important;
-    min-height: 31px !important;
-}
-.no-print .dob-age-row .age-control .input-group-text {
-    font-size: 8px !important;
-    padding-left: 4px !important;
-    padding-right: 4px !important;
-    height: 31px !important;
-}
-
+/* Payment methods are part of the billing screen, not a second popup. */
+#paymentModal{display:block!important;visibility:visible!important;position:static!important;inset:auto!important;overflow:visible!important;background:transparent!important;opacity:1!important;z-index:auto!important}
+#paymentModal .modal-dialog{width:100%!important;max-width:none!important;margin:10px 0!important;transform:none!important}
+#paymentModal .modal-content{border:1px solid #cbd5e1!important;border-radius:10px!important;box-shadow:none!important}
+#paymentModal .modal-body{max-height:none!important;overflow:visible!important}
+#paymentModal .btn-close{display:none!important}
+body.opd-embedded-frame #paymentModal{margin-top:8px}
 </style>
+
+<?php if ($embedded_mode && $appointment_id > 0): ?>
+<style>
+/* Appointment-linked mode: hide fields already entered on Appointment Desk while keeping values in the form submission. */
+body.opd-embedded-registration .patient-info-balanced { display:none !important; }
+body.opd-embedded-registration .row.g-3.mb-3 > .col-md-8 .row.g-2 > div:has(#department_id),
+body.opd-embedded-registration .row.g-3.mb-3 > .col-md-8 .row.g-2 > div:has(#doctor_id) { display:none !important; }
+body.opd-embedded-registration .opd-payment-hero { display:none !important; }
+body.opd-embedded-registration { padding:5px !important; font-size:11px !important; }
+body.opd-embedded-registration .card { margin-bottom:6px !important; border-radius:7px !important; }
+body.opd-embedded-registration .card-header { padding:5px 9px !important; min-height:0 !important; }
+body.opd-embedded-registration .card-body { padding:7px !important; }
+body.opd-embedded-registration .embedded-patient-summary { padding:5px 8px !important; margin-bottom:6px !important; gap:12px !important; font-size:11px !important; }
+body.opd-embedded-registration .embedded-patient-summary .small { font-size:9px !important; }
+body.opd-embedded-registration .row { --bs-gutter-x:.45rem; --bs-gutter-y:.35rem; }
+body.opd-embedded-registration .form-label { margin-bottom:2px !important; font-size:9px !important; line-height:1.1 !important; }
+body.opd-embedded-registration .form-control,
+body.opd-embedded-registration .form-select,
+body.opd-embedded-registration .input-group-text,
+body.opd-embedded-registration .btn { min-height:27px !important; height:27px !important; padding:3px 6px !important; font-size:10px !important; }
+body.opd-embedded-registration .tariff-box { padding:6px !important; gap:2px !important; }
+body.opd-embedded-registration .tariff-box h1 { font-size:20px !important; margin:1px 0 4px !important; }
+body.opd-embedded-registration .tariff-box select { max-width:100% !important; margin-bottom:4px !important; }
+body.opd-embedded-registration .mb-3 { margin-bottom:5px !important; }
+body.opd-embedded-registration .mb-2 { margin-bottom:4px !important; }
+body.opd-embedded-registration .pb-2 { padding-bottom:4px !important; }
+body.opd-embedded-registration .pt-2 { padding-top:4px !important; }
+body.opd-embedded-registration #paymentModal { margin-top:4px !important; }
+body.opd-embedded-registration #paymentModal .modal-content { border-radius:7px !important; }
+body.opd-embedded-registration #paymentModal .modal-header { padding:5px 8px !important; }
+body.opd-embedded-registration #paymentModal .modal-body { padding:7px !important; }
+body.opd-embedded-registration #paymentModal .mb-3 { margin-bottom:5px !important; }
+body.opd-embedded-registration #paymentModal .mb-2 { margin-bottom:3px !important; }
+body.opd-embedded-registration #paymentModal .row.g-2 { --bs-gutter-x:.4rem; --bs-gutter-y:.3rem; }
+body.opd-embedded-registration #paymentModal .form-check { min-height:0 !important; margin-bottom:2px !important; }
+body.opd-embedded-registration #paymentModal .form-check-label,
+body.opd-embedded-registration #paymentModal .small { font-size:10px !important; }
+body.opd-embedded-registration #paymentModal .form-control,
+body.opd-embedded-registration #paymentModal .input-group-text { min-height:25px !important; height:25px !important; padding:2px 5px !important; font-size:10px !important; }
+body.opd-embedded-registration #paymentModal .bg-primary.bg-opacity-10 { padding:5px 7px !important; margin-bottom:5px !important; }
+body.opd-embedded-registration #paymentModal h5 { font-size:15px !important; }
+body.opd-embedded-registration #paymentModal .btn { min-height:29px !important; height:auto !important; padding:5px 7px !important; font-size:10px !important; }
+body.opd-embedded-registration .embedded-prefill-note { display:block; }
+
+/* Compact, polished inline payment panel for appointment-linked billing. */
+body.opd-embedded-registration #paymentModal { margin-top:3px !important; }
+body.opd-embedded-registration #paymentModal .modal-dialog { margin:3px 0 !important; }
+body.opd-embedded-registration #paymentModal .modal-content { border:1px solid #dbe4f0 !important; border-radius:9px !important; background:#fff !important; overflow:hidden; }
+body.opd-embedded-registration #paymentModal .modal-header { min-height:0 !important; background:#f8fafc !important; border-bottom:1px solid #e2e8f0 !important; padding:5px 9px !important; }
+body.opd-embedded-registration #paymentModal .modal-title { font-size:11px !important; letter-spacing:.02em; }
+body.opd-embedded-registration #paymentModal .modal-body { padding:7px 9px !important; }
+body.opd-embedded-registration #paymentModal .modal-body > .d-flex:first-child { background:#f8fafc; border:1px solid #e7edf5; border-radius:6px; padding:5px 8px; margin-bottom:6px !important; }
+body.opd-embedded-registration #paymentModal .row.g-2.mb-3 { margin-bottom:6px !important; padding-bottom:6px !important; }
+body.opd-embedded-registration #paymentModal .bg-primary.bg-opacity-10 { border:1px solid #dbeafe; border-radius:7px !important; background:#eff6ff !important; padding:6px 9px !important; margin-bottom:7px !important; }
+body.opd-embedded-registration #paymentModal .bg-primary.bg-opacity-10 > span { font-size:11px !important; }
+body.opd-embedded-registration #paymentModal h5 { font-size:16px !important; }
+body.opd-embedded-registration #paymentModal .payment-methods-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px; margin:0 0 7px; }
+body.opd-embedded-registration #paymentModal .payment-method-card { min-width:0; border:1px solid #e2e8f0; border-radius:7px; background:#fbfdff; padding:6px; margin:0 !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card .form-check { display:flex; align-items:center; gap:4px; padding-left:0; margin:0 0 5px !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card .form-check-input { float:none; margin:0; flex:0 0 auto; }
+body.opd-embedded-registration #paymentModal .payment-method-card .form-check-label { font-size:9px !important; font-weight:800 !important; line-height:1.15; }
+body.opd-embedded-registration #paymentModal .payment-method-card .ps-4 { padding-left:0 !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card .input-group { flex-wrap:nowrap; }
+body.opd-embedded-registration #paymentModal .payment-method-card .input-group-text { padding:2px 5px !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card .form-control { min-width:0; width:100%; }
+body.opd-embedded-registration #paymentModal .payment-method-card input[type=text] { margin-top:4px; }
+body.opd-embedded-registration #paymentModal .payment-totals-strip { display:grid; grid-template-columns:1fr 1fr; gap:10px; border-color:#e2e8f0 !important; background:#f8fafc; border-radius:6px; padding:5px 8px; margin:0 0 7px !important; }
+body.opd-embedded-registration #paymentModal .payment-totals-strip > div { margin:0 !important; }
+body.opd-embedded-registration #paymentModal .btn-success { min-height:30px !important; height:30px !important; padding:4px 9px !important; border-radius:6px !important; box-shadow:none !important; }
+body.opd-embedded-registration #paymentModal .modal-dialog { max-width:100% !important; margin:2px 0 !important; }
+body.opd-embedded-registration #paymentModal .payment-totals-strip { padding:4px 7px !important; font-size:9px !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card { padding:4px 5px !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card .form-check { margin-bottom:3px !important; }
+body.opd-embedded-registration #paymentModal .btn-success { display:block !important; width:auto !important; min-width:210px !important; max-width:250px !important; margin:5px auto 0 !important; min-height:28px !important; height:28px !important; padding:3px 12px !important; font-size:10px !important; }
+body.opd-embedded-registration .card-body { padding:5px 7px !important; }
+body.opd-embedded-registration .embedded-patient-summary { margin-bottom:4px !important; }
+@media (max-width: 760px) { body.opd-embedded-registration #paymentModal .payment-methods-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    document.body.classList.add('opd-embedded-registration');
+    document.querySelectorAll('.patient-info-balanced [required]').forEach(function (el) { el.removeAttribute('required'); });
+});
+</script>
+<?php endif; ?>
 
 <?php if (!empty($err)): ?>
     <div id="opdRegistrationErrorMessage" class="d-none"><?= htmlspecialchars($err, ENT_QUOTES, 'UTF-8') ?></div>
 <?php endif; ?>
-
 
 <!-- REGISTERED FAMILY MEMBER SELECTION POPUP -->
 <div class="modal fade" id="patientSelectionModal" tabindex="-1" aria-hidden="true">
@@ -1353,14 +956,12 @@ input[inputmode="numeric"],
                 </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-
             <div class="modal-body p-3">
                 <div class="small text-secondary fw-semibold mb-2">
                     SELECT THE CORRECT FAMILY MEMBER TO CONTINUE WITH THEIR EXISTING UHID.
                 </div>
                 <div id="patientSelectionList"></div>
             </div>
-
             <div class="modal-footer py-2">
                 <button type="button" class="btn btn-sm btn-light border" data-bs-dismiss="modal">CANCEL</button>
             </div>
@@ -1414,7 +1015,7 @@ input[inputmode="numeric"],
                     
                     <div class="d-grid gap-2">
                         <button type="button" class="btn btn-primary fw-bold" onclick="showGeneratedReceipt()"><i class="bi bi-printer me-2"></i> View Receipt</button>
-                        <button type="button" class="btn btn-light border fw-semibold" data-bs-dismiss="modal">Close</button>
+                        <button type="button" class="btn btn-light border fw-semibold" data-bs-dismiss="modal" onclick="if(window.parent && window.parent !== window){window.parent.postMessage({type:'opd-payment-saved'}, '*');}">Done / Return to Appointment</button>
                     </div>
                 </div>
             </div>
@@ -1422,23 +1023,60 @@ input[inputmode="numeric"],
     </div>
 <?php endif; ?>
 
+
+<style>
+/* OPD Payment refresh: modern compact billing workspace; business logic remains unchanged. */
+.opd-payment-hero{background:linear-gradient(120deg,#fff 0%,#eff6ff 100%);border:1px solid #dbeafe;border-radius:14px;padding:16px 18px;box-shadow:0 4px 16px rgba(15,23,42,.045)}
+.opd-payment-icon{width:48px;height:48px;border-radius:13px;background:#2563eb;color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 6px 14px rgba(37,99,235,.2)}
+.opd-payment-eyebrow{font-size:10px;letter-spacing:1.2px;font-weight:800;color:#2563eb;margin-bottom:3px}
+.opd-payment-hero h4{font-size:21px;color:#0f172a}
+#legacyBillList{display:none!important}
+body:has(.opd-payment-hero) .card{border-radius:12px!important;overflow:hidden}
+body:has(.opd-payment-hero) .card-header{background:#fff!important}
+body:has(.opd-payment-hero) .form-label{font-size:10px;letter-spacing:.25px;color:#475569!important}
+body:has(.opd-payment-hero) .form-control,body:has(.opd-payment-hero) .form-select{border-color:#cbd5e1;border-radius:7px;min-height:34px}
+body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .form-select:focus{border-color:#60a5fa;box-shadow:0 0 0 .16rem rgba(37,99,235,.12)}
+@media(max-width:767px){.opd-payment-hero>div{align-items:flex-start!important;flex-wrap:wrap}.opd-payment-hero .flex-grow-1{min-width:calc(100% - 70px)}.opd-payment-hero .btn{flex:1}}
+</style>
+
+<!-- OPD PAYMENT WORKSPACE -->
+<div class="opd-payment-hero no-print mb-3">
+  <div class="d-flex align-items-center gap-3">
+    <div class="opd-payment-icon"><i class="bi bi-wallet2"></i></div>
+    <div class="flex-grow-1">
+      <div class="opd-payment-eyebrow">OPD SERVICES / BILLING DESK</div>
+      <h4 class="mb-1 fw-bold">OPD Payment</h4>
+      <div class="text-secondary small">Register a patient, generate UHID when required, collect consultation payment and save the receipt.</div>
+    </div>
+    <a href="opd_bills.php" class="btn btn-outline-primary btn-sm fw-semibold"><i class="bi bi-receipt me-1"></i> OPD Bills</a>
+    <a href="opd_appointments.php" class="btn btn-primary btn-sm fw-semibold"><i class="bi bi-calendar-check me-1"></i> Appointment Desk</a>
+  </div>
+</div>
+
 <!-- REGISTRATION FORM -->
 <div class="row g-3 no-print">
     <div class="col-12">
         <div class="card border-0 shadow-sm rounded-3">
             <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
-                <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-person-plus text-primary me-2"></i><?= $edit_data ? 'Edit Patient Registration #' . $edit_data['visit_id'] : ($appointment_prefill ? 'Appointment Check-In / OPD Registration' : 'New Patient Registration') ?></h6>
+                <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-person-plus text-primary me-2"></i><?= $edit_data ? 'Edit OPD Visit #' . $edit_data['visit_id'] : ($appointment_prefill ? 'Appointment Check-In / OPD Payment' : 'OPD Payment & Patient Registration') ?></h6>
+                <?php if ($embedded_mode): ?><span class="badge bg-primary-subtle text-primary">APPOINTMENT DETAILS LINKED</span><?php endif; ?>
                 <?php if ($edit_data): ?>
                     <a href="opd_registration.php" class="btn btn-sm btn-outline-secondary py-0">Cancel Edit</a>
                 <?php endif; ?>
             </div>
             <div class="card-body p-3">
+                <?php if ($embedded_mode && $appointment_prefill): ?>
+                <div class="embedded-patient-summary d-flex flex-wrap align-items-center gap-3 mb-3 px-3 py-2 rounded-3 border bg-primary bg-opacity-10">
+                  <div><span class="small text-secondary d-block">PATIENT NAME</span><strong><?= htmlspecialchars($appointment_prefill['master_fullname'] ?? $appointment_prefill['patient_name'] ?? '') ?></strong></div>
+                  <div><span class="small text-secondary d-block">UHID</span><strong class="text-primary font-monospace"><?= htmlspecialchars($appointment_prefill['master_uhid'] ?? $appointment_prefill['uhid'] ?? 'UHID will be generated') ?></strong></div>
+                  <div class="ms-auto small text-secondary">Appointment #<?= (int)$appointment_prefill['appointment_id'] ?></div>
+                </div>
+                <?php endif; ?>
                 <form method="POST" id="opdForm">
                     <input type="hidden" name="register_patient" value="1">
                     <input type="hidden" name="post_edit_id" value="<?= $edit_data['visit_id'] ?? 0 ?>">
                     <input type="hidden" name="appointment_id" value="<?= (int)($appointment_prefill['appointment_id'] ?? 0) ?>">
-                    <input type="hidden" name="existing_patient_id" id="existing_patient_id"
-                           value="<?= (int)($edit_data['patient_id'] ?? 0) ?>">
+                    <input type="hidden" name="existing_patient_id" id="existing_patient_id" value="<?= (int)($edit_data['patient_id'] ?? 0) ?>">
                     
                     <input type="hidden" name="consultation_fee" id="consultation_fee" value="<?= $edit_data['consultation_fee'] ?? 0 ?>">
                     <input type="hidden" name="modal_discount" id="modal_discount" value="<?= $edit_data['discount_amount'] ?? 0 ?>">
@@ -1449,54 +1087,24 @@ input[inputmode="numeric"],
                     <input type="hidden" name="summary_payment_mode" id="summary_payment_mode" value="<?= htmlspecialchars($edit_data['payment_mode'] ?? 'CASH: ₹0') ?>">
 
                     <!-- PATIENT INFO -->
-
                     <!-- TOP ROW: ONLY VISIT DATE + MOBILE -->
                     <div class="row g-2 mb-2 border-bottom pb-2 patient-info-balanced">
-
                         <div class="col-md-2">
                             <label class="form-label small fw-semibold text-secondary">Visit Date *</label>
-
                             <div class="visit-date-picker-wrap" style="width:100%; max-width:145px;">
-                                <div class="input-group input-group-sm"
-                                     style="width:145px; max-width:145px; flex-wrap:nowrap;">
-
-                                    <input type="hidden"
-                                           name="visit_date"
-                                           id="visit_date"
-                                           value="<?= htmlspecialchars($edit_data['visit_date'] ?? ($appointment_prefill['appointment_date'] ?? date('Y-m-d'))) ?>">
-
-                                    <input type="text"
-                                           id="visit_date_display"
-                                           class="form-control text-dark fw-bold"
-                                           style="width:118px; max-width:118px; flex:0 0 118px; height:25px; min-height:25px; font-size:10px; padding:2px 5px;"
-                                           value="<?= htmlspecialchars(!empty($edit_data['visit_date']) ? date('d-m-Y', strtotime($edit_data['visit_date'])) : date('d-m-Y')) ?>"
-                                           placeholder="DD-MM-YYYY"
-                                           maxlength="10"
-                                           autocomplete="off"
-                                           inputmode="text"
-                                           required>
-
-                                    <button type="button"
-                                            class="btn btn-outline-primary"
-                                            id="visit_date_calendar_btn"
-                                            style="width:27px; min-width:27px; max-width:27px; height:25px; min-height:25px; padding:1px 3px;"
-                                            title="Select Visit Date"
-                                            onclick="openVisitDatePicker()">
+                                <div class="input-group input-group-sm" style="width:145px; max-width:145px; flex-wrap:nowrap;">
+                                    <input type="hidden" name="visit_date" id="visit_date" value="<?= htmlspecialchars($edit_data['visit_date'] ?? ($appointment_prefill['appointment_date'] ?? date('Y-m-d'))) ?>">
+                                    <input type="text" id="visit_date_display" class="form-control text-dark fw-bold" style="width:118px; max-width:118px; flex:0 0 118px; height:25px; min-height:25px; font-size:10px; padding:2px 5px;" value="<?= htmlspecialchars(!empty($edit_data['visit_date']) ? date('d-m-Y', strtotime($edit_data['visit_date'])) : (!empty($appointment_prefill['appointment_date']) ? date('d-m-Y', strtotime($appointment_prefill['appointment_date'])) : date('d-m-Y'))) ?>" placeholder="DD-MM-YYYY" maxlength="10" autocomplete="off" inputmode="text" required>
+                                    <button type="button" class="btn btn-outline-primary" id="visit_date_calendar_btn" style="width:27px; min-width:27px; max-width:27px; height:25px; min-height:25px; padding:1px 3px;" title="Select Visit Date" onclick="openVisitDatePicker()">
                                         <i class="bi bi-calendar3"></i>
                                     </button>
                                 </div>
-
-                                <input type="date"
-                                       id="visit_date_picker"
-                                       class="native-date-picker"
-                                       value="<?= htmlspecialchars($edit_data['visit_date'] ?? ($appointment_prefill['appointment_date'] ?? date('Y-m-d'))) ?>"
-                                       aria-label="Select Visit Date">
+                                <input type="date" id="visit_date_picker" class="native-date-picker" value="<?= htmlspecialchars($edit_data['visit_date'] ?? ($appointment_prefill['appointment_date'] ?? date('Y-m-d'))) ?>" aria-label="Select Visit Date">
                             </div>
                         </div>
 
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold">Mobile Number(s) *</label>
-
                             <div id="mobile_wrapper" style="width:100%;">
                                 <?php
                                 $saved_mobs = array_filter(
@@ -1510,63 +1118,32 @@ input[inputmode="numeric"],
                                     $len = strlen($mob);
                                 ?>
                                     <div class="input-group input-group-sm mb-1 mob-row">
-                                        <input type="text" name="mobile[]"
-                                               id="<?= $i === 0 ? 'primary_mobile' : '' ?>"
-                                               class="form-control form-control-sm mob-input"
-                                               value="<?= htmlspecialchars($mob) ?>"
-                                               placeholder="Mobile No"
-                                               maxlength="10"
-                                               autocomplete="off"
-                                               oninput="this.value = this.value.replace(/[^0-9]/g, ''); updateMobCount(this, <?= $i ?>); <?= $i === 0 ? 'lookupPatientByMobile(this.value)' : '' ?>"
-                                               <?= $i === 0 ? 'required' : '' ?>>
-
-                                        <span class="input-group-text <?= $len == 10 ? 'text-success fw-bold' : 'text-muted' ?>"
-                                              id="mob_count_<?= $i ?>"
-                                              style="font-size:0.7rem; min-width:45px; text-align:center;">
+                                        <input type="text" name="mobile[]" id="<?= $i === 0 ? 'primary_mobile' : '' ?>" class="form-control form-control-sm mob-input" value="<?= htmlspecialchars($mob) ?>" placeholder="Mobile No" maxlength="10" autocomplete="off" oninput="this.value = this.value.replace(/[^0-9]/g, ''); updateMobCount(this, <?= $i ?>); <?= $i === 0 ? 'lookupPatientByMobile(this.value)' : '' ?>" <?= $i === 0 ? 'required' : '' ?>>
+                                        <span class="input-group-text <?= $len == 10 ? 'text-success fw-bold' : 'text-muted' ?>" id="mob_count_<?= $i ?>" style="font-size:0.7rem; min-width:45px; text-align:center;">
                                             <?= $len ?>/10
                                         </span>
-
                                         <?php if ($i === 0): ?>
-                                            <button type="button" class="btn btn-outline-primary"
-                                                    onclick="addMobileField()">
-                                                <i class="bi bi-plus-lg"></i>
-                                            </button>
+                                            <button type="button" class="btn btn-outline-primary" onclick="addMobileField()"><i class="bi bi-plus-lg"></i></button>
                                         <?php else: ?>
-                                            <button type="button" class="btn btn-outline-danger"
-                                                    onclick="this.closest('.mob-row').remove()">
-                                                <i class="bi bi-trash"></i>
-                                            </button>
+                                            <button type="button" class="btn btn-outline-danger" onclick="this.closest('.mob-row').remove()"><i class="bi bi-trash"></i></button>
                                         <?php endif; ?>
                                     </div>
                                 <?php $i++; endforeach; ?>
                             </div>
-
                             <div id="patient_lookup_result" class="mt-1 d-none" aria-hidden="true"></div>
                         </div>
                     </div>
 
                     <!-- SECOND ROW: PATIENT NAME + UHID + GENDER + DOB/AGE -->
                     <div class="row g-2 mb-3 border-bottom pb-2 patient-info-balanced">
-
                         <div class="col-md-3">
                             <label class="form-label small fw-semibold mt-1 mb-1">Patient Full Name *</label>
-                            <input type="text"
-                                   name="fullname"
-                                   class="form-control form-control-sm text-capitalize"
-                                   value="<?= htmlspecialchars($edit_data['fullname'] ?? ($appointment_prefill['master_fullname'] ?? ($appointment_prefill['patient_name'] ?? ''))) ?>"
-                                   placeholder="Patient Name"
-                                   required
-                                   autofocus>
+                            <input type="text" name="fullname" class="form-control form-control-sm text-capitalize" value="<?= htmlspecialchars($edit_data['fullname'] ?? ($appointment_prefill['master_fullname'] ?? ($appointment_prefill['patient_name'] ?? ''))) ?>" placeholder="Patient Name" required autofocus>
                         </div>
 
                         <div class="col-md-2">
                             <label class="form-label small fw-semibold text-secondary mt-1">UHID</label>
-                            <input type="text"
-                                   id="patient_uhid"
-                                   class="form-control form-control-sm bg-light font-monospace text-muted"
-                                   value="<?= htmlspecialchars($edit_data['uhid'] ?? ($appointment_prefill['master_uhid'] ?? '')) ?>"
-                                   placeholder="Auto Generated"
-                                   readonly>
+                            <input type="text" id="patient_uhid" class="form-control form-control-sm bg-light font-monospace text-muted" value="<?= htmlspecialchars($edit_data['uhid'] ?? ($appointment_prefill['master_uhid'] ?? '')) ?>" placeholder="Auto Generated" readonly>
                         </div>
 
                         <div class="col-md-2">
@@ -1582,67 +1159,33 @@ input[inputmode="numeric"],
 
                         <div class="col-md-5">
                             <?php
-                            $current_dob = $edit_data['dob']
-                                ?? ($appointment_prefill['master_dob']
-                                ?? ($appointment_prefill['dob'] ?? ''));
+                            $current_dob = $edit_data['dob'] ?? ($appointment_prefill['master_dob'] ?? ($appointment_prefill['dob'] ?? ''));
+                            $current_age = $edit_data['age'] ?? ($appointment_prefill['master_age'] ?? ($appointment_prefill['age'] ?? ''));
 
-                            $current_age = $current_dob !== ''
-                                ? calculateAgeFromDob($current_dob)
-                                : ($edit_data['age']
-                                ?? ($appointment_prefill['master_age']
-                                ?? ($appointment_prefill['age'] ?? '')));
+                            // Fix: Agar DOB blank hai lekin Age majood hai (Appointment se), toh DOB calculate karke set karein
+                            if ($current_dob === '' && $current_age !== '') {
+                                $base_date = $edit_data['visit_date'] ?? ($appointment_prefill['appointment_date'] ?? date('Y-m-d'));
+                                $current_dob = date('Y-m-d', strtotime($base_date . " -{$current_age} years"));
+                            } else if ($current_dob !== '') {
+                                $current_age = calculateAgeFromDob($current_dob);
+                            }
                             ?>
-
                             <label class="form-label small fw-semibold mt-1">Date of Birth / Age *</label>
-
                             <div class="dob-age-row">
                                 <div class="visit-date-picker-wrap dob-control">
                                     <div class="input-group input-group-sm">
-                                        <input type="hidden"
-                                               name="dob"
-                                               id="dob"
-                                               value="<?= htmlspecialchars($current_dob) ?>">
-
-                                        <input type="text"
-                                               id="dob_display"
-                                               class="form-control text-dark fw-bold"
-                                               value="<?= htmlspecialchars($current_dob ? date('d-m-Y', strtotime($current_dob)) : '') ?>"
-                                               placeholder="DD-MM-YYYY"
-                                               maxlength="10"
-                                               autocomplete="off"
-                                               inputmode="text">
-
-                                        <button type="button"
-                                                class="btn btn-outline-primary"
-                                                id="dob_calendar_btn"
-                                                title="Select Date of Birth"
-                                                onclick="openDobPicker()">
+                                        <input type="hidden" name="dob" id="dob" value="<?= htmlspecialchars($current_dob) ?>">
+                                        <input type="text" id="dob_display" class="form-control text-dark fw-bold" value="<?= htmlspecialchars($current_dob ? date('d-m-Y', strtotime($current_dob)) : '') ?>" placeholder="DD-MM-YYYY" maxlength="10" autocomplete="off" inputmode="text">
+                                        <button type="button" class="btn btn-outline-primary" id="dob_calendar_btn" title="Select Date of Birth" onclick="openDobPicker()">
                                             <i class="bi bi-calendar3"></i>
                                         </button>
                                     </div>
-
-                                    <input type="date"
-                                           id="dob_picker"
-                                           class="native-date-picker"
-                                           value="<?= htmlspecialchars($current_dob) ?>"
-                                           max="<?= date('Y-m-d') ?>"
-                                           aria-label="Select Date of Birth">
+                                    <input type="date" id="dob_picker" class="native-date-picker" value="<?= htmlspecialchars($current_dob) ?>" max="<?= date('Y-m-d') ?>" aria-label="Select Date of Birth">
                                 </div>
-
                                 <div class="age-control">
                                     <label class="form-label age-entry-label mb-1">Age</label>
                                     <div class="input-group input-group-sm">
-                                        <input type="number"
-                                               id="age"
-                                               name="age"
-                                               class="form-control form-control-sm"
-                                               value="<?= $current_age !== '' && $current_age !== null ? (int)$current_age : '' ?>"
-                                               min="0"
-                                               max="150"
-                                               step="1"
-                                               placeholder="Age"
-                                               inputmode="numeric"
-                                               autocomplete="off">
+                                        <input type="number" id="age" name="age" class="form-control form-control-sm" value="<?= $current_age !== '' && $current_age !== null ? (int)$current_age : '' ?>" min="0" max="150" step="1" placeholder="Age" inputmode="numeric" autocomplete="off">
                                         <span class="input-group-text">YRS</span>
                                     </div>
                                 </div>
@@ -1682,7 +1225,13 @@ input[inputmode="numeric"],
                                     </select>
                                 </div>
                                 <div class="col-md-4">
-                                    <label class="form-label small fw-semibold text-primary">Category *</label>
+                                    <!-- FIX: Added AJAX Refresh Button for Categories & Insurances -->
+                                    <label class="form-label small fw-semibold text-primary">
+                                        Category *
+                                        <a href="javascript:void(0)" onclick="refreshMasters()" class="ms-1 text-primary" title="Refresh Dropdowns">
+                                            <i class="bi bi-arrow-clockwise"></i>
+                                        </a>
+                                    </label>
                                     <select name="category_id" id="category_id" class="form-select form-select-sm" required onchange="filterInsurances()">
                                         <option value="">-- Select --</option>
                                         <?php foreach ($categories as $cat): ?>
@@ -1709,20 +1258,25 @@ input[inputmode="numeric"],
                         <!-- FEE DISPLAY & PAYMENT ACTION -->
                         <div class="col-md-4">
                             <div class="tariff-box h-100 d-flex flex-column align-items-center justify-content-center">
+                                <span class="d-block text-secondary small fw-bold mb-1">Billing Type</span>
+                                <select name="billing_mode" id="billing_mode" class="form-select form-select-sm mb-2" style="max-width:260px;" onchange="applyBillingMode()">
+                                    <option value="regular" selected>Regular Consultation (Charge)</option>
+                                    <option value="followup">Follow-up Within <?= (int)$followup_validity_days ?> Days (No Fee)</option>
+                                </select>
                                 <span class="d-block text-secondary small fw-bold mb-1">Applicable Tariff Fee</span>
                                 <?php 
                                     $disp_fee = ($edit_data['consultation_fee'] ?? 0) - ($edit_data['discount_amount'] ?? 0);
                                     if($disp_fee < 0) $disp_fee = 0;
                                 ?>
                                 <h1 class="fw-bold text-dark mb-3" id="display_tariff_fee">₹<?= number_format($disp_fee, 2) ?></h1>
+                                <!-- FIX: Validation Message Placeholder -->
+                                <div id="tariff_warning_msg" class="text-danger small fw-bold lh-sm mb-2 text-center" style="display:none; font-size:10px;"></div>
                                 
-                                <button type="button" class="btn btn-outline-primary btn-sm w-100 fw-semibold mb-2" data-bs-toggle="modal" data-bs-target="#paymentModal">
-                                    <i class="bi bi-wallet2 me-1"></i> <span id="paymentSummaryText"><?= htmlspecialchars($edit_data['payment_mode'] ?? 'Collect Payment') ?></span>
-                                </button>
-                                
+                                <?php if (!$embedded_mode): ?>
                                 <button type="submit" class="btn btn-success btn-sm w-100 fw-bold shadow-sm py-2">
                                     <i class="bi <?= $edit_data ? 'bi-check-lg' : 'bi-ticket-detailed' ?> me-1"></i> <?= $edit_data ? 'Update Registration' : 'Register & Save' ?>
                                 </button>
+                                <?php endif; ?>
                             </div>
                         </div>
                     </div>
@@ -1731,8 +1285,8 @@ input[inputmode="numeric"],
         </div>
     </div>
 
-    <!-- Today's OPD Registrations -->
-    <div class="col-12 mt-2">
+    <!-- Legacy embedded bill list moved to admin/opd_bills.php -->
+    <div class="col-12 mt-2" id="legacyBillList">
         <div class="card border-0 shadow-sm rounded-3">
             <div class="py-2 px-3 border-bottom d-flex justify-content-between align-items-center gap-3 bg-white rounded-top-3">
                 <h6 class="fw-bold text-dark m-0 small"><i class="bi bi-list-columns-reverse text-primary me-2"></i>OPD Billing / All Bills</h6>
@@ -1757,9 +1311,7 @@ input[inputmode="numeric"],
                         <?php else: ?>
                             <?php foreach ($today_visits as $tv): ?>
                                 <?php
-                                    $list_age = !empty($tv['dob'])
-                                        ? calculateAgeFromDob($tv['dob'])
-                                        : ($tv['age'] ?? '');
+                                    $list_age = !empty($tv['dob']) ? calculateAgeFromDob($tv['dob']) : ($tv['age'] ?? '');
                                     $list_fy = getCurrentFY($tenant_pdo, $org_id, $center_id, $tv['visit_date']);
                                     $list_fy_formatted = formatFYWithHyphen($list_fy);
                                     $list_token = $list_fy_formatted . '/' . str_pad($tv['token_no'], 2, '0', STR_PAD_LEFT);
@@ -1767,9 +1319,7 @@ input[inputmode="numeric"],
                                 <tr>
                                     <td class="ps-3">
                                         <div class="fw-bold fs-6 text-primary">T-<?= htmlspecialchars($tv['token_no']) ?></div>
-                                        <div class="text-success" style="font-size:0.68rem;">
-                                            R-<?= htmlspecialchars($list_fy_formatted . '/' . str_pad((int)($tv['receipt_no'] ?? 0), 2, '0', STR_PAD_LEFT)) ?>
-                                        </div>
+                                        <div class="text-success" style="font-size:0.68rem;">R-<?= htmlspecialchars($list_fy_formatted . '/' . str_pad((int)($tv['receipt_no'] ?? 0), 2, '0', STR_PAD_LEFT)) ?></div>
                                     </td>
                                     <td>
                                         <div class="fw-semibold text-dark"><?= !empty($tv['visit_date']) ? date('d-m-Y', strtotime($tv['visit_date'])) : '' ?></div>
@@ -1804,33 +1354,33 @@ input[inputmode="numeric"],
                                     </td>
                                     <td class="text-center">
                                         <?php
-    $listStatusCode = (int)($tv['payment_status'] ?? 3);
-    $listStatusLabel = $listStatusCode === 1 ? 'Paid' : ($listStatusCode === 2 ? 'Partial' : 'Not Paid');
-    $listStatusClass = $listStatusCode === 1 ? 'bg-success-subtle text-success border-success' : ($listStatusCode === 2 ? 'bg-warning-subtle text-warning border-warning' : 'bg-danger-subtle text-danger border-danger');
-?>
-<span class="badge <?= $listStatusClass ?> border px-2" style="font-size: 0.7rem;"><?= $listStatusLabel ?></span>
+                                        $listStatusCode = (int)($tv['payment_status'] ?? 3);
+                                        $listStatusLabel = $listStatusCode === 1 ? 'Paid' : ($listStatusCode === 2 ? 'Partial' : 'Not Paid');
+                                        $listStatusClass = $listStatusCode === 1 ? 'bg-success-subtle text-success border-success' : ($listStatusCode === 2 ? 'bg-warning-subtle text-warning border-warning' : 'bg-danger-subtle text-danger border-danger');
+                                        ?>
+                                        <span class="badge <?= $listStatusClass ?> border px-2" style="font-size: 0.7rem;"><?= $listStatusLabel ?></span>
                                     </td>
                                     <td class="text-end pe-3">
                                         <button class="btn btn-sm btn-outline-dark py-0 px-2" title="Print Receipt" onclick="printExistingParcha(
-    <?= htmlspecialchars(json_encode($tv['fullname'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['uhid'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode(($tv['age'] ?? '') . ' Yrs / ' . ($tv['gender'] ?? '')), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['mobile'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['doctor_name'] ?? 'General OPD'), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['consultation_fee'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['discount_amount'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['discount_percent'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['payment_mode'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode((string)($tv['token_no'] ?? 0)), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($list_fy_formatted . '/' . str_pad((int)($tv['receipt_no'] ?? 0), 2, '0', STR_PAD_LEFT)), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['remark'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode(!empty($tv['created_at']) ? date('d-m-Y h:i A', strtotime($tv['created_at'])) : date('d-m-Y h:i A', strtotime($tv['visit_date'] ?? 'now'))), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['payment_breakdown'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['amount_paid'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['change_return'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
-    <?= htmlspecialchars(json_encode($tv['payment_status'] ?? 3), ENT_QUOTES, 'UTF-8') ?>
-)" >
-    <i class="bi bi-printer"></i>
+                                            <?= htmlspecialchars(json_encode($tv['fullname'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['uhid'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode(($tv['age'] ?? '') . ' Yrs / ' . ($tv['gender'] ?? '')), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['mobile'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['doctor_name'] ?? 'General OPD'), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['consultation_fee'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['discount_amount'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['discount_percent'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['payment_mode'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode((string)($tv['token_no'] ?? 0)), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($list_fy_formatted . '/' . str_pad((int)($tv['receipt_no'] ?? 0), 2, '0', STR_PAD_LEFT)), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['remark'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode(!empty($tv['created_at']) ? date('d-m-Y h:i A', strtotime($tv['created_at'])) : date('d-m-Y h:i A', strtotime($tv['visit_date'] ?? 'now'))), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['payment_breakdown'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['amount_paid'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['change_return'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode($tv['payment_status'] ?? 3), ENT_QUOTES, 'UTF-8') ?>
+                                        )">
+                                            <i class="bi bi-printer"></i>
                                         </button>
                                         <a href="opd_registration.php?edit_visit=<?= $tv['visit_id'] ?>" class="btn btn-sm btn-outline-primary py-0 px-2 ms-1 d-inline-flex align-items-center justify-content-center" title="Edit Registration">
                                             <i class="bi bi-pencil"></i>
@@ -1897,8 +1447,9 @@ input[inputmode="numeric"],
                     <h5 class="fw-bold text-primary m-0" id="modalPayableAmount">₹0.00</h5>
                 </div>
                 
+                <div class="payment-methods-grid">
                 <!-- CASH PAYMENT BLOCK -->
-                <div class="mb-2 pb-2 border-bottom">
+                <div class="payment-method-card">
                     <div class="form-check mb-1">
                         <input class="form-check-input pay-check" type="checkbox" id="check_cash" <?= !$edit_data ? 'checked' : '' ?> onchange="togglePaymentInputs('cash')">
                         <label class="form-check-label fw-bold text-secondary small" for="check_cash">Cash Payment</label>
@@ -1912,7 +1463,7 @@ input[inputmode="numeric"],
                 </div>
 
                 <!-- UPI PAYMENT BLOCK -->
-                <div class="mb-2 pb-2 border-bottom">
+                <div class="payment-method-card">
                     <div class="form-check mb-1">
                         <input class="form-check-input pay-check" type="checkbox" id="check_upi" onchange="togglePaymentInputs('upi')">
                         <label class="form-check-label fw-bold text-secondary small" for="check_upi">UPI Payment</label>
@@ -1927,7 +1478,7 @@ input[inputmode="numeric"],
                 </div>
 
                 <!-- CARD PAYMENT BLOCK -->
-                <div class="mb-2 pb-2 border-bottom">
+                <div class="payment-method-card">
                     <div class="form-check mb-1">
                         <input class="form-check-input pay-check" type="checkbox" id="check_card" onchange="togglePaymentInputs('card')">
                         <label class="form-check-label fw-bold text-secondary small" for="check_card">Card Payment</label>
@@ -1942,7 +1493,7 @@ input[inputmode="numeric"],
                 </div>
 
                 <!-- NET BANKING BLOCK -->
-                <div class="mb-2">
+                <div class="payment-method-card">
                     <div class="form-check mb-1">
                         <input class="form-check-input pay-check" type="checkbox" id="check_net" onchange="togglePaymentInputs('net')">
                         <label class="form-check-label fw-bold text-secondary small" for="check_net">Net Banking</label>
@@ -1955,12 +1506,17 @@ input[inputmode="numeric"],
                         <input type="text" id="utr_net" class="form-control form-control-sm font-monospace" style="font-size: 0.75rem;" placeholder="UTR No.">
                     </div>
                 </div>
+                </div><!-- /.payment-methods-grid -->
 
-                <div class="bg-light p-2 rounded-2 small border mb-3 mt-3">
-                    <div class="d-flex justify-content-between mb-1"><span class="text-secondary fw-semibold">Total Paid:</span><strong class="text-success" id="modalTotalPaid">₹<?= number_format($edit_data['amount_paid'] ?? 0, 2) ?></strong></div>
+                <div class="payment-totals-strip small border mb-2">
+                    <div class="d-flex justify-content-between"><span class="text-secondary fw-semibold">Total Paid:</span><strong class="text-success" id="modalTotalPaid">₹<?= number_format($edit_data['amount_paid'] ?? 0, 2) ?></strong></div>
                     <div class="d-flex justify-content-between"><span class="text-danger fw-semibold">Return Change:</span><strong class="text-danger" id="modalReturnChange">₹<?= number_format($edit_data['change_return'] ?? 0, 2) ?></strong></div>
                 </div>
-                <button type="button" class="btn btn-primary btn-sm w-100 fw-semibold py-1.5" data-bs-dismiss="modal" onclick="applyModalPayment()">Save Payment Details</button>
+                <?php if ($embedded_mode): ?>
+                <button type="button" class="btn btn-success btn-sm w-100 fw-bold" onclick="saveEmbeddedOpdPayment()"><i class="bi bi-check-circle me-1"></i> Register &amp; Save OPD Payment</button>
+                <?php else: ?>
+                <button type="button" class="btn btn-primary btn-sm w-100 fw-semibold py-1" onclick="applyModalPayment()">Save Payment Details</button>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -1989,7 +1545,6 @@ input[inputmode="numeric"],
     </div>
 </div>
 
-<!-- SweetAlert2: consistent alerts for OPD Registration & Billing -->
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function () {
@@ -2012,10 +1567,6 @@ document.addEventListener('DOMContentLoaded', function () {
 </script>
 
 <script>
-// =====================================================================
-// DATE UI STANDARD: ALWAYS DD-MM-YYYY (independent of Windows/browser locale)
-// Database / PHP continues to use ISO YYYY-MM-DD.
-// =====================================================================
 function formatDisplayDateDMY(isoDate) {
     if (!isoDate) return '';
     const parts = String(isoDate).split('-');
@@ -2033,39 +1584,25 @@ function formatDisplayDateDMY(isoDate) {
 function formatIsoDate(dateText) {
     const value = String(dateText || '').trim();
 
-    // Accept both the displayed format DD-MMM-YYYY and old numeric DD-MM-YYYY.
     let m = value.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
     let dd, mm, yyyy;
 
     if (m) {
-        const months = {
-            jan: '01', feb: '02', mar: '03', apr: '04',
-            may: '05', jun: '06', jul: '07', aug: '08',
-            sep: '09', oct: '10', nov: '11', dec: '12'
-        };
-
+        const months = { jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06', jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12' };
         dd = m[1].padStart(2, '0');
         mm = months[m[2].toLowerCase()] || '';
         yyyy = m[3];
-
         if (!mm) return '';
     } else {
         m = value.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
         if (!m) return '';
-
         dd = m[1].padStart(2, '0');
         mm = m[2].padStart(2, '0');
         yyyy = m[3];
     }
 
     const d = new Date(`${yyyy}-${mm}-${dd}T00:00:00`);
-    if (
-        Number.isNaN(d.getTime()) ||
-        d.getFullYear() !== Number(yyyy) ||
-        d.getMonth() + 1 !== Number(mm) ||
-        d.getDate() !== Number(dd)
-    ) return '';
-
+    if ( Number.isNaN(d.getTime()) || d.getFullYear() !== Number(yyyy) || d.getMonth() + 1 !== Number(mm) || d.getDate() !== Number(dd) ) return '';
     return `${yyyy}-${mm}-${dd}`;
 }
 
@@ -2083,20 +1620,16 @@ function setupVisitDateField() {
             picker.value = '';
             return;
         }
-
         hidden.value = iso;
         picker.value = iso;
         display.value = formatDisplayDateDMY(iso);
         display.classList.remove('is-invalid');
     }
 
-    // Initial state: always display DD-MM-YYYY.
     syncFromIso(hidden.value || picker.value);
 
-    // Manual typing: DD-MM-YYYY -> ISO for database.
     display.addEventListener('input', function () {
         this.value = this.value.replace(/[^0-9-]/g, '').slice(0, 10);
-
         const iso = formatIsoDate(this.value);
         if (iso) {
             hidden.value = iso;
@@ -2110,20 +1643,12 @@ function setupVisitDateField() {
 
     display.addEventListener('blur', function () {
         const iso = formatIsoDate(this.value);
-
-        if (!iso) {
-            this.classList.add('is-invalid');
-            return;
-        }
-
+        if (!iso) { this.classList.add('is-invalid'); return; }
         syncFromIso(iso);
     });
 
-    // Calendar selection -> DD-MM-YYYY display + ISO hidden value.
     picker.addEventListener('change', function () {
-        if (this.value) {
-            syncFromIso(this.value);
-        }
+        if (this.value) { syncFromIso(this.value); }
     });
 }
 
@@ -2160,10 +1685,7 @@ function setupDobField() {
 
     display.addEventListener('blur', function () {
         const iso = formatIsoDate(this.value);
-        if (!iso) {
-            this.classList.add('is-invalid');
-            return;
-        }
+        if (!iso) { this.classList.add('is-invalid'); return; }
         syncFromIso(iso);
     });
 
@@ -2176,33 +1698,14 @@ function openDobPicker() {
     const picker = document.getElementById('dob_picker');
     if (!picker) return;
     try { picker.focus({ preventScroll: true }); } catch (e) { picker.focus(); }
-    try {
-        if (typeof picker.showPicker === 'function') picker.showPicker();
-        else picker.click();
-    } catch (e) { picker.click(); }
+    try { if (typeof picker.showPicker === 'function') picker.showPicker(); else picker.click(); } catch (e) { picker.click(); }
 }
 
 function openVisitDatePicker() {
     const picker = document.getElementById('visit_date_picker');
     if (!picker) return;
-
-    try {
-        picker.focus({ preventScroll: true });
-    } catch (e) {
-        picker.focus();
-    }
-
-    try {
-        if (typeof picker.showPicker === 'function') {
-            picker.showPicker();
-        } else {
-            picker.click();
-        }
-    } catch (e) {
-        // The native input is positioned over the calendar button,
-        // so a normal user click will still open it in Chrome/Edge.
-        picker.click();
-    }
+    try { picker.focus({ preventScroll: true }); } catch (e) { picker.focus(); }
+    try { if (typeof picker.showPicker === 'function') { picker.showPicker(); } else { picker.click(); } } catch (e) { picker.click(); }
 }
 
 document.addEventListener('DOMContentLoaded', function () {
@@ -2216,66 +1719,37 @@ document.addEventListener('DOMContentLoaded', function () {
         dobInput.addEventListener('change', calculateAgeFromDobUI);
         dobInput.addEventListener('input', calculateAgeFromDobUI);
     }
-
     setInterval(calculateAgeFromDobUI, 60 * 60 * 1000);
 });
 
 function normalizeTypedTextToUppercase(root = document) {
-    // IMPORTANT: do NOT uppercase <select> values.
-    // The option values are "Male", "Female", "Other" and converting the
-    // selected value to "MALE" makes it invalid, so the select becomes blank.
-    const fields = root.querySelectorAll(
-        'input[type="text"]:not(#visit_date_display):not(#dob_display), textarea'
-    );
-
+    const fields = root.querySelectorAll('input[type="text"]:not(#visit_date_display):not(#dob_display), textarea');
     fields.forEach(field => {
-        if (
-            field.id === 'searchParcheInput' ||
-            field.id === 'visit_date_display' ||
-            field.id === 'dob_display' ||
-            field.classList.contains('mob-input') ||
-            field.inputMode === 'numeric'
-        ) return;
-
+        if ( field.id === 'searchParcheInput' || field.id === 'visit_date_display' || field.id === 'dob_display' || field.classList.contains('mob-input') || field.inputMode === 'numeric' ) return;
         field.addEventListener('input', function () {
             const start = this.selectionStart;
             const end = this.selectionEnd;
             this.value = this.value.toUpperCase();
-
             if (document.activeElement === this && start !== null && end !== null) {
                 try { this.setSelectionRange(start, end); } catch (e) {}
             }
         });
-
-        if (field.value) {
-            field.value = field.value.toUpperCase();
-        }
+        if (field.value) { field.value = field.value.toUpperCase(); }
     });
 }
 
 document.addEventListener('DOMContentLoaded', function () {
     normalizeTypedTextToUppercase();
-
     const gender = document.getElementById('gender');
     if (gender && gender.value) {
         const normalized = String(gender.value).trim().toLowerCase();
-        const map = {
-            male: 'Male',
-            female: 'Female',
-            other: 'Other'
-        };
+        const map = { male: 'Male', female: 'Female', other: 'Other' };
         if (map[normalized]) gender.value = map[normalized];
     }
-
-    // Keep the selected gender value exactly as the <option> value.
     if (gender) {
         gender.addEventListener('change', function () {
             const normalized = String(this.value || '').trim().toLowerCase();
-            const map = {
-                male: 'Male',
-                female: 'Female',
-                other: 'Other'
-            };
+            const map = { male: 'Male', female: 'Female', other: 'Other' };
             if (map[normalized]) this.value = map[normalized];
         });
     }
@@ -2283,19 +1757,12 @@ document.addEventListener('DOMContentLoaded', function () {
 
 document.addEventListener('DOMContentLoaded', function () {
     const primaryMobile = document.getElementById('primary_mobile');
-
-    // For a direct registration with a prefilled mobile, perform the same
-    // lookup automatically. Appointment/edit records already show their UHID.
-    if (
-        primaryMobile &&
-        String(primaryMobile.value || '').replace(/\D/g, '').length === 10 &&
-        !document.getElementById('existing_patient_id')?.value
-    ) {
+    if ( primaryMobile && String(primaryMobile.value || '').replace(/\D/g, '').length === 10 && !document.getElementById('existing_patient_id')?.value ) {
         lookupPatientByMobile(primaryMobile.value);
     }
 });
 
-const dbTariffs = <?= json_encode($tariffs) ?>;
+let dbTariffs = <?= json_encode($tariffs) ?>;
 const orgName = <?= json_encode($org_name) ?>;
 const centerName = <?= json_encode($center_name) ?>;
 const centerAddress = <?= json_encode($center_address) ?>;
@@ -2331,7 +1798,6 @@ function updateMobCount(input, index) {
     }
 }
 
-
 // ============================================================
 // REGISTERED PATIENT LOOKUP BY PRIMARY MOBILE
 // ============================================================
@@ -2340,13 +1806,7 @@ let patientLookupCache = {};
 
 function escapePatientHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, function(c) {
-        return {
-            '&': '&amp;',
-            '<': '&lt;',
-            '>': '&gt;',
-            '"': '&quot;',
-            "'": '&#039;'
-        }[c];
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c];
     });
 }
 
@@ -2356,16 +1816,12 @@ function clearPatientSelection(clearPatientInfo = true) {
     const resultBox = document.getElementById('patient_lookup_result');
 
     if (patientId) patientId.value = '';
-
     if (uhid) {
         uhid.value = '';
         uhid.classList.remove('text-success', 'fw-bold');
         uhid.classList.add('text-muted');
     }
-
-    if (resultBox && clearPatientInfo) {
-        resultBox.innerHTML = '';
-    }
+    if (resultBox && clearPatientInfo) { resultBox.innerHTML = ''; }
 
     if (clearPatientInfo) {
         const name = document.querySelector('input[name="fullname"]');
@@ -2380,10 +1836,7 @@ function clearPatientSelection(clearPatientInfo = true) {
         if (dob) dob.value = '';
         if (dobDisplay) dobDisplay.value = '';
         if (dobPicker) dobPicker.value = '';
-        if (age) {
-            age.value = '';
-            delete age.dataset.directEntry;
-        }
+        if (age) { age.value = ''; delete age.dataset.directEntry; }
         if (ageHint) ageHint.textContent = '--';
         if (gender) gender.value = '';
     }
@@ -2401,7 +1854,6 @@ function fillExistingPatient(patient) {
     const gender = document.getElementById('gender');
 
     if (patientId) patientId.value = patient.patient_id || '';
-
     if (uhid) {
         uhid.value = patient.uhid || '';
         uhid.classList.remove('text-muted');
@@ -2430,21 +1882,13 @@ function fillExistingPatient(patient) {
         gender.value = g === 'male' ? 'Male' : (g === 'female' ? 'Female' : (g ? 'Other' : ''));
     }
 
-    // If the master record contains multiple mobile numbers, keep them
-    // available in the existing mobile rows instead of replacing them blindly.
     if (patient.mobile) {
-        const mobiles = String(patient.mobile)
-            .split(',')
-            .map(v => v.trim())
-            .filter(Boolean);
-
+        const mobiles = String(patient.mobile).split(',').map(v => v.trim()).filter(Boolean);
         const rows = document.querySelectorAll('#mobile_wrapper .mob-row');
 
         if (rows.length && mobiles.length) {
             rows[0].querySelector('.mob-input').value = mobiles[0];
             updateMobCount(rows[0].querySelector('.mob-input'), 0);
-
-            // Fill existing alternate rows where present.
             for (let i = 1; i < rows.length && i < mobiles.length; i++) {
                 const input = rows[i].querySelector('.mob-input');
                 if (input) input.value = mobiles[i];
@@ -2458,74 +1902,46 @@ function renderPatientLookupResults(patients) {
     if (!resultBox) return;
 
     patientLookupCache = {};
+    patients.forEach(patient => { patientLookupCache[String(patient.patient_id)] = patient; });
 
-    patients.forEach(patient => {
-        patientLookupCache[String(patient.patient_id)] = patient;
-    });
-
-    // No registered patient.
     if (!patients.length) {
         clearPatientSelection(false);
-
         resultBox.innerHTML = '';
         return;
     }
 
-    // Exactly one registered patient -> automatically continue with that patient.
     if (patients.length === 1) {
-        const patient = patients[0];
-        fillExistingPatient(patient);
-
+        fillExistingPatient(patients[0]);
         resultBox.innerHTML = '';
         return;
     }
 
-    // Same mobile used by multiple family members.
-    // Open a proper popup instead of rendering the selection inside the form.
     const list = document.getElementById('patientSelectionList');
-
     if (list) {
         list.innerHTML = patients.map(patient => `
-            <button type="button"
-                    class="patient-popup-item"
-                    data-patient-id="${escapePatientHtml(patient.patient_id)}">
+            <button type="button" class="patient-popup-item" data-patient-id="${escapePatientHtml(patient.patient_id)}">
                 <div class="name">${escapePatientHtml(patient.fullname)}</div>
-                <div class="meta">
-                    ${escapePatientHtml(patient.gender || '')}
-                    ${patient.age ? ' • ' + escapePatientHtml(patient.age) + ' YRS' : ''}
-                </div>
+                <div class="meta">${escapePatientHtml(patient.gender || '')}${patient.age ? ' • ' + escapePatientHtml(patient.age) + ' YRS' : ''}</div>
                 <div class="uhid">UHID: ${escapePatientHtml(patient.uhid || '')}</div>
             </button>
         `).join('');
 
         list.querySelectorAll('.patient-popup-item').forEach(function(button) {
-            button.addEventListener('click', function() {
-                selectExistingPatientFromLookup(this.dataset.patientId);
-            });
+            button.addEventListener('click', function() { selectExistingPatientFromLookup(this.dataset.patientId); });
         });
     }
 
     const modal = document.getElementById('patientSelectionModal');
-    if (modal) {
-        bootstrap.Modal.getOrCreateInstance(modal).show();
-    }
+    if (modal) { bootstrap.Modal.getOrCreateInstance(modal).show(); }
 }
 
 function selectExistingPatientFromLookup(patientId) {
     const patient = patientLookupCache[String(patientId)];
     const resultBox = document.getElementById('patient_lookup_result');
 
-    if (!patient) {
-        clearPatientSelection(false);
-        return;
-    }
-
+    if (!patient) { clearPatientSelection(false); return; }
     fillExistingPatient(patient);
-
-    if (resultBox) {
-        resultBox.innerHTML = '';
-    }
-
+    if (resultBox) { resultBox.innerHTML = ''; }
     const modal = document.getElementById('patientSelectionModal');
     if (modal) {
         const instance = bootstrap.Modal.getInstance(modal);
@@ -2535,14 +1951,10 @@ function selectExistingPatientFromLookup(patientId) {
 
 function lookupPatientByMobile(mobile) {
     clearTimeout(patientLookupTimer);
-
     mobile = String(mobile || '').replace(/\D/g, '');
 
-    // The receptionist is changing the mobile, so the previously selected
-    // patient must not accidentally be submitted.
     const existingPatientId = document.getElementById('existing_patient_id');
     if (existingPatientId) existingPatientId.value = '';
-
     const uhid = document.getElementById('patient_uhid');
     if (uhid) {
         uhid.value = '';
@@ -2551,45 +1963,25 @@ function lookupPatientByMobile(mobile) {
     }
 
     const resultBox = document.getElementById('patient_lookup_result');
-
     if (!resultBox) return;
 
-    if (mobile.length < 10) {
-        resultBox.innerHTML = '';
-        return;
-    }
-
+    if (mobile.length < 10) { resultBox.innerHTML = ''; return; }
     if (mobile.length !== 10) return;
 
     resultBox.innerHTML = '';
 
     patientLookupTimer = setTimeout(function() {
-        fetch(
-            'opd_registration.php?lookup_patient_mobile=' +
-            encodeURIComponent(mobile),
-            {
-                method: 'GET',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
-            }
-        )
+        fetch('opd_registration.php?lookup_patient_mobile=' + encodeURIComponent(mobile), { method: 'GET', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
         .then(response => {
-            if (!response.ok) {
-                throw new Error('Patient lookup request failed.');
-            }
+            if (!response.ok) throw new Error('Patient lookup request failed.');
             return response.json();
         })
         .then(data => {
-            if (!data || !data.success) {
-                throw new Error(data && data.error ? data.error : 'Lookup failed.');
-            }
-
+            if (!data || !data.success) throw new Error(data && data.error ? data.error : 'Lookup failed.');
             renderPatientLookupResults(data.patients || []);
         })
         .catch(error => {
             console.error('Patient mobile lookup error:', error);
-
             resultBox.innerHTML = '';
         });
     }, 300);
@@ -2627,7 +2019,6 @@ function calculateAgeFromDobUI() {
     ageInput.classList.remove('is-invalid');
     ageInput.value = String(age);
     delete ageInput.dataset.directEntry;
-
     return age;
 }
 
@@ -2641,7 +2032,6 @@ function setupAgeField() {
 
     ageInput.addEventListener('input', function () {
         this.value = this.value.replace(/[^0-9]/g, '').slice(0, 3);
-
         if (this.value === '') {
             this.dataset.directEntry = '1';
             dobInput.value = '';
@@ -2651,7 +2041,6 @@ function setupAgeField() {
         }
 
         const age = parseInt(this.value, 10);
-
         if (Number.isNaN(age) || age < 0 || age > 150) {
             this.classList.add('is-invalid');
             return;
@@ -2660,25 +2049,12 @@ function setupAgeField() {
         this.classList.remove('is-invalid');
         this.dataset.directEntry = '1';
 
-        // Direct Age entry uses the Visit Date as the calculation date.
-        // Example: Visit Date 07-10-2026 + Age 25 => DOB 07-10-2001.
-        // Only DOB is stored, so the displayed age increases automatically.
         const visitIso = document.getElementById('visit_date')?.value || '';
         const base = visitIso ? new Date(visitIso + 'T00:00:00') : new Date();
 
         if (Number.isNaN(base.getTime())) return;
-
-        const dob = new Date(
-            base.getFullYear() - age,
-            base.getMonth(),
-            base.getDate()
-        );
-
-        const iso = [
-            dob.getFullYear(),
-            String(dob.getMonth() + 1).padStart(2, '0'),
-            String(dob.getDate()).padStart(2, '0')
-        ].join('-');
+        const dob = new Date( base.getFullYear() - age, base.getMonth(), base.getDate() );
+        const iso = [ dob.getFullYear(), String(dob.getMonth() + 1).padStart(2, '0'), String(dob.getDate()).padStart(2, '0') ].join('-');
 
         dobInput.value = iso;
         if (dobPicker) dobPicker.value = iso;
@@ -2686,18 +2062,9 @@ function setupAgeField() {
     });
 
     ageInput.addEventListener('blur', function () {
-        if (this.value === '') {
-            delete this.dataset.directEntry;
-            return;
-        }
-
+        if (this.value === '') { delete this.dataset.directEntry; return; }
         const age = parseInt(this.value, 10);
-
-        if (Number.isNaN(age) || age < 0 || age > 150) {
-            this.classList.add('is-invalid');
-            return;
-        }
-
+        if (Number.isNaN(age) || age < 0 || age > 150) { this.classList.add('is-invalid'); return; }
         this.classList.remove('is-invalid');
         this.dataset.directEntry = '1';
     });
@@ -2716,19 +2083,42 @@ function filterDoctors() {
     calculateTariff();
 }
 
+// FIX: AJAX Refresh Masters function
+function refreshMasters() {
+    fetch('opd_registration.php?ajax=refresh_masters')
+    .then(res => res.json())
+    .then(data => {
+        dbTariffs = data.tariffs; 
+        
+        let catSelect = document.getElementById('category_id');
+        let currentCat = catSelect.value;
+        catSelect.innerHTML = '<option value="">-- Select --</option>';
+        data.categories.forEach(c => {
+            catSelect.innerHTML += `<option value="${c.id}">${c.category_name.toUpperCase()}</option>`;
+        });
+        catSelect.value = currentCat;
+
+        let insSelect = document.getElementById('insurance_id');
+        let allInsOptions = data.insurances.map(i => ({ value: i.id, text: i.insurance_name.toUpperCase(), cat: i.category_id }));
+        insSelect.dataset.allOptions = JSON.stringify(allInsOptions);
+        
+        filterInsurances();
+        
+        const Toast = Swal.mixin({ toast: true, position: 'top-end', showConfirmButton: false, timer: 1500 });
+        Toast.fire({ icon: 'success', title: 'Dropdowns Refreshed' });
+    });
+}
+
 function filterInsurances() {
     const catSelect = document.getElementById('category_id');
     const insSelect = document.getElementById('insurance_id');
     const catId = catSelect.value;
     const currentValue = insSelect.value;
 
-    // Save the complete provider list once.
     if (!insSelect.dataset.allOptions) {
         insSelect.dataset.allOptions = JSON.stringify(
             Array.from(insSelect.options).map(o => ({
-                value: o.value,
-                text: o.textContent,
-                cat: o.getAttribute('data-cat') || ''
+                value: o.value, text: o.textContent, cat: o.getAttribute('data-cat') || ''
             }))
         );
     }
@@ -2745,7 +2135,6 @@ function filterInsurances() {
         return;
     }
 
-    // Do not hide <option> with CSS. Rebuild the list instead.
     const matching = allOptions.filter(o => o.value !== '' && String(o.cat) === String(catId));
 
     if (matching.length === 0) {
@@ -2754,7 +2143,6 @@ function filterInsurances() {
         base.textContent = '-- Base Category (No specific insurance) --';
         insSelect.appendChild(base);
     } else if (matching.length === 1) {
-        // Exactly one provider -> automatically select it.
         const o = document.createElement('option');
         o.value = matching[0].value;
         o.textContent = matching[0].text;
@@ -2762,7 +2150,6 @@ function filterInsurances() {
         o.selected = true;
         insSelect.appendChild(o);
     } else {
-        // Multiple providers -> keep Base Category and let user choose.
         const base = document.createElement('option');
         base.value = '';
         base.textContent = '-- Base Category (No specific insurance) --';
@@ -2781,21 +2168,70 @@ function filterInsurances() {
     calculateTariff();
 }
 
+function applyBillingMode() {
+    const mode = document.getElementById('billing_mode')?.value || 'regular';
+    const feeInput = document.getElementById('consultation_fee');
+    const feeDisplay = document.getElementById('display_tariff_fee');
+    const collectBtn = document.querySelector('button[data-bs-target="#paymentModal"]');
+    const payMode = document.getElementById('summary_payment_mode');
+    if (mode === 'followup') {
+        if (feeInput) feeInput.value = '0';
+        if (feeDisplay) feeDisplay.textContent = '₹0.00';
+        document.getElementById('modal_discount').value = '0';
+        document.getElementById('hidden_discount_percent').value = '0';
+        document.getElementById('modal_total_paid').value = '0';
+        document.getElementById('modal_change_return').value = '0';
+        document.getElementById('payment_breakdown_json').value = JSON.stringify({'Follow-up': {amount: 0}});
+        if (payMode) payMode.value = 'FOLLOW-UP - NO CHARGE';
+        const summary = document.getElementById('paymentSummaryText'); if (summary) summary.textContent = 'FOLLOW-UP - NO CHARGE';
+        if (collectBtn) collectBtn.disabled = true;
+        const warning = document.getElementById('tariff_warning_msg'); if (warning) { warning.textContent = 'FOLLOW-UP: NO CONSULTATION FEE'; warning.style.display = 'block'; warning.classList.remove('text-danger'); warning.classList.add('text-success'); }
+    } else {
+        const warning = document.getElementById('tariff_warning_msg'); if (warning) { warning.classList.add('text-danger'); warning.classList.remove('text-success'); }
+        if (collectBtn) collectBtn.disabled = false;
+        calculateTariff();
+    }
+}
+
 function calculateTariff() {
+    if (document.getElementById('billing_mode')?.value === 'followup') { applyBillingMode(); return; }
     let docId = document.getElementById('doctor_id').value;
     let srvId = document.getElementById('service_id').value;
     let catId = document.getElementById('category_id').value;
     let insId = document.getElementById('insurance_id').value;
 
     let finalRate = 0;
+    let isTariffFound = false;
+
     if (docId && srvId && catId) {
         let exactMatch = dbTariffs.find(t => t.doctor_id == docId && t.service_id == srvId && t.category_id == catId && t.insurance_id == insId);
         if (!exactMatch && insId) exactMatch = dbTariffs.find(t => t.doctor_id == docId && t.service_id == srvId && t.category_id == catId && (t.insurance_id == null || t.insurance_id == ''));
-        if (exactMatch) finalRate = parseFloat(exactMatch.rate);
+        if (exactMatch) {
+            finalRate = parseFloat(exactMatch.rate);
+            isTariffFound = true;
+        }
     }
 
     document.getElementById('consultation_fee').value = finalRate;
     document.getElementById('modalTariffAmount').innerText = '₹' + finalRate.toFixed(2);
+
+    // FIX: Disable Buttons if rate is not set
+    const collectBtn = document.querySelector('button[data-bs-target="#paymentModal"]');
+    const registerBtn = document.querySelector('#opdForm button[type="submit"]');
+    const warnMsg = document.getElementById('tariff_warning_msg');
+
+    if (docId && srvId && catId && !isTariffFound) {
+        if(collectBtn) collectBtn.disabled = true;
+        if(registerBtn) registerBtn.disabled = true;
+        if(warnMsg) {
+            warnMsg.innerText = "RATE NOT SET FOR THIS COMBINATION!";
+            warnMsg.style.display = 'block';
+        }
+    } else {
+        if(collectBtn) collectBtn.disabled = false;
+        if(registerBtn) registerBtn.disabled = false;
+        if(warnMsg) warnMsg.style.display = 'none';
+    }
     
     <?php if (!$edit_data): ?>
         document.getElementById('modal_discount_input').value = 0;
@@ -2853,7 +2289,6 @@ try {
         document.getElementById('div_input_net').style.display = 'block';
     }
 
-    // Old records may have payment_mode/amount_paid but no JSON breakdown.
     if (Object.keys(savedBreakdown).length === 0) {
         const savedMode = <?= json_encode($edit_data['payment_mode'] ?? '') ?>;
         const savedPaid = parseFloat(<?= json_encode($edit_data['amount_paid'] ?? 0) ?>) || 0;
@@ -2898,13 +2333,33 @@ try {
 document.addEventListener('DOMContentLoaded', function() {
     const opdForm = document.getElementById('opdForm');
     if (opdForm) {
-        opdForm.addEventListener('submit', function() {
+        opdForm.addEventListener('submit', function(e) {
+            // FIX: Explicit Mandatory Fields Alert
+            let missingFields = [];
+            if (!document.getElementById('visit_date_display').value) missingFields.push('Visit Date');
+            if (!document.querySelector('input[name="fullname"]').value.trim()) missingFields.push('Patient Full Name');
+            if (!document.getElementById('primary_mobile').value.trim()) missingFields.push('Mobile Number');
+            if (!document.getElementById('gender').value) missingFields.push('Gender');
+            if (!document.getElementById('dob_display').value && !document.getElementById('age').value) missingFields.push('Date of Birth / Age');
+            if (!document.getElementById('doctor_id').value) missingFields.push('Doctor');
+            if (!document.getElementById('service_id').value) missingFields.push('Service');
+            if (!document.getElementById('category_id').value) missingFields.push('Category');
+
+            if (missingFields.length > 0) {
+                e.preventDefault(); 
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Missing Mandatory Fields',
+                    html: 'Please fill out the following required fields to continue:<br><br><b>' + missingFields.join('<br>') + '</b>',
+                    confirmButtonColor: '#2563eb'
+                });
+                return false;
+            }
+
             if (typeof syncDiscountHiddenFields === 'function') {
                 syncDiscountHiddenFields();
             }
 
-            // Do not force/override a selected payment mode.
-            // Only when NOTHING is selected, make CASH the default automatically.
             const selectedModes = document.querySelectorAll('.pay-check:checked');
             if (selectedModes.length === 0) {
                 const fee = parseFloat(document.getElementById('consultation_fee')?.value) || 0;
@@ -2968,9 +2423,8 @@ function handleDiscountChange() {
         discountPercent.value = pct.toFixed(2);
     }
     
-    
     syncDiscountHiddenFields();
-let payable = fee - discount;
+    let payable = fee - discount;
 
     let checkedModes = document.querySelectorAll('.pay-check:checked');
     if (checkedModes.length === 1) {
@@ -3020,7 +2474,6 @@ function calculateModalTotals(fromDiscountChange) {
     let payable = fee - discount;
     if(payable < 0) payable = 0;
     
-    // UPDATE APPLICABLE TARIFF UI
     document.getElementById('display_tariff_fee').innerText = '₹' + payable.toFixed(2);
     document.getElementById('modalPayableAmount').innerText = '₹' + payable.toFixed(2);
 
@@ -3036,8 +2489,22 @@ function calculateModalTotals(fromDiscountChange) {
     document.getElementById('modalReturnChange').innerText = '₹' + (returnChange > 0 ? returnChange : 0).toFixed(2);
 }
 
+function saveEmbeddedOpdPayment() {
+    // Apply the selected payment modes to hidden fields, then submit the one OPD form.
+    applyModalPayment();
+    const form = document.getElementById('opdForm');
+    if (!form) {
+        alert('OPD form was not found. Please refresh and try again.');
+        return;
+    }
+    if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+    } else {
+        form.submit();
+    }
+}
+
 function applyModalPayment() {
-    // Payment modal is outside #opdForm, so copy discount into the hidden form fields.
     syncDiscountHiddenFields();
     calculateModalTotals();
     let fee = parseFloat(document.getElementById('consultation_fee').value) || 0;
@@ -3060,7 +2527,6 @@ function applyModalPayment() {
     if (card > 0) { let utr = document.getElementById('utr_card').value; modes.push('CARD: ₹'+card); breakdown.Card = { amount: card, utr: utr }; }
     if (net > 0) { let utr = document.getElementById('utr_net').value; modes.push('NET: ₹'+net); breakdown.NetBanking = { amount: net, utr: utr }; }
 
-    // If nothing is selected, default to CASH for the full payable amount.
     if (modes.length === 0 && payable > 0) {
         const cashCheck = document.getElementById('check_cash');
         const cashWrap = document.getElementById('div_input_cash');
@@ -3079,7 +2545,8 @@ function applyModalPayment() {
 
     let summaryStr = modes.length > 0 ? modes.join(' | ') : 'Unpaid (₹0)';
 
-    document.getElementById('paymentSummaryText').innerText = summaryStr;
+    const paymentSummary = document.getElementById('paymentSummaryText');
+    if (paymentSummary) paymentSummary.innerText = summaryStr;
     document.getElementById('modal_total_paid').value = totalPaid;
     document.getElementById('modal_change_return').value = returnChange > 0 ? returnChange : 0;
     document.getElementById('payment_breakdown_json').value = JSON.stringify(breakdown);
@@ -3093,6 +2560,14 @@ document.addEventListener("DOMContentLoaded", function() {
     if (window.history.replaceState) {
         window.history.replaceState(null, null, window.location.pathname);
     }
+    
+    // FIX: Clear form fields so page is empty for next registration
+    const form = document.getElementById('opdForm');
+    if(form) form.reset();
+    clearPatientSelection(true);
+    document.getElementById('display_tariff_fee').innerText = '₹0.00';
+    const paymentSummary = document.getElementById('paymentSummaryText');
+    if (paymentSummary) paymentSummary.innerText = 'Collect Payment';
 });
 
 function showGeneratedReceipt() {
@@ -3129,9 +2604,7 @@ function openReceiptPreview(name, uhid, ageGender, mobile, doctor, fee, discount
 
 function buildReceiptHtml(data) {
     const upper = (v) => String(v ?? '').toUpperCase();
-    const safe = (v) => upper(v).replace(/[&<>"']/g, c => ({
-        '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#039;'
-    }[c]));
+    const safe = (v) => upper(v).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#039;' }[c]));
 
     const fee = parseFloat(data.fee) || 0;
     const discount = parseFloat(data.discount) || 0;
@@ -3166,8 +2639,7 @@ function buildReceiptHtml(data) {
     }
     const statusLabel = statusCodeNum === 1 ? 'Paid' : (statusCodeNum === 2 ? 'Partial' : 'Not Paid');
 
-    const remarkRow = data.remark
-        ? `<tr><th>Remarks</th><td colspan="3">${safe(data.remark)}</td></tr>` : '';
+    const remarkRow = data.remark ? `<tr><th>Remarks</th><td colspan="3">${safe(data.remark)}</td></tr>` : '';
 
     return `
     <div class="receipt-sheet">
@@ -3177,7 +2649,6 @@ function buildReceiptHtml(data) {
             <div class="address">${safe(centerAddress)}</div>
             <div class="receipt-title">OPD REGISTRATION & CONSULTATION RECEIPT</div>
         </div>
-
         <div class="token-box">
             <div>
                 <div class="small-label">TOKEN NO.</div>
@@ -3186,7 +2657,6 @@ function buildReceiptHtml(data) {
             </div>
             <div class="date-block"><b>Registration Date</b><br>${safe(data.datetime)}</div>
         </div>
-
         <table class="receipt-table info-table">
             <tr><th>UHID / ID</th><td colspan="3">${safe(data.uhid)}</td></tr>
             <tr><th>Patient Name</th><td colspan="3">${safe(data.name)}</td></tr>
@@ -3194,14 +2664,12 @@ function buildReceiptHtml(data) {
             <tr><th>Consulting Doctor</th><td colspan="3">${safe(data.doctor)}</td></tr>
             ${remarkRow}
         </table>
-
         <div class="section-title">BILLING DETAILS</div>
         <table class="receipt-table billing-table">
             <tr><td>Consultation Fee</td><td class="amount">₹${fee.toFixed(2)}</td></tr>
             <tr><td>Discount</td><td class="amount discount">- ₹${discount.toFixed(2)} (${discountPercent.toFixed(2)}%)</td></tr>
             <tr class="grand"><td>Final Payable</td><td class="amount">₹${payable.toFixed(2)}</td></tr>
         </table>
-
         <div class="section-title">PAYMENT DETAILS</div>
         <table class="receipt-table billing-table">
             ${paymentRows.join('') || '<tr><td>Payment Mode</td><td class="amount">Not Paid</td></tr>'}
@@ -3210,9 +2678,7 @@ function buildReceiptHtml(data) {
             <tr><td>Change Returned</td><td class="amount">₹${Math.max(0, changeReturn).toFixed(2)}</td></tr>
             <tr class="grand"><td>Payment Status</td><td class="amount">${statusLabel}</td></tr>
         </table>
-
         <div class="instructions"><b>Instructions</b><br>${receiptInstructions}</div>
-        
     </div>`;
 }
 
@@ -3259,208 +2725,6 @@ body{margin:0;font-family:Arial,sans-serif;color:#111;background:#fff;font-size:
 .grand td{font-weight:800;background:#f3f4f6}
 .billing-table small{color:#666;font-weight:400}
 .instructions{margin-top:12px;padding-top:7px;border-top:1px dashed #999;font-size:9px;line-height:1.45}
-
-/* EXTRA COMPACT REGISTRATION FIELDS */
-.no-print #opdForm .form-label {
-    font-size: 9px !important;
-    margin-bottom: 2px !important;
-    line-height: 1.1 !important;
-}
-
-.no-print #opdForm .form-control,
-.no-print #opdForm .form-select,
-.no-print #opdForm .input-group-text,
-.no-print #opdForm .btn {
-    height: 27px !important;
-    min-height: 27px !important;
-    font-size: 10px !important;
-    padding: 2px 7px !important;
-    border-radius: 4px !important;
-}
-
-.no-print #opdForm .input-group-sm > .form-control,
-.no-print #opdForm .input-group-sm > .form-select,
-.no-print #opdForm .input-group-sm > .input-group-text,
-.no-print #opdForm .input-group-sm > .btn {
-    height: 27px !important;
-    min-height: 27px !important;
-}
-
-.no-print #opdForm .input-group-text {
-    min-width: 34px !important;
-    padding: 2px 5px !important;
-    font-size: 8px !important;
-}
-
-.no-print #opdForm .form-control::placeholder,
-.no-print #opdForm .form-select {
-    font-size: 9px !important;
-}
-
-.no-print #opdForm .row.g-2 {
-    --bs-gutter-x: .45rem !important;
-    --bs-gutter-y: .3rem !important;
-}
-
-.no-print #opdForm .mb-3 {
-    margin-bottom: 5px !important;
-}
-
-.no-print #opdForm .mb-2 {
-    margin-bottom: 4px !important;
-}
-
-.no-print #opdForm .mt-2 {
-    margin-top: 5px !important;
-}
-
-.no-print #visit_date_calendar_btn {
-    width: 29px !important;
-    padding: 2px 5px !important;
-}
-
-.no-print #mobile_wrapper .btn {
-    width: 29px !important;
-    padding-left: 4px !important;
-    padding-right: 4px !important;
-}
-
-.no-print .tariff-box {
-    padding: 6px 8px !important;
-}
-
-.no-print #display_tariff_fee {
-    font-size: 1.25rem !important;
-    margin: 2px 0 5px !important;
-}
-
-.no-print .tariff-box .btn {
-    height: 28px !important;
-    min-height: 28px !important;
-    margin-bottom: 4px !important;
-}
-
-.no-print #opdForm > .row:first-of-type {
-    padding-bottom: 6px !important;
-    margin-bottom: 6px !important;
-}
-
-
-/* =========================================================
-   VISIT DATE - COMPACT WIDTH ONLY
-   Do NOT change the column/layout or any billing logic.
-   ========================================================= */
-.no-print .visit-date-compact {
-    width: 150px !important;
-    max-width: 150px !important;
-}
-
-.no-print .visit-date-compact .input-group {
-    width: 150px !important;
-    max-width: 150px !important;
-    flex-wrap: nowrap !important;
-}
-
-.no-print .visit-date-compact #visit_date_display {
-    width: 123px !important;
-    max-width: 123px !important;
-    flex: 0 0 123px !important;
-    height: 25px !important;
-    min-height: 25px !important;
-    font-size: 9px !important;
-    padding: 1px 5px !important;
-}
-
-.no-print .visit-date-compact #visit_date_calendar_btn {
-    width: 27px !important;
-    min-width: 27px !important;
-    max-width: 27px !important;
-    height: 25px !important;
-    min-height: 25px !important;
-    padding: 1px 3px !important;
-}
-
-.no-print .visit-date-compact .native-date-picker {
-    right: 0 !important;
-    width: 27px !important;
-    height: 25px !important;
-}
-
-
-/* Balanced patient-info row: use the full available width without artificial gaps. */
-.no-print .patient-info-balanced {
-    --bs-gutter-x: .55rem !important;
-}
-.no-print .patient-info-balanced .form-control,
-.no-print .patient-info-balanced .form-select {
-    width: 100%;
-}
-
-
-/* FINAL DOB + AGE ALIGNMENT */
-.no-print .dob-age-row {
-    display: flex !important;
-    align-items: center !important;
-    gap: 6px !important;
-    width: 100% !important;
-    margin: 0 !important;
-    padding: 0 !important;
-}
-.no-print .dob-age-row .dob-control {
-    width: 185px !important;
-    max-width: 185px !important;
-    min-width: 185px !important;
-    flex: 0 0 185px !important;
-    margin: 0 !important;
-    padding: 0 !important;
-}
-.no-print .dob-age-row .dob-control .input-group {
-    width: 185px !important;
-    max-width: 185px !important;
-    margin: 0 !important;
-}
-.no-print .dob-age-row .dob-control #dob_display {
-    width: 158px !important;
-    max-width: 158px !important;
-    flex: 0 0 158px !important;
-    height: 31px !important;
-    min-height: 31px !important;
-}
-.no-print .dob-age-row .dob-control #dob_calendar_btn {
-    height: 31px !important;
-    min-height: 31px !important;
-}
-.no-print .dob-age-row .age-control {
-    width: 92px !important;
-    max-width: 92px !important;
-    min-width: 92px !important;
-    flex: 0 0 92px !important;
-    margin: 0 !important;
-    padding: 0 !important;
-}
-.no-print .dob-age-row .age-entry-label {
-    display: none !important;
-}
-.no-print .dob-age-row .age-control .input-group {
-    display: flex !important;
-    align-items: stretch !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    height: 31px !important;
-    min-height: 31px !important;
-}
-.no-print .dob-age-row .age-control .form-control,
-.no-print .dob-age-row .age-control .input-group-text {
-    height: 31px !important;
-    min-height: 31px !important;
-    box-sizing: border-box !important;
-}
-.no-print .dob-age-row .age-control .input-group-text {
-    font-size: 8px !important;
-    padding-left: 4px !important;
-    padding-right: 4px !important;
-}
-
 </style></head><body>${currentReceiptHtml}</body></html>`);
     printWindow.document.close();
     printWindow.onload = function() {
@@ -3468,10 +2732,14 @@ body{margin:0;font-family:Arial,sans-serif;color:#111;background:#fff;font-size:
     };
 }
 
-// Keep compatibility with the existing print button signature.
 function printExistingParcha(name, uhid, ageGender, mobile, doctor, fee, discount, discountPercent, mode, token, receiptNo, remark, datetime, paymentBreakdownRaw, amountPaid, changeReturn, statusCode) {
     openReceiptPreview(name, uhid, ageGender, mobile, doctor, fee, discount, discountPercent, mode, token, receiptNo, remark, datetime, paymentBreakdownRaw, amountPaid, changeReturn, statusCode);
 }
 </script>
 
+<?php if ($embedded_mode): ?>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body></html>
+<?php else: ?>
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
+<?php endif; ?>
