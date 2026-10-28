@@ -16,6 +16,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
 $opd_pages = [
     'opd_appointments.php',
     'opd_registration.php',
+    'opd_bills.php',
     'opd_doctor.php',
     'opd_visit_list.php'
 ];
@@ -365,6 +366,107 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
             display: block;
         }
 
+        /* Desktop sidebar collapse: let the page use the full width */
+        @media (min-width: 992px) {
+            .sidebar {
+                transform: translateX(0);
+                transition: width 0.25s ease-in-out, transform 0.3s ease-in-out;
+            }
+
+            /* Collapsed mode: keep a slim icon rail instead of hiding the sidebar */
+            body.sidebar-collapsed .sidebar {
+                width: 72px;
+                transform: translateX(0);
+                overflow: visible;
+            }
+
+            body.sidebar-collapsed .main-wrapper {
+                margin-left: 72px;
+            }
+
+            body.sidebar-collapsed .sidebar-brand {
+                justify-content: center;
+                padding: 0 8px;
+                overflow: hidden;
+            }
+
+            body.sidebar-collapsed .sidebar-brand > span {
+                font-size: 0;
+                white-space: nowrap;
+            }
+
+            body.sidebar-collapsed .sidebar-brand > span i {
+                font-size: 1.15rem;
+                margin-right: 0 !important;
+            }
+
+            body.sidebar-collapsed .sidebar-brand #sidebarCloseBtn,
+            body.sidebar-collapsed .sidebar-link > .submenu-arrow,
+            body.sidebar-collapsed .nested-toggle-btn > .nested-arrow {
+                display: none !important;
+            }
+
+            body.sidebar-collapsed .sidebar-menu {
+                overflow: visible;
+                padding-top: 10px;
+            }
+
+            body.sidebar-collapsed .sidebar-menu > li {
+                position: relative;
+                margin: 3px 7px;
+            }
+
+            body.sidebar-collapsed .sidebar-link {
+                justify-content: center;
+                padding: 12px 0;
+                border-radius: 8px;
+                white-space: nowrap;
+            }
+
+            body.sidebar-collapsed .sidebar-link .link-inner {
+                justify-content: center;
+                width: 100%;
+                gap: 0;
+            }
+
+            body.sidebar-collapsed .sidebar-link .link-inner > span {
+                display: none !important;
+            }
+
+            /* Hide nested lists in rail mode; their parent icons remain available */
+            body.sidebar-collapsed .sidebar-menu .collapse {
+                display: none !important;
+            }
+
+            /* Hover label for each icon in the collapsed rail */
+            body.sidebar-collapsed .sidebar-menu > li > .sidebar-link::after {
+                content: attr(data-tooltip);
+                position: absolute;
+                left: calc(100% + 10px);
+                top: 50%;
+                transform: translateY(-50%);
+                padding: 8px 11px;
+                border-radius: 6px;
+                background: #0f172a;
+                color: #fff;
+                font-size: 12px;
+                font-weight: 500;
+                line-height: 1.2;
+                white-space: nowrap;
+                box-shadow: 0 5px 18px rgba(15, 23, 42, .22);
+                opacity: 0;
+                visibility: hidden;
+                pointer-events: none;
+                z-index: 2000;
+            }
+
+            body.sidebar-collapsed .sidebar-menu > li > .sidebar-link:hover::after,
+            body.sidebar-collapsed .sidebar-menu > li > .sidebar-link:focus-visible::after {
+                opacity: 1;
+                visibility: visible;
+            }
+        }
+
         @media (max-width: 991.98px) {
             .sidebar {
                 transform: translateX(-100%);
@@ -382,6 +484,15 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
             .content {
                 padding: 15px;
             }
+        }
+
+        /* Arrow indicates the sidebar direction */
+        #sidebarToggleIcon {
+            display: inline-block;
+            transition: transform 0.25s ease;
+        }
+        body.sidebar-collapsed #sidebarToggleIcon {
+            transform: rotate(180deg);
         }
 
         /* Sidebar menu text capitalization fix */
@@ -745,7 +856,8 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
                     <?php endif; ?>
 
                     <?php if (has_access('opd_reg', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_registration.php" class="<?= ($current_page == 'opd_registration.php') ? 'active-child' : '' ?>"><i class="bi bi-plus-circle"></i> Registration & Token</a></li>
+                    <li><a href="opd_registration.php" class="<?= ($current_page == 'opd_registration.php') ? 'active-child' : '' ?>"><i class="bi bi-wallet2"></i> OPD Payment</a></li>
+                    <li><a href="opd_bills.php" class="<?= ($current_page == 'opd_bills.php') ? 'active-child' : '' ?>"><i class="bi bi-receipt"></i> OPD Bills</a></li>
                     <?php endif; ?>
 
                     <?php if (has_access('opd_queue', $is_full_admin, $user_menus)): ?>
@@ -812,8 +924,10 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
 <div class="main-wrapper">
     <header class="topbar">
         <div class="d-flex align-items-center gap-2">
-            <button class="btn btn-sm btn-outline-secondary d-lg-none" id="sidebarToggleBtn" type="button">
-                <i class="bi bi-list fs-5"></i>
+            <button class="btn btn-sm btn-outline-secondary" id="sidebarToggleBtn"
+                    type="button" aria-label="Toggle sidebar" aria-controls="sidebarMenu"
+                    aria-expanded="true" title="Toggle Sidebar">
+                <i class="bi bi-chevron-left fs-5 sidebar-toggle-arrow" id="sidebarToggleIcon"></i>
             </button>
         </div>
         
@@ -837,32 +951,55 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
 
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-    // Mobile Drawer Toggle Handler
-    const sidebar = document.getElementById('sidebarMenu');
-    const overlay = document.getElementById('sidebarOverlay');
-    const toggleBtn = document.getElementById('sidebarToggleBtn');
-    const closeBtn = document.getElementById('sidebarCloseBtn');
+    // Build hover labels for the slim desktop sidebar rail.
+    document.querySelectorAll('#sidebarMenu > .sidebar-menu > li > .sidebar-link').forEach(function (link) {
+        const label = link.querySelector('.link-inner span')?.textContent?.trim()
+            || link.textContent.replace(/\s+/g, ' ').trim();
+        if (label) link.setAttribute('data-tooltip', label);
+    });
 
-    function toggleSidebar() {
-        if (sidebar && overlay) {
-            sidebar.classList.toggle('show');
-            overlay.classList.toggle('show');
-        }
-    }
-
-    if (toggleBtn) toggleBtn.addEventListener('click', toggleSidebar);
-    if (closeBtn) closeBtn.addEventListener('click', toggleSidebar);
-    if (overlay) overlay.addEventListener('click', toggleSidebar);
-
-    // Queue tab direct hash handler
+    // Queue tab direct hash handler (sidebar events are handled in layout_footer.php)
     if (window.location.hash === '#nav-queue') {
         const queueLink = document.getElementById('headerQueueDisplayLink');
         if (queueLink) queueLink.classList.add('active-child');
 
         const queueTab = document.querySelector('button[data-bs-target="#nav-queue"]');
         if (queueTab && typeof bootstrap !== 'undefined') {
-            new bootstrap.Tab(queueTab).show();
+            bootstrap.Tab.getOrCreateInstance(queueTab).show();
         }
     }
 });
+</script>
+
+
+<script>
+/*
+ * Mini sidebar submenu fix:
+ * When the sidebar is icon-only, clicking a parent icon expands the rail
+ * and reveals its submenu instead of leaving the submenu hidden/closing it.
+ */
+document.addEventListener('click', function (event) {
+    const parentButton = event.target.closest(
+        '#sidebarMenu .sidebar-link[data-bs-toggle="collapse"], #sidebarMenu .nested-toggle-btn[data-bs-toggle="collapse"]'
+    );
+    if (!parentButton || !document.body.classList.contains('sidebar-collapsed') || window.innerWidth < 992) {
+        return;
+    }
+
+    const targetSelector = parentButton.getAttribute('data-bs-target');
+    const submenu = targetSelector ? document.querySelector(targetSelector) : null;
+    const submenuAlreadyOpen = parentButton.getAttribute('aria-expanded') === 'true' ||
+        (submenu && submenu.classList.contains('show'));
+
+    // Reveal the full menu first; preserve the mini-sidebar preference for the next page load.
+    document.body.classList.remove('sidebar-collapsed');
+    try { sessionStorage.setItem('admin_sidebar_collapsed', '0'); } catch (e) {}
+
+    // If this submenu was already open, just reveal it; don't let Bootstrap
+    // interpret the same click as a request to close it.
+    if (submenuAlreadyOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+}, true);
 </script>
