@@ -2,7 +2,7 @@
 
 // admin/opd_appointments.php
 
-$page_title = "OPD Appointments & Live Queue";
+$page_title = "OPD Appointment Desk";
 
 require_once __DIR__ . '/../config/tenant_db.php';
 
@@ -31,24 +31,6 @@ try {
     $tenant_pdo->exec("ALTER TABLE opd_appointments ADD COLUMN IF NOT EXISTS created_by INT NULL AFTER remark");
 
     $tenant_pdo->exec("ALTER TABLE opd_queue_tracking ADD COLUMN IF NOT EXISTS waiting_since DATETIME NULL AFTER status");
-
-    $tenant_pdo->exec("
-
-        UPDATE opd_queue_tracking
-
-        SET waiting_since = CASE
-
-            WHEN waiting_since IS NOT NULL THEN waiting_since
-
-            WHEN in_time IS NOT NULL THEN in_time
-
-            ELSE NOW()
-
-        END
-
-        WHERE waiting_since IS NULL
-
-    ");
 
 } catch (Exception $e) {}
 
@@ -142,9 +124,9 @@ try {
 
     $tenant_pdo->exec("
 
-        INSERT IGNORE INTO opd_queue_tracking (org_id, center_id, visit_id, status, waiting_since)
+        INSERT IGNORE INTO opd_queue_tracking (org_id, center_id, visit_id, status, waiting_since, in_time, out_time)
 
-        SELECT org_id, center_id, visit_id, 'Waiting', NOW()
+        SELECT org_id, center_id, visit_id, 'Waiting', NULL, NULL, NULL
 
         FROM opd_visits 
 
@@ -160,95 +142,55 @@ try {
 
 // ==============================================================
 
-// 1. QUEUE TRACKING ACTIONS (Call In, Waiting Timer, Check Out, Re-queue)
-
-// ==============================================================
-
+// 1. QUEUE TRACKING ACTIONS (Patient Present -> Call In -> Consultation Complete)
 if (isset($_GET['q_action']) && isset($_GET['track_id'])) {
-
-    $action = $_GET['q_action'];
-
+    $action = (string)$_GET['q_action'];
     $track_id = (int)$_GET['track_id'];
 
-
-
     try {
+        if ($action === 'waiting') {
+            $q = $tenant_pdo->prepare("UPDATE opd_queue_tracking
+                SET waiting_since = COALESCE(waiting_since, NOW()), status = 'Waiting'
+                WHERE track_id = ? AND org_id = ? AND center_id = ?
+                  AND out_time IS NULL AND status <> 'Completed'");
+            $q->execute([$track_id, $org_id, $center_id]);
+            if (function_exists('set_flash_msg')) set_flash_msg($q->rowCount() ? "PATIENT PRESENT TIME CAPTURED!" : "PATIENT IS ALREADY COMPLETED OR PRESENT.");
 
-        if ($action === 'in') {
-
-            $tenant_pdo->prepare(
-
-                "UPDATE opd_queue_tracking
-
-                 SET waiting_since = COALESCE(waiting_since, NOW()),
-
-                     status = 'Inside Cabin',
-
-                     in_time = NOW()
-
-                 WHERE track_id = ? AND out_time IS NULL"
-
-            )->execute([$track_id]);
-
-            if (function_exists('set_flash_msg')) set_flash_msg("PATIENT CALLED IN!");
-
-        } elseif ($action === 'waiting') {
-
-            $tenant_pdo->prepare(
-
-                "UPDATE opd_queue_tracking
-
-                 SET waiting_since = COALESCE(waiting_since, NOW())
-
-                 WHERE track_id = ?"
-
-            )->execute([$track_id]);
-
-            if (function_exists('set_flash_msg')) set_flash_msg("PATIENT PRESENT!");
+        } elseif ($action === 'in') {
+            $q = $tenant_pdo->prepare("UPDATE opd_queue_tracking
+                SET waiting_since = COALESCE(waiting_since, NOW()),
+                    status = 'Inside Cabin', in_time = COALESCE(in_time, NOW())
+                WHERE track_id = ? AND org_id = ? AND center_id = ?
+                  AND out_time IS NULL AND status <> 'Completed'");
+            $q->execute([$track_id, $org_id, $center_id]);
+            if (function_exists('set_flash_msg')) set_flash_msg($q->rowCount() ? "PATIENT CALLED IN — TIME CAPTURED!" : "PATIENT IS ALREADY COMPLETED.");
 
         } elseif ($action === 'out') {
-
-            $tenant_pdo->prepare(
-
-                "UPDATE opd_queue_tracking
-
-                 SET status = 'Completed', out_time = NOW()
-
-                 WHERE track_id = ?"
-
-            )->execute([$track_id]);
-
-            if (function_exists('set_flash_msg')) set_flash_msg("CONSULTATION COMPLETED!");
-
-        } elseif ($action === 'reset') {
-
-            $tenant_pdo->prepare(
-
-                "UPDATE opd_queue_tracking
-
-                 SET status = 'Waiting', in_time = NULL, out_time = NULL, waiting_since = NOW()
-
-                 WHERE track_id = ?"
-
-            )->execute([$track_id]);
-
-            if (function_exists('set_flash_msg')) set_flash_msg("PATIENT RE-QUEUED!");
-
+            $q = $tenant_pdo->prepare("UPDATE opd_queue_tracking
+                SET status = 'Completed', out_time = COALESCE(out_time, NOW())
+                WHERE track_id = ? AND org_id = ? AND center_id = ?
+                  AND status = 'Inside Cabin' AND out_time IS NULL");
+            $q->execute([$track_id, $org_id, $center_id]);
+            if ($q->rowCount()) {
+                $sync = $tenant_pdo->prepare("UPDATE opd_appointments a
+                    JOIN opd_visits v ON v.appointment_id = a.appointment_id
+                    JOIN opd_queue_tracking qt ON qt.visit_id = v.visit_id
+                    SET a.status = 'Completed'
+                    WHERE qt.track_id = ? AND a.org_id = ? AND a.center_id = ?
+                      AND v.org_id = ? AND v.center_id = ?");
+                $sync->execute([$track_id, $org_id, $center_id, $org_id, $center_id]);
+                if (function_exists('set_flash_msg')) set_flash_msg("CONSULTATION COMPLETED — CHECK-OUT TIME CAPTURED!");
+            } else {
+                if (function_exists('set_flash_msg')) set_flash_msg("CALL THE PATIENT IN BEFORE CHECK-OUT.");
+            }
         }
 
-        header("Location: opd_appointments.php#nav-queue");
-
+        header("Location: opd_appointments.php#nav-appt");
         exit;
-
     } catch (Exception $e) { $err = $e->getMessage(); }
-
 }
 
-
-
-// ==============================================================
-
- // EDIT APPOINTMENT LOAD
+// EDIT APPOINTMENT LOAD
 
  // ==============================================================
 
@@ -626,9 +568,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
 
             } else {
 
-                // New/unregistered family member: appointment only.
-
-                // Existing mobile is allowed. No patient row and no UHID are created here.
+                // New/unregistered family member: check existing family/mobile first.
 
                 if (!$new_family_member) {
 
@@ -662,27 +602,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
 
 
 
+            // Generate UHID and create the patient master record at appointment booking for new patients.
+            if ($selected_uhid === '') {
+                $apptYear = (int)date('Y', strtotime($appt_date));
+                $apptMonth = (int)date('m', strtotime($appt_date));
+                $fyStart = $apptMonth >= 4 ? $apptYear : $apptYear - 1;
+                $fyEnd = $fyStart + 1;
+                $fyCode = substr((string)$fyStart, -2) . substr((string)$fyEnd, -2);
+                $orgPrefix = 'MAX';
+                $centerCode = 'LKO';
+                try { $x = $tenant_pdo->query("SELECT mnemonic FROM org_profile LIMIT 1")->fetchColumn(); if ($x) $orgPrefix = strtoupper(trim($x)); } catch (Exception $ignore) {}
+                try { $x = $tenant_pdo->prepare("SELECT center_code FROM master_centers WHERE center_id = ?"); $x->execute([$center_id]); $v = $x->fetchColumn(); if ($v) $centerCode = strtoupper(trim($v)); } catch (Exception $ignore) {}
+                $uhidBase = $orgPrefix . '-' . $centerCode . '-' . $fyCode . '-';
+                $lastStmt = $tenant_pdo->prepare("SELECT uhid FROM patient_master WHERE org_id = ? AND center_id = ? AND uhid LIKE ? ORDER BY patient_id DESC LIMIT 1 FOR UPDATE");
+                $lastStmt->execute([$org_id, $center_id, $uhidBase . '%']);
+                $lastUhid = (string)($lastStmt->fetchColumn() ?: '');
+                $nextSerial = $lastUhid !== '' ? ((int)substr($lastUhid, strlen($uhidBase)) + 1) : 1;
+                $selected_uhid = $uhidBase . $nextSerial;
+                $newPatient = $tenant_pdo->prepare("INSERT INTO patient_master (org_id, center_id, uhid, fullname, dob, gender, age, mobile, status) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 1)");
+                $newPatient->execute([$org_id, $center_id, $selected_uhid, $patient_name, $gender, $age, $mobile]);
+            }
+
             $stmt = $tenant_pdo->prepare("
-
                 INSERT INTO opd_appointments
-
                     (org_id, center_id, uhid, patient_name, mobile, age, gender,
-
                      department_id, doctor_id, appointment_date, appointment_time, status, remark, created_by)
-
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?)
-
             ");
-
-            $stmt->execute([
-
-                $org_id, $center_id, ($selected_uhid !== '' ? $selected_uhid : null), $patient_name,
-
-                $mobile, $age, $gender, $department_id, $doctor_id,
-
-                $appt_date, $appt_time, $remark, $created_by
-
-            ]);
+            $stmt->execute([$org_id, $center_id, $selected_uhid, $patient_name, $mobile, $age, $gender, $department_id, $doctor_id, $appt_date, $appt_time, $remark, $created_by]);
 
 
 
@@ -698,7 +645,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
 
             }
 
-            header("Location: opd_appointments.php");
+            header("Location: opd_appointments.php?date_filter=" . urlencode($appt_date) . "&doctor_filter=" . (int)$doctor_id . "#nav-appt");
 
             exit;
 
@@ -739,9 +686,66 @@ $appointments = $tenant_pdo->prepare("
            COALESCE(p.mobile, a.mobile) AS patient_display_mobile,
 
            COALESCE(p.uhid, '') AS patient_uhid,
-
-           d.full_name AS doctor_name,
-
+           (SELECT qt.track_id
+              FROM opd_visits vq
+              JOIN opd_queue_tracking qt ON qt.visit_id = vq.visit_id
+             WHERE vq.org_id = a.org_id
+               AND vq.center_id = a.center_id
+               AND (
+                    vq.appointment_id = a.appointment_id
+                    OR (vq.appointment_id IS NULL AND vq.patient_id = p.patient_id)
+               )
+               AND vq.doctor_id = a.doctor_id
+               AND vq.visit_date = a.appointment_date
+             ORDER BY (vq.appointment_id = a.appointment_id) DESC, vq.visit_id DESC LIMIT 1) AS queue_track_id,
+           (SELECT qt.status
+              FROM opd_visits vq
+              JOIN opd_queue_tracking qt ON qt.visit_id = vq.visit_id
+             WHERE vq.org_id = a.org_id
+               AND vq.center_id = a.center_id
+               AND (
+                    vq.appointment_id = a.appointment_id
+                    OR (vq.appointment_id IS NULL AND vq.patient_id = p.patient_id)
+               )
+               AND vq.doctor_id = a.doctor_id
+               AND vq.visit_date = a.appointment_date
+             ORDER BY (vq.appointment_id = a.appointment_id) DESC, vq.visit_id DESC LIMIT 1) AS queue_tracking_status,
+           (SELECT qt.waiting_since FROM opd_visits vq JOIN opd_queue_tracking qt ON qt.visit_id = vq.visit_id
+              WHERE vq.org_id = a.org_id AND vq.center_id = a.center_id
+                AND (
+                    vq.appointment_id = a.appointment_id
+                    OR (vq.appointment_id IS NULL AND vq.patient_id = p.patient_id)
+                )
+                AND vq.doctor_id = a.doctor_id AND vq.visit_date = a.appointment_date
+              ORDER BY (vq.appointment_id = a.appointment_id) DESC, vq.visit_id DESC LIMIT 1) AS queue_present_time,
+           (SELECT qt.in_time FROM opd_visits vq JOIN opd_queue_tracking qt ON qt.visit_id = vq.visit_id
+              WHERE vq.org_id = a.org_id AND vq.center_id = a.center_id
+                AND (
+                    vq.appointment_id = a.appointment_id
+                    OR (vq.appointment_id IS NULL AND vq.patient_id = p.patient_id)
+                )
+                AND vq.doctor_id = a.doctor_id AND vq.visit_date = a.appointment_date
+              ORDER BY (vq.appointment_id = a.appointment_id) DESC, vq.visit_id DESC LIMIT 1) AS queue_in_time,
+           (SELECT qt.out_time FROM opd_visits vq JOIN opd_queue_tracking qt ON qt.visit_id = vq.visit_id
+              WHERE vq.org_id = a.org_id AND vq.center_id = a.center_id
+                AND (
+                    vq.appointment_id = a.appointment_id
+                    OR (vq.appointment_id IS NULL AND vq.patient_id = p.patient_id)
+                )
+                AND vq.doctor_id = a.doctor_id AND vq.visit_date = a.appointment_date
+              ORDER BY (vq.appointment_id = a.appointment_id) DESC, vq.visit_id DESC LIMIT 1) AS queue_out_time,
+           (SELECT vq.token_no
+               FROM opd_visits vq
+              WHERE vq.org_id = a.org_id
+                AND vq.center_id = a.center_id
+                AND (
+                    vq.appointment_id = a.appointment_id
+                    OR (vq.appointment_id IS NULL AND vq.patient_id = p.patient_id)
+                )
+                AND vq.doctor_id = a.doctor_id
+                AND vq.visit_date = a.appointment_date
+              ORDER BY (vq.appointment_id = a.appointment_id) DESC, vq.visit_id DESC LIMIT 1) AS real_token_no,
+            d.full_name AS doctor_name,
            dept.dept_name
 
     FROM opd_appointments a
@@ -762,13 +766,25 @@ $appointments->execute([$org_id, $center_id, $date_filter]);
 
 $appointments = $appointments->fetchAll(PDO::FETCH_ASSOC);
 
-
+// Summary data for the right-hand Appointment Desk panel.
+$apptStatusCounts = ['Pending' => 0, 'Confirmed' => 0, 'Checked In' => 0, 'Cancelled' => 0, 'Completed' => 0];
+$apptDepartmentCounts = [];
+foreach ($appointments as $summaryAppt) {
+    $statusKey = strtolower(trim((string)($summaryAppt['status'] ?? 'pending')));
+    if (strpos($statusKey, 'cancel') !== false) $apptStatusCounts['Cancelled']++;
+    elseif (strpos($statusKey, 'check') !== false || strpos($statusKey, 'present') !== false) $apptStatusCounts['Checked In']++;
+    elseif (strpos($statusKey, 'complete') !== false || strpos($statusKey, 'success') !== false) $apptStatusCounts['Completed']++;
+    elseif (strpos($statusKey, 'confirm') !== false) $apptStatusCounts['Confirmed']++;
+    else $apptStatusCounts['Pending']++;
+    $deptLabel = trim((string)($summaryAppt['dept_name'] ?? 'Unassigned')) ?: 'Unassigned';
+    $apptDepartmentCounts[$deptLabel] = ($apptDepartmentCounts[$deptLabel] ?? 0) + 1;
+}
 
 // --- FETCH LIVE QUEUE TRACKING ---
 
 $queue_list = $tenant_pdo->prepare("
 
-    SELECT qt.*, v.token_no, p.fullname, p.age, p.gender, p.mobile, d.full_name as doctor_name
+    SELECT qt.*, v.token_no, v.doctor_id, v.department_id, p.fullname, p.age, p.gender, p.mobile, d.full_name as doctor_name, dept.dept_name
 
     FROM opd_queue_tracking qt
 
@@ -777,6 +793,8 @@ $queue_list = $tenant_pdo->prepare("
     JOIN patient_master p ON v.patient_id = p.patient_id
 
     LEFT JOIN master_doctors d ON v.doctor_id = d.id
+
+    LEFT JOIN master_departments dept ON v.department_id = dept.id
 
     WHERE qt.org_id = ? AND qt.center_id = ? AND v.visit_date = CURDATE()
 
@@ -1140,6 +1158,110 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
 
 
+
+
+/* Appointment Desk: readable compact desktop layout; booking form scrolls inside its own panel. */
+.appointment-desk-layout{display:grid;grid-template-columns:258px minmax(0,1fr) 215px;gap:9px;align-items:stretch;height:calc(100vh - 250px);min-height:430px;max-height:720px;overflow:hidden;}
+.appointment-desk-layout>.appointment-booking-card{grid-column:1;grid-row:1;margin:0!important;min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid #cbd5e1!important;border-radius:5px!important;box-shadow:none!important;overflow:hidden;}
+.appointment-desk-layout>.appointment-schedule-card{grid-column:2;grid-row:1;margin:0!important;min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid #cbd5e1!important;border-radius:5px!important;box-shadow:none!important;overflow:hidden;}
+.appointment-booking-card .card-header,.appointment-schedule-card .card-header{background:#f8fafc!important;padding:9px 10px!important;flex:0 0 auto;}
+.appointment-booking-card .card-body{padding:10px!important;overflow-y:auto;overflow-x:hidden;min-height:0;flex:1 1 auto;scrollbar-gutter:stable;}
+.appointment-booking-card form>.row{display:flex;flex-direction:column;gap:8px!important;}
+.appointment-booking-card form>.row>[class*="col-"]{width:100%;max-width:100%;flex:0 0 100%;}
+.appointment-booking-card .form-label{font-size:11px!important;font-weight:700!important;text-transform:uppercase;letter-spacing:.01em;margin-bottom:3px!important;}
+.appointment-booking-card .form-control,.appointment-booking-card .form-select{min-height:34px;font-size:12px;padding:5px 8px;}
+.appointment-booking-card .btn{min-height:35px;font-size:12px;}
+.appointment-schedule-card .table-responsive{overflow:auto!important;max-height:none!important;min-height:0;flex:1 1 auto;}
+.appointment-schedule-card table{min-width:600px;font-size:12px!important;}
+.appointment-schedule-card table th{white-space:nowrap;font-size:11px;text-transform:uppercase;background:#f1f5f9!important;padding:10px 8px!important;}
+.appointment-schedule-card table td{padding:10px 8px!important;border-color:#e2e8f0;}
+.appointment-schedule-card .appt-filter-date-wrap{max-width:145px;}
+.appointment-schedule-card .appointment-doctor-filter{min-width:155px;max-width:210px;font-size:12px;}
+.appointment-context-row{transition:background-color .12s ease;}
+.queue-time-stamps{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px;font-size:9px;line-height:1.2;color:#475569;text-transform:uppercase}
+.queue-time-stamps span{white-space:nowrap;background:#f8fafc;border:1px solid #e2e8f0;border-radius:3px;padding:2px 4px}
+.queue-time-stamps b{color:#0284c7;font-weight:800}
+.appointment-context-row.appt-row-pending,.appointment-context-row.appt-row-pending>*{background-color:#fff7cc!important;}
+.appointment-context-row.appt-row-confirmed,.appointment-context-row.appt-row-confirmed>*{background-color:#dcfce7!important;}
+.appointment-context-row.appt-row-checked-in,.appointment-context-row.appt-row-checked-in>*{background-color:#dbeafe!important;}
+.appointment-context-row.appt-row-cancelled,.appointment-context-row.appt-row-cancelled>*{background-color:#fee2e2!important;}
+.appointment-context-row:hover{filter:brightness(.97);}
+.appointment-context-row:focus{outline:2px solid #0284c7;outline-offset:-2px;}
+.appointment-side-summary{grid-column:3;grid-row:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;background:#fff;border:1px solid #cbd5e1;border-radius:5px;padding:9px 10px;font-size:11px;color:#334155;}
+.appointment-side-summary h6{font-size:11px;font-weight:800;color:#7e22ce;text-transform:uppercase;margin:0 0 7px;padding-bottom:5px;border-bottom:1px solid #e2e8f0;}
+.appointment-legend-item{display:flex;align-items:center;gap:7px;margin:0 0 7px;font-size:10px;text-transform:uppercase;}
+.appointment-legend-dot{width:8px;height:8px;border-radius:2px;display:inline-block;flex:0 0 8px;}
+.appointment-summary-line{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px dotted #cbd5e1;font-size:10px;}
+.appointment-summary-line strong{color:#0f172a;}
+.appointment-summary-line:last-child{border-bottom:0;}
+.appointment-summary-section{margin-top:12px;}
+@media(max-width:1100px){.appointment-desk-layout{grid-template-columns:245px minmax(0,1fr);height:calc(100vh - 225px);min-height:420px;}.appointment-side-summary{grid-column:1 / -1;grid-row:2;max-height:180px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;}}
+@media(max-width:760px){.appointment-desk-layout{grid-template-columns:minmax(0,1fr);height:auto;max-height:none;min-height:0;overflow:visible;}.appointment-desk-layout>.appointment-booking-card{height:390px;}.appointment-desk-layout>.appointment-schedule-card{height:55vh;min-height:320px;}.appointment-side-summary{grid-column:1;grid-row:auto;max-height:none;display:block;}.appointment-booking-card .card-body{overflow-y:auto;}.appointment-schedule-card .table-responsive{max-height:none!important;}}
+
+/* VB.NET-style right-click context menu */
+.opd-context-menu {
+    position: fixed; z-index: 100000; display: none; min-width: 220px;
+    padding: 5px 0; background: #fff; border: 1px solid #cbd5e1;
+    border-radius: 5px; box-shadow: 0 8px 24px rgba(15,23,42,.20);
+    color: #1f2937; font-size: 12px; text-transform: uppercase;
+}
+.opd-context-menu.show { display: block; }
+.opd-context-menu button {
+    display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 13px;
+    border: 0; background: transparent; color: inherit; text-align: left;
+    font: inherit; white-space: nowrap; cursor: pointer;
+}
+.opd-context-menu button i { width: 16px; font-size: 14px; color: #475569; }
+.opd-context-menu button:hover { background: #eaf2ff; color: #0759b8; }
+.opd-context-menu button:hover i { color: #0759b8; }
+.opd-context-menu .context-divider { height: 1px; margin: 4px 0; background: #e2e8f0; }
+.appointment-context-row, .queue-context-row { cursor: context-menu; }
+
+.opd-registration-workspace { background:#f1f5f9; border:1px solid #dbe3ed; border-radius:12px; overflow:hidden; box-shadow:0 4px 16px rgba(15,23,42,.06); }
+.opd-registration-workspace[hidden] { display:none !important; }
+.opd-workspace-toolbar { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 18px; background:#fff; border-bottom:1px solid #e2e8f0; }
+.opd-workspace-eyebrow { color:#64748b; font-size:10px; font-weight:800; letter-spacing:.08em; margin-bottom:4px; }
+.opd-workspace-frame-wrap { height:calc(100vh - 245px); min-height:540px; background:#f8fafc; }
+#opdRegistrationFrame { display:block; width:100%; height:100%; border:0; background:#f8fafc; }
+body.opd-registration-open #pills-tabContent { display:none !important; }
+body.opd-registration-open #pills-tab { display:none !important; }
+@media(max-width:768px) { .opd-workspace-toolbar { align-items:flex-start; flex-direction:column; } .opd-workspace-frame-wrap { height:calc(100vh - 260px); min-height:620px; } }
+
+.appointment-context-row:focus-visible, .queue-context-row:focus-visible { outline: 2px solid #0284c7; outline-offset: -2px; }
+#queueDoctorFilter { font-size:11px; }
+#queueStatusSummary .badge { font-size:10px; padding:6px 9px; }
+#opdRegistrationModal .modal-dialog { margin:0; max-width:none; }
+
+
+/* Compact Appointment Desk header: legend sits inside the same block as the tab */
+#pills-tab{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:7px 9px!important;min-height:54px}
+#pills-tab .nav-item{flex:0 0 auto}
+.appointment-legend-bar{display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:12px;background:transparent;border:0;border-radius:0;padding:0;margin:0 0 0 auto;font-size:10px;color:#334155;min-width:0}
+.appointment-legend-bar .appointment-legend-item{margin:0;white-space:nowrap;font-size:10px}
+.appointment-desk-layout{grid-template-columns:300px minmax(0,1fr) 215px;gap:8px;height:calc(100vh - 250px);min-height:420px}
+.appointment-booking-card .card-body{padding:7px!important;overflow-y:auto}
+.appointment-booking-card form>.row{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 7px!important;margin:0!important}
+.appointment-booking-card form>.row>[class*="col-"]{width:auto!important;max-width:none!important;flex:initial!important;padding:0!important;min-width:0}
+.appointment-booking-card .form-label{font-size:10px!important;margin-bottom:2px!important;line-height:1.15}
+.appointment-booking-card .form-control,.appointment-booking-card .form-select{min-height:29px!important;height:29px;font-size:11px!important;padding:3px 6px!important}
+.appointment-booking-card .appt-date-wrap .form-control{padding-right:35px!important}
+.appointment-booking-card .appt-date-btn{width:30px}
+.appointment-booking-card .btn{min-height:29px!important;font-size:10px!important;padding:4px 6px!important}
+ .appointment-schedule-card .card-header{padding:6px 8px!important;gap:6px!important}
+.appointment-schedule-card .card-header h6{font-size:11px!important;line-height:1.15;margin:0!important}
+.appointment-schedule-card .table-responsive{min-height:0}
+.appointment-schedule-card table{font-size:11px!important;line-height:1.15}
+.appointment-schedule-card table th{padding:6px 6px!important;font-size:10px!important}
+.appointment-schedule-card table td{padding:5px 6px!important;vertical-align:middle!important}
+.appointment-schedule-card table td .fw-bold{line-height:1.15}
+.appointment-schedule-card table td small{font-size:9px!important;line-height:1.1;display:inline-block;margin-top:2px}
+.appointment-context-row.appt-row-pending,.appointment-context-row.appt-row-pending>*{background-color:#fff7cc!important}
+.appointment-context-row.appt-row-confirmed,.appointment-context-row.appt-row-confirmed>*{background-color:#dcfce7!important}
+.appointment-context-row.appt-row-checked-in,.appointment-context-row.appt-row-checked-in>*{background-color:#dbeafe!important}
+.appointment-context-row.appt-row-cancelled,.appointment-context-row.appt-row-cancelled>*{background-color:#fee2e2!important}
+@media(max-width:1100px){.appointment-desk-layout{grid-template-columns:280px minmax(0,1fr);height:calc(100vh - 245px)}}
+@media(max-width:760px){#pills-tab{align-items:flex-start}.appointment-legend-bar{gap:7px;margin:4px 0 0;width:100%}.appointment-desk-layout{grid-template-columns:minmax(0,1fr);height:auto}.appointment-booking-card form>.row{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
 </style>
 
 
@@ -1169,12 +1291,12 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
     </li>
 
-    <li class="nav-item" role="presentation">
-
-        <button class="nav-link px-4" id="nav-queue-tab" data-bs-toggle="pill" data-bs-target="#nav-queue" type="button" role="tab"><i class="bi bi-display me-2"></i>Live Queue Tracking</button>
-
-    </li>
-
+    <div class="appointment-legend-bar" aria-label="Appointment status legend">
+        <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#f59e0b"></i> Scheduled / Pending</span>
+        <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#22c55e"></i> Confirmed / Completed</span>
+        <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#0ea5e9"></i> Patient Checked In</span>
+        <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#ef4444"></i> Cancelled</span>
+    </div>
 </ul>
 
 
@@ -1191,7 +1313,9 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
     <div class="tab-pane fade show active" id="nav-appt" role="tabpanel">
 
-        <!-- BOOK NEW APPOINTMENT -->
+      <div class="appointment-desk-layout">
+
+        <!-- BOOK NEW APPOINTMENT: compact left-side panel -->
 
         <div class="card border-0 shadow-sm rounded-3 mb-3 appointment-booking-card">
 
@@ -1271,76 +1395,6 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
                         </div>
 
-
-
-                        <div class="col-md-2">
-
-                            <label class="form-label small fw-semibold text-secondary mb-1">Time</label>
-
-                            <input type="time" name="appointment_time" class="form-control form-control-sm text-dark fw-bold" value="<?= htmlspecialchars($edit_appointment['appointment_time'] ?? '') ?>">
-
-                        </div>
-
-
-
-                        <div class="col-md-2">
-
-                            <label class="form-label small fw-semibold text-secondary mb-1">Mobile No. / Search *</label>
-
-                            <input type="text" name="mobile" id="appointment_mobile" class="form-control form-control-sm" maxlength="10" placeholder="MOBILE NO." value="<?= htmlspecialchars($edit_appointment['patient_display_mobile'] ?? $edit_appointment['mobile'] ?? '') ?>" required>
-
-                            <input type="hidden" name="uhid" id="appointment_uhid" value="<?= htmlspecialchars($edit_appointment['uhid'] ?? '') ?>">
-
-                            <input type="hidden" name="new_family_member" id="appointment_new_family_member" value="<?= empty($edit_appointment['uhid']) ? '1' : '0' ?>">
-
-                            <div id="appointment_patient_status" class="small mt-1"></div>
-
-                            <div id="appointment_family_panel" class="family-panel d-none"></div>
-
-                            <button type="button" id="appointment_family_open_btn" class="btn btn-outline-primary btn-sm w-100 mt-1 d-none" style="font-size:10px;font-weight:800;">VIEW FAMILY MEMBERS</button>
-
-                        </div>
-
-
-
-                        <div class="col-md-3">
-
-                            <label class="form-label small fw-semibold text-secondary mb-1">Patient Name *</label>
-
-                            <input type="text" name="patient_name" id="appointment_patient_name" class="form-control form-control-sm" placeholder="PATIENT NAME" value="<?= htmlspecialchars($edit_appointment['patient_display_name'] ?? $edit_appointment['patient_name'] ?? '') ?>" required>
-
-                        </div>
-
-
-
-                        <div class="col-md-1">
-
-                            <label class="form-label small fw-semibold text-secondary mb-1">Age</label>
-
-                            <input type="number" name="age" id="appointment_age" class="form-control form-control-sm" placeholder="AGE" value="<?= htmlspecialchars($edit_appointment['patient_display_age'] ?? $edit_appointment['age'] ?? '') ?>">
-
-                        </div>
-
-
-
-                        <div class="col-md-2">
-
-                            <label class="form-label small fw-semibold text-secondary mb-1">Gender</label>
-
-                            <select name="gender" id="appointment_gender" class="form-select form-select-sm">
-
-                                <option value="Male" <?= (($edit_appointment['patient_display_gender'] ?? $edit_appointment['gender'] ?? 'Male') === 'Male') ? 'selected' : '' ?>>Male</option>
-
-                                <option value="Female" <?= (($edit_appointment['patient_display_gender'] ?? $edit_appointment['gender'] ?? '') === 'Female') ? 'selected' : '' ?>>Female</option>
-
-                                <option value="Other" <?= (($edit_appointment['patient_display_gender'] ?? $edit_appointment['gender'] ?? '') === 'Other') ? 'selected' : '' ?>>Other</option>
-
-                            </select>
-
-                        </div>
-
-
-
                         <div class="col-md-3">
 
                             <label class="form-label small fw-semibold text-secondary mb-1">Department</label>
@@ -1358,8 +1412,6 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
                             </select>
 
                         </div>
-
-
 
                         <div class="col-md-3">
 
@@ -1379,7 +1431,63 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
                         </div>
 
+                        <div class="col-md-2">
 
+                            <label class="form-label small fw-semibold text-secondary mb-1">Time</label>
+
+                            <input type="time" name="appointment_time" class="form-control form-control-sm text-dark fw-bold" value="<?= htmlspecialchars($edit_appointment['appointment_time'] ?? '') ?>">
+
+                        </div>
+
+                        <div class="col-md-2">
+
+                            <label class="form-label small fw-semibold text-secondary mb-1">Mobile No. / Search *</label>
+
+                            <input type="text" name="mobile" id="appointment_mobile" class="form-control form-control-sm" maxlength="10" placeholder="MOBILE NO." value="<?= htmlspecialchars($edit_appointment['patient_display_mobile'] ?? $edit_appointment['mobile'] ?? '') ?>" required>
+
+                            <input type="hidden" name="uhid" id="appointment_uhid" value="<?= htmlspecialchars($edit_appointment['uhid'] ?? '') ?>">
+
+                            <input type="hidden" name="new_family_member" id="appointment_new_family_member" value="<?= empty($edit_appointment['uhid']) ? '1' : '0' ?>">
+
+                            <div id="appointment_patient_status" class="small mt-1"></div>
+
+                            <div id="appointment_family_panel" class="family-panel d-none"></div>
+
+                            <button type="button" id="appointment_family_open_btn" class="btn btn-outline-primary btn-sm w-100 mt-1 d-none" style="font-size:10px;font-weight:800;">VIEW FAMILY MEMBERS</button>
+
+                        </div>
+
+                        <div class="col-md-3">
+
+                            <label class="form-label small fw-semibold text-secondary mb-1">Patient Name *</label>
+
+                            <input type="text" name="patient_name" id="appointment_patient_name" class="form-control form-control-sm" placeholder="PATIENT NAME" value="<?= htmlspecialchars($edit_appointment['patient_display_name'] ?? $edit_appointment['patient_name'] ?? '') ?>" required>
+
+                        </div>
+
+                        <div class="col-md-1">
+
+                            <label class="form-label small fw-semibold text-secondary mb-1">Age</label>
+
+                            <input type="number" name="age" id="appointment_age" class="form-control form-control-sm" placeholder="AGE" value="<?= htmlspecialchars($edit_appointment['patient_display_age'] ?? $edit_appointment['age'] ?? '') ?>">
+
+                        </div>
+
+                        <div class="col-md-2">
+
+                            <label class="form-label small fw-semibold text-secondary mb-1">Gender</label>
+
+                            <select name="gender" id="appointment_gender" class="form-select form-select-sm">
+
+                                <option value="Male" <?= (($edit_appointment['patient_display_gender'] ?? $edit_appointment['gender'] ?? 'Male') === 'Male') ? 'selected' : '' ?>>Male</option>
+
+                                <option value="Female" <?= (($edit_appointment['patient_display_gender'] ?? $edit_appointment['gender'] ?? '') === 'Female') ? 'selected' : '' ?>>Female</option>
+
+                                <option value="Other" <?= (($edit_appointment['patient_display_gender'] ?? $edit_appointment['gender'] ?? '') === 'Other') ? 'selected' : '' ?>>Other</option>
+
+                            </select>
+
+                        </div>
 
                         <div class="col-md-4">
 
@@ -1388,8 +1496,6 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
                             <input type="text" name="remark" class="form-control form-control-sm" placeholder="Any remarks..." value="<?= htmlspecialchars($edit_appointment['remark'] ?? '') ?>">
 
                         </div>
-
-
 
                         <div class="col-md-2">
 
@@ -1421,7 +1527,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
             <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2">
 
-                <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-calendar2-week text-primary me-2"></i>Appointments Schedule</h6>
+                <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-calendar2-week text-primary me-2"></i>Consultation Appointments <small class="text-muted fw-normal d-block mt-1">Right-click for appointment, billing and queue actions</small></h6>
 
                 <form method="GET" class="d-flex gap-2">
 
@@ -1458,6 +1564,13 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
                     </div>
 
                 </form>
+                <select id="appointmentDoctorFilter" class="form-select form-select-sm appointment-doctor-filter" aria-label="Filter appointments by doctor">
+                    <?php $initialDoctorFilter = isset($_GET['doctor_filter']) ? (string)(int)$_GET['doctor_filter'] : '__ALL__'; ?>
+                    <option value="__ALL__" <?= $initialDoctorFilter === '__ALL__' ? 'selected' : '' ?>>ALL DOCTORS</option>
+                    <?php foreach ($doctors as $doc): ?>
+                        <option value="<?= (int)$doc['id'] ?>" <?= $initialDoctorFilter === (string)$doc['id'] ? 'selected' : '' ?>><?= htmlspecialchars($doc['full_name']) ?></option>
+                    <?php endforeach; ?>
+                </select>
 
             </div>
 
@@ -1470,8 +1583,8 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
                     <thead class="table-light sticky-top">
 
                         <tr>
-
-                            <th class="ps-3">Time</th>
+                            <th class="ps-3">Serial No.</th>
+                            <th>Time</th>
 
                             <th>Patient Name</th>
 
@@ -1481,10 +1594,6 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
                             <th>Doctor</th>
 
-                            <th class="text-center">Status</th>
-
-                            <th class="text-end pe-3">Action</th>
-
                         </tr>
 
                     </thead>
@@ -1493,27 +1602,51 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
                         <?php if (empty($appointments)): ?>
 
-                            <tr><td colspan="7" class="text-center py-5 text-muted">No appointments found for the selected date.</td></tr>
+                            <tr><td colspan="6" class="text-center py-5 text-muted appointment-empty-row">Select a doctor to view appointments.</td></tr>
 
                         <?php else: ?>
 
-                            <?php foreach ($appointments as $row):
+                            <?php foreach ($appointments as $appt_index => $row):
 
                                 $sc = $row['status'] == 'Confirmed' ? 'success' : ($row['status'] == 'Cancelled' ? 'danger' : 'warning');
 
                             ?>
 
-                                <tr>
+                                <?php
+                                    $rowStatus = strtolower(trim((string)(($row['queue_tracking_status'] ?? '') ?: ($row['status'] ?? 'pending'))));
+                                    $rowClass = (strpos($rowStatus, 'cancel') !== false) ? 'appt-row-cancelled' : ((strpos($rowStatus, 'check') !== false || strpos($rowStatus, 'present') !== false || strpos($rowStatus, 'inside cabin') !== false) ? 'appt-row-checked-in' : ((strpos($rowStatus, 'confirm') !== false || strpos($rowStatus, 'complete') !== false || strpos($rowStatus, 'success') !== false) ? 'appt-row-confirmed' : 'appt-row-pending'));
+                                ?>
+                                <tr class="appointment-context-row <?= $rowClass ?>" tabindex="0"
+                                    data-context-type="appointment"
+                                    data-doctor-id="<?= (int)($row['doctor_id'] ?? 0) ?>"
+                                    data-appointment-id="<?= (int)$row['appointment_id'] ?>"
+                                    data-appointment-status="<?= htmlspecialchars((string)$row['status'], ENT_QUOTES) ?>"
+                                    data-appointment-date="<?= htmlspecialchars((string)$date_filter, ENT_QUOTES) ?>"
+                                    data-appointment-name="<?= htmlspecialchars((string)($row['patient_display_name'] ?? $row['patient_name']), ENT_QUOTES) ?>"
+                                    data-patient-name="<?= htmlspecialchars((string)($row['patient_display_name'] ?? $row['patient_name']), ENT_QUOTES) ?>"
+                                    data-patient-mobile="<?= htmlspecialchars((string)($row['patient_display_mobile'] ?? $row['mobile']), ENT_QUOTES) ?>"
+                                    data-patient-uhid="<?= htmlspecialchars((string)($row['patient_uhid'] ?? ''), ENT_QUOTES) ?>"
+                                    data-track-id="<?= (int)($row['queue_track_id'] ?? 0) ?>"
+                                    data-queue-status="<?= htmlspecialchars((string)($row['queue_tracking_status'] ?? ''), ENT_QUOTES) ?>"
+                                    data-present-time="<?= htmlspecialchars((string)($row['queue_present_time'] ?? ''), ENT_QUOTES) ?>">
 
-                                    <td class="ps-3 fw-bold text-primary">
-
-                                        <?= !empty($row['appointment_time']) ? date('h:i A', strtotime($row['appointment_time'])) : 'N/A' ?>
+                                    <td class="ps-3 fw-bold text-primary"><?= ($row['real_token_no'] !== null && $row['real_token_no'] !== '') ? htmlspecialchars(getFYToken($row['real_token_no'], $date_filter)) : 'N/A' ?></td>
+                                    <td class="fw-bold text-primary">
+                                        <?= !empty($row['appointment_time']) ? date('h:i:s A', strtotime($row['appointment_time'])) : 'N/A' ?>
 
                                     </td>
 
                                     <td>
 
-                                        <div class="fw-bold text-dark"><?= htmlspecialchars($row['patient_display_name'] ?? $row['patient_name']) ?></div><?php if (!empty($row['patient_uhid'])): ?><small class="text-muted"><?= htmlspecialchars($row['patient_uhid']) ?></small><?php endif; ?>
+                                        <div class="fw-bold text-dark"><?= htmlspecialchars($row['patient_display_name'] ?? $row['patient_name']) ?></div>
+                                        <?php if (!empty($row['patient_uhid'])): ?><small class="text-muted"><?= htmlspecialchars($row['patient_uhid']) ?></small><?php endif; ?>
+                                        <?php if (!empty($row['queue_present_time']) || !empty($row['queue_in_time']) || !empty($row['queue_out_time'])): ?>
+                                            <div class="queue-time-stamps">
+                                                <?php if (!empty($row['queue_present_time'])): ?><span><b>PRESENT</b> <?= htmlspecialchars(date('h:i:s A', strtotime($row['queue_present_time']))) ?></span><?php endif; ?>
+                                                <?php if (!empty($row['queue_in_time'])): ?><span><b>IN</b> <?= htmlspecialchars(date('h:i:s A', strtotime($row['queue_in_time']))) ?></span><?php endif; ?>
+                                                <?php if (!empty($row['queue_out_time'])): ?><span><b>OUT</b> <?= htmlspecialchars(date('h:i:s A', strtotime($row['queue_out_time']))) ?></span><?php endif; ?>
+                                            </div>
+                                        <?php endif; ?>
 
                                     </td>
 
@@ -1523,101 +1656,6 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
                                     <td><div class="fw-semibold text-dark"><?= htmlspecialchars($row['doctor_name'] ?? 'N/A') ?></div></td>
 
-                                    <td class="text-center">
-
-                                        <span class="badge bg-<?= $sc ?>-subtle text-<?= $sc ?> border border-<?= $sc ?>">
-
-                                            <?= htmlspecialchars($row['status']) ?>
-
-                                        </span>
-
-                                    </td>
-
-                                    <td class="text-end pe-3">
-
-                                        <div class="d-inline-flex gap-1 align-items-center action-buttons">
-
-                                            <?php if($row['status'] !== 'Cancelled'): ?>
-
-                                                <a href="?date_filter=<?= urlencode($date_filter) ?>&edit_appointment=<?= (int)$row['appointment_id'] ?>"
-
-                                                   class="btn btn-sm btn-outline-primary action-btn"
-
-                                                   title="EDIT APPOINTMENT">
-
-                                                    <i class="bi bi-pencil-square"></i><span class="action-label">EDIT</span>
-
-                                                </a>
-
-                                            <?php endif; ?>
-
-
-
-                                            <?php if($row['status'] === 'Pending'): ?>
-
-                                                <a href="?date_filter=<?= urlencode($date_filter) ?>&update_status=Confirmed&id=<?= (int)$row['appointment_id'] ?>"
-
-                                                   class="btn btn-sm btn-outline-success action-btn"
-
-                                                   title="CONFIRM APPOINTMENT">
-
-                                                    <i class="bi bi-check-circle"></i><span class="action-label">CONFIRM</span>
-
-                                                </a>
-
-                                                <a href="?date_filter=<?= urlencode($date_filter) ?>&update_status=Cancelled&id=<?= (int)$row['appointment_id'] ?>"
-
-                                                   class="btn btn-sm btn-outline-danger action-btn"
-
-                                                   title="CANCEL APPOINTMENT"
-
-                                                   onclick="return confirmAppointmentCancel(event, this);">
-
-                                                    <i class="bi bi-x-circle"></i><span class="action-label">CANCEL</span>
-
-                                                </a>
-
-                                            <?php elseif($row['status'] === 'Confirmed'): ?>
-
-                                                <a href="opd_registration.php?appointment_id=<?= (int)$row['appointment_id'] ?>"
-
-                                                   class="btn btn-sm btn-outline-success action-btn"
-
-                                                   title="CHECK-IN / REGISTER PATIENT">
-
-                                                    <i class="bi bi-box-arrow-in-right"></i><span class="action-label">CHECK-IN</span>
-
-                                                </a>
-
-                                                <a href="?date_filter=<?= urlencode($date_filter) ?>&update_status=Cancelled&id=<?= (int)$row['appointment_id'] ?>"
-
-                                                   class="btn btn-sm btn-outline-danger action-btn"
-
-                                                   title="CANCEL APPOINTMENT"
-
-                                                   onclick="return confirmAppointmentCancel(event, this);">
-
-                                                    <i class="bi bi-x-circle"></i><span class="action-label">CANCEL</span>
-
-                                                </a>
-
-                                            <?php elseif($row['status'] === 'Checked In'): ?>
-
-                                                <a href="opd_registration.php?appointment_id=<?= (int)$row['appointment_id'] ?>"
-
-                                                   class="btn btn-sm btn-outline-success action-btn"
-
-                                                   title="OPEN REGISTRATION">
-
-                                                    <i class="bi bi-folder2-open"></i><span class="action-label">REGISTRATION</span>
-
-                                                </a>
-
-                                            <?php endif; ?>
-
-                                        </div>
-
-                                    </td>
 
                                 </tr>
 
@@ -1633,175 +1671,75 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
         </div>
 
-    </div>
-
-
-
-    <!-- ========================================== -->
-
-    <!-- TAB 2: LIVE QUEUE & TRACKING (TV DISPLAY) -->
-
-    <!-- ========================================== -->
-
-    <div class="tab-pane fade" id="nav-queue" role="tabpanel">
-
-
-
-        <!-- Tracking Table -->
-
-        <div class="card border-0 shadow-sm rounded-3">
-
-            <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
-
-                <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-clock-history text-primary me-2"></i>Patient Timeline & Tracking</h6>
-
-                <input type="text" id="searchQueue" class="form-control form-control-sm w-25" placeholder="Search Token / Name...">
-
-            </div>
-
-            <div class="table-responsive" style="max-height: 600px;">
-
-                <table class="table table-hover align-middle mb-0 small" id="queueTable">
-
-                    <thead class="table-light sticky-top">
-
-                        <tr>
-
-                            <th class="ps-3">Token No.</th>
-
-                            <th>Patient Name</th>
-
-                            <th>Consulting Doctor</th>
-
-                            <th class="text-center">Patient Present</th>
-
-                            <th class="text-center">In Time</th>
-
-                            <th class="text-center">Out Time</th>
-
-                            <th class="text-center">Status</th>
-
-                            <th class="text-end pe-3">Desk Actions</th>
-
-                        </tr>
-
-                    </thead>
-
-                    <tbody>
-
-                        <?php if (empty($queue_list)): ?>
-
-                            <tr><td colspan="8" class="text-center py-5 text-muted">Queue is empty today. Generate tokens from Registration desk.</td></tr>
-
-                        <?php else: ?>
-
-                            <?php foreach ($queue_list as $q): 
-
-                                $sBadge = 'bg-secondary';
-
-                                if($q['status'] == 'Waiting') $sBadge = 'bg-warning text-dark border-warning bg-opacity-10 border';
-
-                                elseif($q['status'] == 'Inside Cabin') $sBadge = 'bg-primary text-white status-blink';
-
-                                elseif($q['status'] == 'Completed') $sBadge = 'bg-success text-success border-success bg-opacity-10 border';
-
-                            ?>
-
-                                <?php
-
-                                    $waitingSeconds = 0;
-
-                                    if (!empty($q['waiting_since'])) {
-
-                                        $waitStartTs = strtotime($q['waiting_since']);
-
-                                        $endTs = !empty($q['in_time']) ? strtotime($q['in_time']) : time();
-
-                                        if ($waitStartTs) $waitingSeconds = max(0, $endTs - $waitStartTs);
-
-                                    }
-
-                                    $waitHours = floor($waitingSeconds / 3600);
-
-                                    $waitMinutes = floor(($waitingSeconds % 3600) / 60);
-
-                                    $waitSecs = $waitingSeconds % 60;
-
-                                    $waitDisplay = sprintf('%02d:%02d:%02d', $waitHours, $waitMinutes, $waitSecs);
-
-                                ?>
-
-                                <tr class="<?= $q['status'] == 'Inside Cabin' ? 'table-primary bg-opacity-10' : '' ?>">
-
-                                    <td class="ps-3 fw-bold fs-6 text-dark"><?= getFYToken($q['token_no'], $today_date) ?></td>
-
-                                    <td class="fw-bold text-secondary"><?= htmlspecialchars($q['fullname']) ?></td>
-
-                                    <td class="fw-semibold text-dark"><?= htmlspecialchars($q['doctor_name'] ?? 'General') ?></td>
-
-                                    <td class="text-center text-warning fw-bold font-monospace">
-
-                                        <span class="waiting-timer" data-start="<?= !empty($q['waiting_since']) ? htmlspecialchars($q['waiting_since'], ENT_QUOTES) : '' ?>" data-end="<?= !empty($q['in_time']) ? htmlspecialchars($q['in_time'], ENT_QUOTES) : '' ?>" data-running="<?= $q['status'] === 'Waiting' ? '1' : '0' ?>">
-
-                                            <?= htmlspecialchars($waitDisplay) ?>
-
-                                        </span>
-
-                                    </td>
-
-                                    <td class="text-center text-primary fw-bold font-monospace"><?= !empty($q['in_time']) ? date('h:i A', strtotime($q['in_time'])) : '--:--' ?></td>
-
-                                    <td class="text-center text-success fw-bold font-monospace"><?= !empty($q['out_time']) ? date('h:i A', strtotime($q['out_time'])) : '--:--' ?></td>
-
-                                    <td class="text-center"><span class="badge <?= $sBadge ?> px-2 py-1"><?= htmlspecialchars($q['status']) ?></span></td>
-
-                                    <td class="text-end pe-3">
-
-                                        <select class="form-select form-select-sm queue-action-select d-inline-block fw-bold" style="width: 145px;" data-track-id="<?= (int)$q['track_id'] ?>" onchange="handleQueueAction(this)">
-
-                                            <option value="">ACTION</option>
-
-                                            <?php if($q['status'] == 'Waiting'): ?>
-
-                                                <option value="waiting">PATIENT PRESENT</option>
-
-                                                <option value="in">CALL IN</option>
-
-                                            <?php elseif($q['status'] == 'Inside Cabin'): ?>
-
-                                                <option value="out">DONE</option>
-
-                                            <?php else: ?>
-
-                                                <option value="reset">RE-QUEUE</option>
-
-                                            <?php endif; ?>
-
-                                        </select>
-
-                                    </td>
-
-                                </tr>
-
-                            <?php endforeach; ?>
-
-                        <?php endif; ?>
-
-                    </tbody>
-
-                </table>
-
-            </div>
-
-        </div>
+        <!-- RIGHT SIDEBAR: Today's Status and Appointment Summary (Legend removed only) -->
+        <aside class="appointment-side-summary" aria-label="Appointment status summary">
+            <section class="appointment-summary-section" style="margin-top:0">
+                <h6>Today's Status</h6>
+                <div class="appointment-summary-line"><span>Scheduled / Pending</span><strong id="sidePendingCount"><?= (int)$apptStatusCounts['Pending'] ?></strong></div>
+                <div class="appointment-summary-line"><span>Confirmed</span><strong id="sideConfirmedCount"><?= (int)$apptStatusCounts['Confirmed'] ?></strong></div>
+                <div class="appointment-summary-line"><span>Patient Checked In</span><strong id="sideCheckedCount"><?= (int)$apptStatusCounts['Checked In'] ?></strong></div>
+                <div class="appointment-summary-line"><span>Cancelled</span><strong id="sideCancelledCount"><?= (int)$apptStatusCounts['Cancelled'] ?></strong></div>
+                <div class="appointment-summary-line"><span>Completed</span><strong id="sideCompletedCount"><?= (int)$apptStatusCounts['Completed'] ?></strong></div>
+            </section>
+            <section class="appointment-summary-section">
+                <h6>Appointment Summary</h6>
+                <div class="appointment-summary-line"><span>Selected Date</span><strong><?= htmlspecialchars(strtoupper(date('d/M/Y', strtotime($date_filter)))) ?></strong></div>
+                <div class="appointment-summary-line"><span>Total Appointments</span><strong id="sideTotalAppointments"><?= count($appointments) ?></strong></div>
+                <?php if (!empty($apptDepartmentCounts)): foreach ($apptDepartmentCounts as $deptSummaryName => $deptSummaryCount): ?>
+                    <div class="appointment-summary-line side-department-summary" data-department-summary="<?= htmlspecialchars($deptSummaryName, ENT_QUOTES) ?>"><span><?= htmlspecialchars($deptSummaryName) ?></span><strong><?= (int)$deptSummaryCount ?></strong></div>
+                <?php endforeach; else: ?>
+                    <div class="small text-muted">No appointments for this date.</div>
+                <?php endif; ?>
+                <div class="small text-muted mt-2">Right-click an appointment to open billing, saved bills, or patient queue actions.</div>
+            </section>
+        </aside>
+      </div><!-- /.appointment-desk-layout -->
 
     </div>
 
 
 
+    </div><!-- /.tab-content -->
+
+
+
+<!-- VB.NET-style right-click context menu for appointment and queue rows -->
+<div id="opdContextMenu" class="opd-context-menu" role="menu" aria-label="Appointment actions"></div>
+
+<!-- Appointment-linked OPD Payment modal: stays on the Appointment Desk -->
+<div class="modal fade" id="opdPaymentWorkspaceModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-xl opd-payment-dialog">
+    <div class="modal-content border-0 shadow-lg">
+      <div class="modal-header py-2 px-3 bg-white">
+        <div><strong class="text-primary"><i class="bi bi-wallet2 me-2"></i>OPD PAYMENT</strong><span class="small text-muted ms-2">Appointment-linked billing</span></div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body p-0"><iframe id="opdPaymentWorkspaceFrame" title="OPD Payment" src="about:blank"></iframe></div>
+    </div>
+  </div>
 </div>
+<style>
+.opd-payment-dialog{max-width:1180px;width:calc(100vw - 32px)}
+#opdPaymentWorkspaceModal .modal-content{height:min(88vh,820px);border-radius:12px;overflow:hidden}
+#opdPaymentWorkspaceModal .modal-body{min-height:0;overflow:hidden;background:#f8fafc}
+#opdPaymentWorkspaceFrame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}
+@media(max-width:768px){.opd-payment-dialog{width:calc(100vw - 12px);margin:6px auto}#opdPaymentWorkspaceModal .modal-content{height:94vh}}
+</style>
 
-
+<!-- Inline registration workspace: replaces the OPD tables in-place; no popup/modal. -->
+<section id="opdRegistrationWorkspace" class="opd-registration-workspace" hidden>
+  <div class="opd-workspace-toolbar">
+    <div>
+      <div class="opd-workspace-eyebrow">OPD SERVICES / APPOINTMENT CHECK-IN</div>
+      <h5 class="mb-0 fw-bold"><i class="bi bi-person-vcard text-primary me-2"></i>Patient Registration</h5>
+      <div class="small text-muted mt-1">Appointment details stay linked automatically. Choose Regular Consultation or eligible Follow-up in the registration panel.</div>
+    </div>
+    <button type="button" class="btn btn-outline-secondary btn-sm fw-bold" onclick="closeRegistrationWorkspace()"><i class="bi bi-arrow-left me-1"></i> BACK TO APPOINTMENTS</button>
+  </div>
+  <div class="opd-workspace-frame-wrap">
+    <iframe id="opdRegistrationFrame" title="OPD Registration" src="about:blank"></iframe>
+  </div>
+</section>
 
 <!-- FAMILY MEMBER POPUP -->
 
@@ -1839,6 +1777,249 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <script>
+// Open OPD Payment as a full page, pre-linked to the selected appointment.
+function openRegistrationPanel(appointmentId) {
+    const frame = document.getElementById('opdPaymentWorkspaceFrame');
+    const modalEl = document.getElementById('opdPaymentWorkspaceModal');
+    if (!frame || !modalEl) {
+        window.location.href = 'opd_registration.php?appointment_id=' + encodeURIComponent(appointmentId);
+        return;
+    }
+    frame.src = 'opd_registration.php?appointment_id=' + encodeURIComponent(appointmentId) + '&embedded=1';
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+}
+function closeOpdPaymentModal(refreshDesk) {
+    const frame = document.getElementById('opdPaymentWorkspaceFrame');
+    const modalEl = document.getElementById('opdPaymentWorkspaceModal');
+    if (frame) frame.src = 'about:blank';
+    if (modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+    if (refreshDesk) window.location.reload();
+}
+window.addEventListener('message', function (event) {
+    if (!event.data || event.data.type !== 'opd-payment-saved') return;
+    closeOpdPaymentModal(true);
+});
+
+function closeRegistrationWorkspace() {
+    const frame = document.getElementById('opdRegistrationFrame');
+    const workspace = document.getElementById('opdRegistrationWorkspace');
+    const tabs = document.getElementById('pills-tab');
+    const tabContent = document.getElementById('pills-tabContent');
+    if (frame) frame.src = 'about:blank';
+    if (workspace) workspace.hidden = true;
+    if (tabs) tabs.style.display = '';
+    if (tabContent) tabContent.style.display = '';
+    document.body.classList.remove('opd-registration-open');
+}
+
+// Appointment list doctor filter: show all appointments by default; after booking, focus the selected doctor.
+(function setupAppointmentDoctorFilter(){
+    const select = document.getElementById('appointmentDoctorFilter');
+    const table = document.querySelector('.appointment-schedule-card table');
+    if (!select || !table) return;
+    const rows = Array.from(table.querySelectorAll('tbody tr[data-context-type="appointment"]'));
+    const emptyRow = table.querySelector('tbody tr.appointment-empty-row');
+    function applyFilter(){
+        const value = select.value || '__ALL__';
+        let shown = 0;
+        rows.forEach(row => {
+            const match = value === '__ALL__' || row.dataset.doctorId === value;
+            row.style.display = match ? '' : 'none';
+            if (match) shown++;
+        });
+        if (emptyRow) {
+            emptyRow.style.display = shown ? 'none' : '';
+            const cell = emptyRow.querySelector('td');
+            if (cell) cell.textContent = value === '__ALL__' ? 'No appointments found for this date.' : 'No appointments found for this doctor and date.';
+        }
+        const counts = {pending:0, confirmed:0, checked:0, cancelled:0, completed:0};
+        rows.forEach(row => {
+            if (row.style.display === 'none') return;
+            const queueStatus = (row.dataset.queueStatus || '').toLowerCase();
+            const status = queueStatus || (row.dataset.appointmentStatus || '').toLowerCase();
+            if (status.includes('cancel')) counts.cancelled++;
+            else if (status.includes('inside cabin') || status.includes('check') || status.includes('present')) counts.checked++;
+            else if (status.includes('complete') || status.includes('success')) counts.completed++;
+            else if (status.includes('confirm')) counts.confirmed++;
+            else counts.pending++;
+        });
+        const setCount = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        setCount('sidePendingCount', counts.pending); setCount('sideConfirmedCount', counts.confirmed);
+        setCount('sideCheckedCount', counts.checked); setCount('sideCancelledCount', counts.cancelled);
+        setCount('sideCompletedCount', counts.completed); setCount('sideTotalAppointments', shown);
+    }
+    select.addEventListener('change', applyFilter);
+    applyFilter();
+})();
+
+// Doctor dropdown + search + live status counts.
+(function setupQueueFilters() {
+    const table = document.getElementById('queueTable');
+    if (!table) return;
+    const rows = Array.from(table.querySelectorAll('tbody tr[data-context-type="queue"]'));
+    const doctor = document.getElementById('queueDoctorFilter');
+    const search = document.getElementById('searchQueue');
+    function update() {
+        const doctorId = doctor ? doctor.value : '';
+        const q = (search ? search.value : '').trim().toLowerCase();
+        let waiting = 0, inside = 0, completed = 0;
+        rows.forEach(row => {
+            const status = row.dataset.queueStatus || '';
+            if (status === 'Waiting') waiting++; else if (status === 'Inside Cabin') inside++; else if (status === 'Completed') completed++;
+            const doctorMatch = !doctorId || row.dataset.doctorId === doctorId;
+            const searchMatch = !q || row.innerText.toLowerCase().includes(q);
+            row.style.display = doctorMatch && searchMatch ? '' : 'none';
+        });
+        const w = document.getElementById('countWaiting');
+        const i = document.getElementById('countInside');
+        const c = document.getElementById('countCompleted');
+        if (w) w.textContent = waiting; if (i) i.textContent = inside; if (c) c.textContent = completed;
+    }
+    if (doctor) doctor.addEventListener('change', update);
+    if (search) search.addEventListener('input', update);
+    update();
+})();
+
+// VB.NET-style context menu: reuses only actions already present in this PHP page.
+(function () {
+    const menu = document.getElementById('opdContextMenu');
+    if (!menu) return;
+
+    let activeRow = null;
+    const esc = (value) => String(value || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+
+    function addItem(label, icon, action, dividerBefore) {
+        if (dividerBefore && menu.children.length) {
+            const divider = document.createElement('div');
+            divider.className = 'context-divider';
+            menu.appendChild(divider);
+        }
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.setAttribute('role', 'menuitem');
+        button.innerHTML = '<i class="bi ' + icon + '"></i><span>' + esc(label) + '</span>';
+        button.addEventListener('click', function () {
+            const row = activeRow;
+            hideMenu();
+            if (row) action(row);
+        });
+        menu.appendChild(button);
+    }
+
+    function showMenu(row, x, y) {
+        activeRow = row;
+        menu.innerHTML = '';
+        const type = row.dataset.contextType;
+        if (type === 'appointment') {
+            const id = Number(row.dataset.appointmentId || 0);
+            const status = row.dataset.appointmentStatus || '';
+            const date = row.dataset.appointmentDate || '';
+            if (!id) return;
+
+            if (status !== 'Cancelled') {
+                addItem('Edit Appointment', 'bi-pencil-square', r => {
+                    location.href = '?date_filter=' + encodeURIComponent(r.dataset.appointmentDate) + '&edit_appointment=' + encodeURIComponent(r.dataset.appointmentId);
+                });
+            }
+            // Payment is available only before consultation is completed.
+            // A completed queue visit must not offer another registration/payment entry.
+            const queueStatus = String(row.dataset.queueStatus || '').trim().toLowerCase();
+            const appointmentStatus = String(status || '').trim().toLowerCase();
+            const consultationCompleted =
+                queueStatus === 'completed' ||
+                appointmentStatus === 'completed' ||
+                appointmentStatus === 'complete';
+
+            if (status.toLowerCase() !== 'cancelled' && !consultationCompleted) {
+                addItem('OPD Payment', 'bi-wallet2', r => {
+                    openRegistrationPanel(r.dataset.appointmentId);
+                }, true);
+            }
+            addItem('View Saved OPD Bills', 'bi-receipt', r => {
+                const q = r.dataset.patientUhid || r.dataset.patientMobile || r.dataset.patientName || '';
+                location.href = 'opd_bills.php?search=' + encodeURIComponent(q);
+            });
+            // Queue actions are also available directly from the Consultation Appointments row.
+            const linkedTrackId = Number(row.dataset.trackId || 0);
+            const linkedQueueStatus = String(row.dataset.queueStatus || '').trim();
+            const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
+            if (linkedTrackId > 0 && linkedQueueStatus !== 'Completed' && appointmentStatus !== 'completed') {
+                if (!hasPresentTime && linkedQueueStatus !== 'Inside Cabin') {
+                    addItem('Patient Present', 'bi-person-check', () => goQueue('waiting', linkedTrackId), true);
+                }
+                if (linkedQueueStatus !== 'Inside Cabin') {
+                    addItem('Call In / In Consultation', 'bi-door-open', () => goQueue('in', linkedTrackId), !hasPresentTime);
+                }
+                if (linkedQueueStatus === 'Inside Cabin') {
+                    addItem('Consultation Complete', 'bi-check-circle', () => confirmQueue('out', linkedTrackId), true);
+                }
+            }
+            if (status === 'Pending' || status === 'Confirmed') {
+                addItem('Cancel Appointment', 'bi-x-circle', r => {
+                    const url = '?date_filter=' + encodeURIComponent(r.dataset.appointmentDate) + '&update_status=Cancelled&id=' + encodeURIComponent(r.dataset.appointmentId);
+                    if (window.Swal) {
+                        Swal.fire({icon:'warning', title:'Cancel Appointment?', text:'Are you sure you want to cancel this appointment?', showCancelButton:true, confirmButtonText:'Yes, Cancel', cancelButtonText:'Keep Appointment', confirmButtonColor:'#dc3545', cancelButtonColor:'#64748b', reverseButtons:true}).then(result => { if (result.isConfirmed) location.href = url; });
+                    } else if (confirm('Cancel this appointment?')) location.href = url;
+                }, true);
+            }
+        } else if (type === 'queue') {
+            const trackId = Number(row.dataset.trackId || 0);
+            const status = row.dataset.queueStatus || '';
+            if (!trackId) return;
+            const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
+            if (status === 'Waiting') {
+                if (!hasPresentTime) addItem('Patient Present', 'bi-person-check', () => goQueue('waiting', trackId));
+                addItem('Call In / In Consultation', 'bi-door-open', () => goQueue('in', trackId), !hasPresentTime);
+            } else if (status === 'Inside Cabin') {
+                addItem('Consultation Complete', 'bi-check-circle', () => confirmQueue('out', trackId));
+            }
+        }
+
+        if (!menu.children.length) {
+            const empty = document.createElement('button');
+            empty.type = 'button'; empty.disabled = true;
+            empty.innerHTML = '<i class="bi bi-info-circle"></i><span>No actions available</span>';
+            menu.appendChild(empty);
+        }
+        menu.classList.add('show');
+        menu.style.left = '0px'; menu.style.top = '0px';
+        const rect = menu.getBoundingClientRect();
+        menu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + 'px';
+        menu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + 'px';
+        const first = menu.querySelector('button:not(:disabled)');
+        if (first) first.focus({preventScroll:true});
+    }
+
+    function hideMenu() { menu.classList.remove('show'); activeRow = null; }
+    function goQueue(action, trackId) {
+        location.href = '?q_action=' + encodeURIComponent(action) + '&track_id=' + encodeURIComponent(trackId) + '#nav-appt';
+    }
+    function confirmQueue(action, trackId) {
+        if (action !== 'out') return;
+        if (window.Swal) {
+            Swal.fire({icon:'question', title:'Complete Consultation?', text:'Mark this patient as completed and capture check-out time?', showCancelButton:true, confirmButtonText:'Complete Consultation', cancelButtonText:'Go Back', confirmButtonColor:'#2563eb', cancelButtonColor:'#64748b'}).then(result => { if (result.isConfirmed) goQueue(action, trackId); });
+        } else if (confirm('Mark consultation complete and capture check-out time?')) goQueue(action, trackId);
+    }
+
+    document.addEventListener('contextmenu', function (event) {
+        const row = event.target.closest('tr[data-context-type]');
+        if (!row) return;
+        event.preventDefault();
+        showMenu(row, event.clientX, event.clientY);
+    });
+    document.addEventListener('click', function (event) { if (!menu.contains(event.target)) hideMenu(); });
+    document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') hideMenu();
+        if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('tr[data-context-type]')) {
+            event.preventDefault();
+            const rect = event.target.getBoundingClientRect();
+            showMenu(event.target, rect.left + 20, rect.top + 20);
+        }
+    });
+    window.addEventListener('resize', hideMenu);
+    window.addEventListener('scroll', hideMenu, true);
+})();
+
 // Compact SweetAlert notifications for appointment actions and validation.
 function confirmAppointmentCancel(event, link) {
     event.preventDefault();
@@ -2199,8 +2380,11 @@ async function lookupAppointmentPatient() {
     if (newFamilyEl) newFamilyEl.value = '0';
 
     statusEl.textContent = '';
-
-
+    statusEl.className = 'small mt-1';
+    // Clear previous patient's details before looking up the newly entered number.
+    if (nameEl) nameEl.value = '';
+    if (ageEl) ageEl.value = '';
+    if (genderEl) genderEl.value = 'Male';
 
     if (mobile.length < 10) return;
 
@@ -2211,6 +2395,10 @@ async function lookupAppointmentPatient() {
         const r = await fetch('opd_appointments.php?ajax=patient_lookup&mobile=' + encodeURIComponent(mobile));
 
         const data = await r.json();
+
+        // Ignore stale lookup responses if the user has cleared or changed the mobile field.
+        const currentMobile = mobileEl.value.replace(/\D/g, '');
+        if (currentMobile !== mobile || currentMobile.length < 10) return;
 
         const patients = Array.isArray(data.patients) ? data.patients : [];
 
@@ -2279,10 +2467,20 @@ document.addEventListener('DOMContentLoaded', function () {
         this.value = this.value.replace(/\D/g, '').slice(0, 10);
 
         document.getElementById('appointment_uhid').value = '';
+        // Never leave the previous registered patient's details attached to a new number.
+        const patientNameEl = document.getElementById('appointment_patient_name');
+        const patientAgeEl = document.getElementById('appointment_age');
+        const patientGenderEl = document.getElementById('appointment_gender');
+        const patientStatusEl = document.getElementById('appointment_patient_status');
+        if (patientNameEl) patientNameEl.value = '';
+        if (patientAgeEl) patientAgeEl.value = '';
+        if (patientGenderEl) patientGenderEl.value = 'Male';
+        if (patientStatusEl) { patientStatusEl.textContent = ''; patientStatusEl.className = 'small mt-1'; }
 
+        const patientUhidEl = document.getElementById('appointment_uhid');
+        if (patientUhidEl) patientUhidEl.value = '';
         const newFamilyEl = document.getElementById('appointment_new_family_member');
-
-        if (newFamilyEl) newFamilyEl.value = '0';
+        if (newFamilyEl) newFamilyEl.value = this.value.length === 0 ? '1' : '0';
 
         clearFamilyPanel();
 
@@ -2311,6 +2509,7 @@ document.addEventListener('DOMContentLoaded', function () {
 document.addEventListener("DOMContentLoaded", function() {
 
     let hash = window.location.hash;
+    if (hash === '#nav-queue') hash = '#nav-appt';
 
     if (hash) {
 
@@ -2471,7 +2670,7 @@ function handleQueueAction(selectEl) {
         : (action === 'reset' ? {icon:'warning', title:'Re-queue Patient?', text:'RE-QUEUE THIS PATIENT?'} : null);
 
     const proceed = function () {
-        window.location.href = '?q_action=' + encodeURIComponent(action) + '&track_id=' + encodeURIComponent(trackId) + '#nav-queue';
+        window.location.href = '?q_action=' + encodeURIComponent(action) + '&track_id=' + encodeURIComponent(trackId) + '#nav-appt';
     };
 
     if (prompt) {
