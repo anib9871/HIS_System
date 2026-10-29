@@ -25,15 +25,28 @@ $today_date = date('Y-m-d');
 
 
 try {
+    // Schema-safe migrations for MySQL/MariaDB versions that do not support
+    // ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+    $ensureColumn = function (string $table, string $column, string $definition) use ($tenant_pdo): void {
+        $check = $tenant_pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?");
+        $check->execute([$table, $column]);
+        if ((int)$check->fetchColumn() === 0) {
+            $tenant_pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");
+        }
+    };
 
-    $tenant_pdo->exec("ALTER TABLE opd_appointments ADD COLUMN IF NOT EXISTS uhid VARCHAR(50) NULL AFTER center_id");
-
-    $tenant_pdo->exec("ALTER TABLE opd_appointments ADD COLUMN IF NOT EXISTS created_by INT NULL AFTER remark");
-
-    $tenant_pdo->exec("ALTER TABLE opd_queue_tracking ADD COLUMN IF NOT EXISTS waiting_since DATETIME NULL AFTER status");
-
-} catch (Exception $e) {}
-
+    $ensureColumn('opd_appointments', 'uhid', 'VARCHAR(50) NULL');
+    $ensureColumn('opd_appointments', 'age_unit', "VARCHAR(10) NOT NULL DEFAULT 'years'");
+    $ensureColumn('opd_appointments', 'created_by', 'INT NULL');
+    $ensureColumn('opd_appointments', 'category_id', 'INT NULL');
+    $ensureColumn('opd_appointments', 'insurance_id', 'INT NULL');
+    // Token is allocated at booking time, so it must exist on appointments.
+    $ensureColumn('opd_appointments', 'token_no', 'INT NULL');
+    $ensureColumn('opd_queue_tracking', 'waiting_since', 'DATETIME NULL');
+} catch (Throwable $e) {
+    // Do not hide the page behind a migration warning; the query below will
+    // show any genuinely missing required schema. The migration is retried on next load.
+}
 
 
 // ==============================================================
@@ -185,7 +198,9 @@ if (isset($_GET['q_action']) && isset($_GET['track_id'])) {
             }
         }
 
-        header("Location: opd_appointments.php#nav-appt");
+        $returnDate = (string)($_GET['date_filter'] ?? $today_date);
+        $returnDoctor = (int)($_GET['doctor_filter'] ?? 0);
+        header("Location: opd_appointments.php?date_filter=" . urlencode($returnDate) . ($returnDoctor > 0 ? "&doctor_filter=" . $returnDoctor : "") . "#nav-appt");
         exit;
     } catch (Exception $e) { $err = $e->getMessage(); }
 }
@@ -303,6 +318,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_appointment'])
     $gender         = $_POST['gender'] ?? 'Male';
 
     $age            = (int)($_POST['age'] ?? 0);
+    $age_unit       = strtolower((string)($_POST['age_unit'] ?? 'years'));
+    if (!in_array($age_unit, ['years', 'months', 'days'], true)) $age_unit = 'years';
 
     $appt_date      = !empty($_POST['appointment_date']) ? $_POST['appointment_date'] : $today_date;
 
@@ -315,6 +332,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_appointment'])
     $remark         = trim($_POST['remark'] ?? '');
 
     $selected_uhid = trim((string)($_POST['uhid'] ?? ''));
+    $category_id = !empty($_POST['category_id']) ? (int)$_POST['category_id'] : null;
+    $insurance_id = !empty($_POST['insurance_id']) ? (int)$_POST['insurance_id'] : null;
 
     $new_family_member = (int)($_POST['new_family_member'] ?? 0);
 
@@ -374,7 +393,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_appointment'])
 
                 $find = $tenant_pdo->prepare("
 
-                    SELECT patient_id, uhid, mobile
+                    SELECT patient_id, uhid, mobile, fullname, age, gender
 
                     FROM patient_master
 
@@ -406,6 +425,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_appointment'])
 
                 }
 
+                // Use authoritative registered details; never trust editable POST values.
+                $patient_name = strtoupper(trim((string)$patient['fullname']));
+                $age = (int)($patient['age'] ?? 0);
+                $age_unit = 'years';
+                $gender = (string)($patient['gender'] ?: 'Male');
                 $selected_uhid = (string)$patient['uhid'];
 
             } elseif (!$new_family_member) {
@@ -434,6 +458,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_appointment'])
 
                     doctor_id = ?,
 
+                    category_id = ?,
+
+                    insurance_id = ?,
+
                     appointment_date = ?,
 
                     appointment_time = ?,
@@ -446,9 +474,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_appointment'])
 
             $up->execute([
 
-                ($selected_uhid !== '' ? $selected_uhid : null), $patient_name, $mobile, $age, $gender,
+                ($selected_uhid !== '' ? $selected_uhid : null), $patient_name, $mobile, $age, $age_unit, $gender,
 
-                $department_id, $doctor_id, $appt_date, $appt_time, $remark,
+                $department_id, $doctor_id, $category_id, $insurance_id, $appt_date, $appt_time, $remark,
 
                 $edit_id, $org_id, $center_id
 
@@ -501,6 +529,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
     $gender        = $_POST['gender'] ?? 'Male';
 
     $age           = (int)($_POST['age'] ?? 0);
+    $age_unit      = strtolower((string)($_POST['age_unit'] ?? 'years'));
+    if (!in_array($age_unit, ['years', 'months', 'days'], true)) $age_unit = 'years';
 
     $appt_date     = !empty($_POST['appointment_date']) ? $_POST['appointment_date'] : $today_date;
 
@@ -513,6 +543,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
     $remark        = trim($_POST['remark'] ?? '');
 
     $selected_uhid = trim((string)($_POST['uhid'] ?? ''));
+    $category_id = !empty($_POST['category_id']) ? (int)$_POST['category_id'] : null;
+    $insurance_id = !empty($_POST['insurance_id']) ? (int)$_POST['insurance_id'] : null;
 
     $new_family_member = (int)($_POST['new_family_member'] ?? 0);
 
@@ -532,7 +564,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
 
                 $find = $tenant_pdo->prepare("
 
-                    SELECT patient_id, uhid, mobile
+                    SELECT patient_id, uhid, mobile, fullname, age, gender
 
                     FROM patient_master
 
@@ -564,6 +596,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
 
                 }
 
+                // Use authoritative registered details; never trust editable POST values.
+                $patient_name = strtoupper(trim((string)$patient['fullname']));
+                $age = (int)($patient['age'] ?? 0);
+                $age_unit = 'years';
+                $gender = (string)($patient['gender'] ?: 'Male');
                 $selected_uhid = (string)$patient['uhid'];
 
             } else {
@@ -623,13 +660,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
                 $newPatient->execute([$org_id, $center_id, $selected_uhid, $patient_name, $gender, $age, $mobile]);
             }
 
+            // Allocate a doctor-wise token when the appointment is booked, not after payment.
+            $lastApptToken = $tenant_pdo->prepare("SELECT COALESCE(MAX(token_no), 0) FROM opd_appointments WHERE org_id = ? AND center_id = ? AND doctor_id = ? AND appointment_date = ?");
+            $lastApptToken->execute([$org_id, $center_id, $doctor_id, $appt_date]);
+            $lastVisitToken = $tenant_pdo->prepare("SELECT COALESCE(MAX(token_no), 0) FROM opd_visits WHERE org_id = ? AND center_id = ? AND doctor_id = ? AND visit_date = ?");
+            $lastVisitToken->execute([$org_id, $center_id, $doctor_id, $appt_date]);
+            $appointment_token = max((int)$lastApptToken->fetchColumn(), (int)$lastVisitToken->fetchColumn()) + 1;
+
             $stmt = $tenant_pdo->prepare("
                 INSERT INTO opd_appointments
-                    (org_id, center_id, uhid, patient_name, mobile, age, gender,
-                     department_id, doctor_id, appointment_date, appointment_time, status, remark, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?)
+                    (org_id, center_id, uhid, patient_name, mobile, age, age_unit, gender, department_id, doctor_id, category_id, insurance_id, token_no, appointment_date, appointment_time, status, remark, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?)
             ");
-            $stmt->execute([$org_id, $center_id, $selected_uhid, $patient_name, $mobile, $age, $gender, $department_id, $doctor_id, $appt_date, $appt_time, $remark, $created_by]);
+            $stmt->execute([$org_id, $center_id, $selected_uhid, $patient_name, $mobile, $age, $age_unit, $gender, $department_id, $doctor_id, $category_id, $insurance_id, $appointment_token, $appt_date, $appt_time, $remark, $created_by]);
 
 
 
@@ -667,9 +710,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
 
 // --- FETCH DROPDOWNS ---
 
-$departments = $tenant_pdo->query("SELECT id, dept_name FROM master_departments WHERE org_id = $org_id AND status = 1")->fetchAll();
+$departments = $tenant_pdo->query("SELECT id, dept_name FROM master_departments WHERE org_id = $org_id AND center_id = $center_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC);
+$categories = $tenant_pdo->query("SELECT id, category_name FROM master_categories WHERE org_id = $org_id AND center_id = $center_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC);
+$insurances = $tenant_pdo->query("SELECT id, category_id, insurance_name FROM insurance WHERE org_id = $org_id AND center_id = $center_id AND status = 1 AND insurance_name IS NOT NULL")->fetchAll(PDO::FETCH_ASSOC);
 
-$doctors = $tenant_pdo->query("SELECT id, full_name, department_id FROM master_doctors WHERE org_id = $org_id AND status = 1")->fetchAll();
+$doctors = $tenant_pdo->query("SELECT id, full_name, department_id FROM master_doctors WHERE org_id = $org_id AND center_id = $center_id AND status = 1")->fetchAll(PDO::FETCH_ASSOC);
 
 
 
@@ -734,7 +779,7 @@ $appointments = $tenant_pdo->prepare("
                 )
                 AND vq.doctor_id = a.doctor_id AND vq.visit_date = a.appointment_date
               ORDER BY (vq.appointment_id = a.appointment_id) DESC, vq.visit_id DESC LIMIT 1) AS queue_out_time,
-           (SELECT vq.token_no
+           COALESCE((SELECT vq.token_no
                FROM opd_visits vq
               WHERE vq.org_id = a.org_id
                 AND vq.center_id = a.center_id
@@ -744,7 +789,12 @@ $appointments = $tenant_pdo->prepare("
                 )
                 AND vq.doctor_id = a.doctor_id
                 AND vq.visit_date = a.appointment_date
-              ORDER BY (vq.appointment_id = a.appointment_id) DESC, vq.visit_id DESC LIMIT 1) AS real_token_no,
+              ORDER BY (vq.appointment_id = a.appointment_id) DESC, vq.visit_id DESC LIMIT 1), a.token_no) AS real_token_no,
+            (SELECT vpay.payment_status
+               FROM opd_visits vpay
+              WHERE vpay.org_id = a.org_id AND vpay.center_id = a.center_id
+                AND vpay.appointment_id = a.appointment_id
+              ORDER BY vpay.visit_id DESC LIMIT 1) AS opd_payment_status,
             d.full_name AS doctor_name,
            dept.dept_name
 
@@ -767,14 +817,16 @@ $appointments->execute([$org_id, $center_id, $date_filter]);
 $appointments = $appointments->fetchAll(PDO::FETCH_ASSOC);
 
 // Summary data for the right-hand Appointment Desk panel.
-$apptStatusCounts = ['Pending' => 0, 'Confirmed' => 0, 'Checked In' => 0, 'Cancelled' => 0, 'Completed' => 0];
+$apptStatusCounts = ['Pending' => 0, 'Patient Present' => 0, 'Patient Checked In' => 0, 'Cancelled' => 0, 'Completed' => 0];
 $apptDepartmentCounts = [];
 foreach ($appointments as $summaryAppt) {
+    $queueStatusKey = strtolower(trim((string)($summaryAppt['queue_tracking_status'] ?? '')));
     $statusKey = strtolower(trim((string)($summaryAppt['status'] ?? 'pending')));
+    $hasPresentTimestamp = !empty($summaryAppt['queue_present_time']);
     if (strpos($statusKey, 'cancel') !== false) $apptStatusCounts['Cancelled']++;
-    elseif (strpos($statusKey, 'check') !== false || strpos($statusKey, 'present') !== false) $apptStatusCounts['Checked In']++;
-    elseif (strpos($statusKey, 'complete') !== false || strpos($statusKey, 'success') !== false) $apptStatusCounts['Completed']++;
-    elseif (strpos($statusKey, 'confirm') !== false) $apptStatusCounts['Confirmed']++;
+    elseif (strpos($queueStatusKey, 'complete') !== false || strpos($statusKey, 'complete') !== false || strpos($statusKey, 'success') !== false) $apptStatusCounts['Completed']++;
+    elseif (strpos($queueStatusKey, 'inside cabin') !== false || strpos($queueStatusKey, 'check') !== false || strpos($statusKey, 'check') !== false) $apptStatusCounts['Patient Checked In']++;
+    elseif ($hasPresentTimestamp || strpos($queueStatusKey, 'present') !== false || strpos($statusKey, 'present') !== false || strpos($statusKey, 'confirm') !== false) $apptStatusCounts['Patient Present']++;
     else $apptStatusCounts['Pending']++;
     $deptLabel = trim((string)($summaryAppt['dept_name'] ?? 'Unassigned')) ?: 'Unassigned';
     $apptDepartmentCounts[$deptLabel] = ($apptDepartmentCounts[$deptLabel] ?? 0) + 1;
@@ -1021,6 +1073,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 .family-modal-item .fm-meta { font-size:10px; color:#64748b; margin-top:2px; }
 
 .family-mobile-badge { font-size:10px; }
+.appointment-booking-card .patient-locked-field{background:#f1f5f9!important;color:#334155!important;cursor:not-allowed!important;border-color:#cbd5e1!important;}
 
 .family-member-row {
 
@@ -1183,6 +1236,7 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 .queue-time-stamps b{color:#0284c7;font-weight:800}
 .appointment-context-row.appt-row-pending,.appointment-context-row.appt-row-pending>*{background-color:#fff7cc!important;}
 .appointment-context-row.appt-row-confirmed,.appointment-context-row.appt-row-confirmed>*{background-color:#dcfce7!important;}
+.appointment-context-row.appt-row-present,.appointment-context-row.appt-row-present>*{background-color:#f0eaff!important;}
 .appointment-context-row.appt-row-checked-in,.appointment-context-row.appt-row-checked-in>*{background-color:#dbeafe!important;}
 .appointment-context-row.appt-row-cancelled,.appointment-context-row.appt-row-cancelled>*{background-color:#fee2e2!important;}
 .appointment-context-row:hover{filter:brightness(.97);}
@@ -1191,6 +1245,9 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 .appointment-side-summary h6{font-size:11px;font-weight:800;color:#7e22ce;text-transform:uppercase;margin:0 0 7px;padding-bottom:5px;border-bottom:1px solid #e2e8f0;}
 .appointment-legend-item{display:flex;align-items:center;gap:7px;margin:0 0 7px;font-size:10px;text-transform:uppercase;}
 .appointment-legend-dot{width:8px;height:8px;border-radius:2px;display:inline-block;flex:0 0 8px;}
+.age-entry-group .form-select{min-width:0!important;padding-right:20px!important;}
+.appointment-summary-line strong{display:inline-flex;align-items:center;justify-content:center;min-width:22px;padding:2px 7px;border-radius:999px;background:#f1f5f9;color:#334155;}
+#sidePendingCount{background:#fef3c7;color:#92400e}#sidePresentCount{background:#ede9fe;color:#5b21b6}#sideCheckedCount{background:#dbeafe;color:#1d4ed8}#sideCancelledCount{background:#fee2e2;color:#991b1b}#sideCompletedCount{background:#dcfce7;color:#166534}
 .appointment-summary-line{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px dotted #cbd5e1;font-size:10px;}
 .appointment-summary-line strong{color:#0f172a;}
 .appointment-summary-line:last-child{border-bottom:0;}
@@ -1257,10 +1314,61 @@ body.opd-registration-open #pills-tab { display:none !important; }
 .appointment-schedule-card table td small{font-size:9px!important;line-height:1.1;display:inline-block;margin-top:2px}
 .appointment-context-row.appt-row-pending,.appointment-context-row.appt-row-pending>*{background-color:#fff7cc!important}
 .appointment-context-row.appt-row-confirmed,.appointment-context-row.appt-row-confirmed>*{background-color:#dcfce7!important}
+.appointment-context-row.appt-row-present,.appointment-context-row.appt-row-present>*{background-color:#f0eaff!important}
 .appointment-context-row.appt-row-checked-in,.appointment-context-row.appt-row-checked-in>*{background-color:#dbeafe!important}
 .appointment-context-row.appt-row-cancelled,.appointment-context-row.appt-row-cancelled>*{background-color:#fee2e2!important}
 @media(max-width:1100px){.appointment-desk-layout{grid-template-columns:280px minmax(0,1fr);height:calc(100vh - 245px)}}
 @media(max-width:760px){#pills-tab{align-items:flex-start}.appointment-legend-bar{gap:7px;margin:4px 0 0;width:100%}.appointment-desk-layout{grid-template-columns:minmax(0,1fr);height:auto}.appointment-booking-card form>.row{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+
+
+/* FINAL BOOK APPOINTMENT FORM LAYOUT: balanced fields, compact columns, no dead space. */
+@media (min-width: 1101px) {
+  .appointment-desk-layout { grid-template-columns: 370px minmax(0,1fr) 205px !important; gap: 9px !important; }
+  .appointment-booking-card .card-header { padding: 10px 12px !important; }
+  .appointment-booking-card .card-body { padding: 12px !important; }
+  .appointment-booking-card form > .row {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 9px 8px !important;
+    align-items: end !important;
+    margin: 0 !important;
+  }
+  .appointment-booking-card form > .row > [class*="col-"] {
+    width: auto !important; max-width: none !important; min-width: 0 !important;
+    flex: initial !important; padding: 0 !important; grid-column: auto; margin: 0 !important;
+  }
+  .appointment-booking-card form > .row > :nth-child(1) { grid-column: 1 / 3; }
+  .appointment-booking-card form > .row > :nth-child(2) { grid-column: 3 / 5; }
+  .appointment-booking-card form > .row > :nth-child(3) { grid-column: 1 / 4; }
+  .appointment-booking-card form > .row > :nth-child(4) { grid-column: 4 / 5; }
+  .appointment-booking-card form > .row > :nth-child(5) { grid-column: 1 / 3; }
+  .appointment-booking-card form > .row > :nth-child(6) { grid-column: 3 / 5; }
+  .appointment-booking-card form > .row > :nth-child(7) { grid-column: 1 / 2; }
+  .appointment-booking-card form > .row > :nth-child(8) { grid-column: 2 / 3; }
+  .appointment-booking-card form > .row > :nth-child(9) { grid-column: 3 / 5; }
+  .appointment-booking-card form > .row > :nth-child(10) { grid-column: 1 / 3; }
+  .appointment-booking-card form > .row > :nth-child(11) { grid-column: 3 / 5; }
+  .appointment-booking-card form > .row > :nth-child(12) { grid-column: 1 / 5; }
+  .appointment-booking-card .form-label { display:block; min-height: 13px; font-size: 10px !important; margin-bottom: 4px !important; color:#475569 !important; }
+  .appointment-booking-card .form-control,
+  .appointment-booking-card .form-select { width:100%; min-width:0; height:33px !important; min-height:33px !important; border-radius:6px !important; border-color:#cbd5e1; background-color:#fff; font-size:11px !important; padding:5px 7px !important; }
+  .appointment-booking-card .btn { min-height:34px !important; border-radius:6px !important; }
+  .appointment-booking-card #appointment_mobile_count { font-size:9px !important; line-height:1.2; }
+  .appointment-booking-card #appointment_patient_status { font-size:9px !important; line-height:1.25; }
+}
+@media (min-width: 761px) and (max-width: 1100px) {
+  .appointment-desk-layout { grid-template-columns: 320px minmax(0,1fr) !important; }
+  .appointment-booking-card form > .row { grid-template-columns: repeat(2,minmax(0,1fr)) !important; gap:8px !important; }
+  .appointment-booking-card form > .row > [class*="col-"] { min-width:0 !important; }
+  .appointment-booking-card .form-control,.appointment-booking-card .form-select { width:100%; min-width:0; }
+}
+@media (max-width: 760px) {
+  .appointment-booking-card form > .row { grid-template-columns: repeat(2,minmax(0,1fr)) !important; gap:9px 8px !important; }
+  .appointment-booking-card form > .row > [class*="col-"] { min-width:0 !important; }
+  .appointment-booking-card .form-label { min-height:0; }
+  .appointment-booking-card .form-control,.appointment-booking-card .form-select { width:100%; min-width:0; }
+}
 
 </style>
 
@@ -1293,8 +1401,9 @@ body.opd-registration-open #pills-tab { display:none !important; }
 
     <div class="appointment-legend-bar" aria-label="Appointment status legend">
         <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#f59e0b"></i> Scheduled / Pending</span>
-        <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#22c55e"></i> Confirmed / Completed</span>
-        <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#0ea5e9"></i> Patient Checked In</span>
+        <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#22c55e"></i> Completed</span>
+        <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#c4b5fd"></i> Patient Present</span>
+        <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#60a5fa"></i> Patient Checked In</span>
         <span class="appointment-legend-item"><i class="appointment-legend-dot" style="background:#ef4444"></i> Cancelled</span>
     </div>
 </ul>
@@ -1417,7 +1526,7 @@ body.opd-registration-open #pills-tab { display:none !important; }
 
                             <label class="form-label small fw-semibold text-secondary mb-1">Doctor *</label>
 
-                            <select name="doctor_id" id="doctor_id" class="form-select form-select-sm" required>
+                            <select name="doctor_id" id="doctor_id" class="form-select form-select-sm" required onchange="syncDepartmentFromDoctor()">
 
                                 <option value="">-- Select --</option>
 
@@ -1443,13 +1552,15 @@ body.opd-registration-open #pills-tab { display:none !important; }
 
                             <label class="form-label small fw-semibold text-secondary mb-1">Mobile No. / Search *</label>
 
-                            <input type="text" name="mobile" id="appointment_mobile" class="form-control form-control-sm" maxlength="10" placeholder="MOBILE NO." value="<?= htmlspecialchars($edit_appointment['patient_display_mobile'] ?? $edit_appointment['mobile'] ?? '') ?>" required>
+                            <input type="text" name="mobile" id="appointment_mobile" class="form-control form-control-sm" maxlength="10" inputmode="numeric" placeholder="10-DIGIT MOBILE NO." value="<?= htmlspecialchars($edit_appointment['patient_display_mobile'] ?? $edit_appointment['mobile'] ?? '') ?>" required autocomplete="off">
+                            <div id="appointment_mobile_count" class="small text-muted mt-1">0 / 10 digits</div>
 
                             <input type="hidden" name="uhid" id="appointment_uhid" value="<?= htmlspecialchars($edit_appointment['uhid'] ?? '') ?>">
 
                             <input type="hidden" name="new_family_member" id="appointment_new_family_member" value="<?= empty($edit_appointment['uhid']) ? '1' : '0' ?>">
 
                             <div id="appointment_patient_status" class="small mt-1"></div>
+                            <button type="button" id="appointment_clear_patient_btn" class="btn btn-outline-secondary btn-sm w-100 mt-1 d-none" style="font-size:10px;font-weight:800;">CLEAR / CHANGE MOBILE</button>
 
                             <div id="appointment_family_panel" class="family-panel d-none"></div>
 
@@ -1465,12 +1576,14 @@ body.opd-registration-open #pills-tab { display:none !important; }
 
                         </div>
 
-                        <div class="col-md-1">
-
+                        <div class="col-md-2">
                             <label class="form-label small fw-semibold text-secondary mb-1">Age</label>
-
-                            <input type="number" name="age" id="appointment_age" class="form-control form-control-sm" placeholder="AGE" value="<?= htmlspecialchars($edit_appointment['patient_display_age'] ?? $edit_appointment['age'] ?? '') ?>">
-
+                            <div class="input-group input-group-sm age-entry-group">
+                                <input type="number" name="age" id="appointment_age" class="form-control form-control-sm" min="0" step="1" placeholder="AGE" value="<?= htmlspecialchars($edit_appointment['patient_display_age'] ?? $edit_appointment['age'] ?? '') ?>">
+                                <select name="age_unit" id="appointment_age_unit" class="form-select form-select-sm" aria-label="Age unit" style="max-width:82px;">
+                                    <option value="years" <?= strtolower((string)($edit_appointment['age_unit'] ?? 'years')) === 'years' ? 'selected' : '' ?>>Years</option><option value="months" <?= strtolower((string)($edit_appointment['age_unit'] ?? 'years')) === 'months' ? 'selected' : '' ?>>Months</option><option value="days" <?= strtolower((string)($edit_appointment['age_unit'] ?? 'years')) === 'days' ? 'selected' : '' ?>>Days</option>
+                                </select>
+                            </div>
                         </div>
 
                         <div class="col-md-2">
@@ -1487,6 +1600,25 @@ body.opd-registration-open #pills-tab { display:none !important; }
 
                             </select>
 
+                        </div>
+
+                        <div class="col-md-3">
+                            <label class="form-label small fw-semibold text-secondary mb-1">Patient Category / Billing Type</label>
+                            <select name="category_id" id="appointment_category_id" class="form-select form-select-sm" onchange="filterAppointmentInsurances()">
+                                <option value="">-- Select Category --</option>
+                                <?php foreach ($categories as $cat): ?>
+                                    <option value="<?= (int)$cat['id'] ?>" <?= ((string)($edit_appointment['category_id'] ?? '') === (string)$cat['id']) ? 'selected' : '' ?>><?= htmlspecialchars($cat['category_name']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small fw-semibold text-secondary mb-1">Insurance / Provider</label>
+                            <select name="insurance_id" id="appointment_insurance_id" class="form-select form-select-sm">
+                                <option value="">-- Base Category / No Insurance --</option>
+                                <?php foreach ($insurances as $ins): ?>
+                                    <option value="<?= (int)$ins['id'] ?>" data-cat="<?= (int)$ins['category_id'] ?>" <?= ((string)($edit_appointment['insurance_id'] ?? '') === (string)$ins['id']) ? 'selected' : '' ?>><?= htmlspecialchars($ins['insurance_name']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
                         </div>
 
                         <div class="col-md-4">
@@ -1614,13 +1746,14 @@ body.opd-registration-open #pills-tab { display:none !important; }
 
                                 <?php
                                     $rowStatus = strtolower(trim((string)(($row['queue_tracking_status'] ?? '') ?: ($row['status'] ?? 'pending'))));
-                                    $rowClass = (strpos($rowStatus, 'cancel') !== false) ? 'appt-row-cancelled' : ((strpos($rowStatus, 'check') !== false || strpos($rowStatus, 'present') !== false || strpos($rowStatus, 'inside cabin') !== false) ? 'appt-row-checked-in' : ((strpos($rowStatus, 'confirm') !== false || strpos($rowStatus, 'complete') !== false || strpos($rowStatus, 'success') !== false) ? 'appt-row-confirmed' : 'appt-row-pending'));
+                                    $rowClass = (strpos($rowStatus, 'cancel') !== false) ? 'appt-row-cancelled' : ((strpos($rowStatus, 'check') !== false || strpos($rowStatus, 'inside cabin') !== false) ? 'appt-row-checked-in' : ((strpos($rowStatus, 'present') !== false || strpos($rowStatus, 'confirm') !== false) ? 'appt-row-present' : ((strpos($rowStatus, 'complete') !== false || strpos($rowStatus, 'success') !== false) ? 'appt-row-confirmed' : 'appt-row-pending')));
                                 ?>
                                 <tr class="appointment-context-row <?= $rowClass ?>" tabindex="0"
                                     data-context-type="appointment"
                                     data-doctor-id="<?= (int)($row['doctor_id'] ?? 0) ?>"
                                     data-appointment-id="<?= (int)$row['appointment_id'] ?>"
                                     data-appointment-status="<?= htmlspecialchars((string)$row['status'], ENT_QUOTES) ?>"
+                                    data-payment-status="<?= htmlspecialchars((string)($row['opd_payment_status'] ?? ''), ENT_QUOTES) ?>"
                                     data-appointment-date="<?= htmlspecialchars((string)$date_filter, ENT_QUOTES) ?>"
                                     data-appointment-name="<?= htmlspecialchars((string)($row['patient_display_name'] ?? $row['patient_name']), ENT_QUOTES) ?>"
                                     data-patient-name="<?= htmlspecialchars((string)($row['patient_display_name'] ?? $row['patient_name']), ENT_QUOTES) ?>"
@@ -1676,8 +1809,9 @@ body.opd-registration-open #pills-tab { display:none !important; }
             <section class="appointment-summary-section" style="margin-top:0">
                 <h6>Today's Status</h6>
                 <div class="appointment-summary-line"><span>Scheduled / Pending</span><strong id="sidePendingCount"><?= (int)$apptStatusCounts['Pending'] ?></strong></div>
-                <div class="appointment-summary-line"><span>Confirmed</span><strong id="sideConfirmedCount"><?= (int)$apptStatusCounts['Confirmed'] ?></strong></div>
-                <div class="appointment-summary-line"><span>Patient Checked In</span><strong id="sideCheckedCount"><?= (int)$apptStatusCounts['Checked In'] ?></strong></div>
+                
+                <div class="appointment-summary-line"><span>Patient Present</span><strong id="sidePresentCount"><?= (int)$apptStatusCounts['Patient Present'] ?></strong></div>
+                <div class="appointment-summary-line"><span>Patient Checked In</span><strong id="sideCheckedCount"><?= (int)$apptStatusCounts['Patient Checked In'] ?></strong></div>
                 <div class="appointment-summary-line"><span>Cancelled</span><strong id="sideCancelledCount"><?= (int)$apptStatusCounts['Cancelled'] ?></strong></div>
                 <div class="appointment-summary-line"><span>Completed</span><strong id="sideCompletedCount"><?= (int)$apptStatusCounts['Completed'] ?></strong></div>
             </section>
@@ -1724,6 +1858,40 @@ body.opd-registration-open #pills-tab { display:none !important; }
 #opdPaymentWorkspaceModal .modal-body{min-height:0;overflow:hidden;background:#f8fafc}
 #opdPaymentWorkspaceFrame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}
 @media(max-width:768px){.opd-payment-dialog{width:calc(100vw - 12px);margin:6px auto}#opdPaymentWorkspaceModal .modal-content{height:94vh}}
+
+/* Final refinements: booking fields flow naturally without an inner scrollbar. */
+.appointment-desk-layout {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    align-items: start;
+}
+.appointment-desk-layout > .appointment-booking-card {
+    height: auto !important;
+    overflow: visible !important;
+    align-self: start;
+}
+.appointment-booking-card .card-body {
+    overflow: visible !important;
+    max-height: none !important;
+}
+.appointment-desk-layout > .appointment-schedule-card {
+    min-height: 460px;
+    height: auto;
+}
+.appointment-schedule-card .table-responsive { overflow: auto !important; }
+.appointment-side-summary { max-height: none; overflow: visible; }
+#appointment_clear_patient_btn { white-space: normal; }
+@media (max-width: 1100px) {
+    .appointment-desk-layout { height: auto !important; }
+    .appointment-desk-layout > .appointment-booking-card { height: auto !important; }
+}
+@media (max-width: 760px) {
+    .appointment-desk-layout { height: auto !important; }
+    .appointment-desk-layout > .appointment-booking-card { height: auto !important; }
+    .appointment-booking-card .card-body { overflow: visible !important; }
+}
 </style>
 
 <!-- Inline registration workspace: replaces the OPD tables in-place; no popup/modal. -->
@@ -1832,20 +2000,22 @@ function closeRegistrationWorkspace() {
             const cell = emptyRow.querySelector('td');
             if (cell) cell.textContent = value === '__ALL__' ? 'No appointments found for this date.' : 'No appointments found for this doctor and date.';
         }
-        const counts = {pending:0, confirmed:0, checked:0, cancelled:0, completed:0};
+        const counts = {pending:0, present:0, checked:0, cancelled:0, completed:0};
         rows.forEach(row => {
-            if (row.style.display === 'none') return;
-            const queueStatus = (row.dataset.queueStatus || '').toLowerCase();
-            const status = queueStatus || (row.dataset.appointmentStatus || '').toLowerCase();
-            if (status.includes('cancel')) counts.cancelled++;
-            else if (status.includes('inside cabin') || status.includes('check') || status.includes('present')) counts.checked++;
-            else if (status.includes('complete') || status.includes('success')) counts.completed++;
-            else if (status.includes('confirm')) counts.confirmed++;
+            // Summary counts include all doctors for the selected date, even when
+            // the appointment list itself is filtered to one doctor.
+            const queueStatus = (row.dataset.queueStatus || '').trim().toLowerCase();
+            const appointmentStatus = (row.dataset.appointmentStatus || '').trim().toLowerCase();
+            const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
+            if (appointmentStatus.includes('cancel')) counts.cancelled++;
+            else if (queueStatus.includes('complete') || appointmentStatus.includes('complete') || appointmentStatus.includes('success')) counts.completed++;
+            else if (queueStatus.includes('inside cabin') || queueStatus.includes('check') || appointmentStatus.includes('check')) counts.checked++;
+            else if (hasPresentTime || queueStatus.includes('present') || appointmentStatus.includes('present') || appointmentStatus.includes('confirm')) counts.present++;
             else counts.pending++;
         });
         const setCount = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-        setCount('sidePendingCount', counts.pending); setCount('sideConfirmedCount', counts.confirmed);
-        setCount('sideCheckedCount', counts.checked); setCount('sideCancelledCount', counts.cancelled);
+        setCount('sidePendingCount', counts.pending);
+        setCount('sidePresentCount', counts.present); setCount('sideCheckedCount', counts.checked); setCount('sideCancelledCount', counts.cancelled);
         setCount('sideCompletedCount', counts.completed); setCount('sideTotalAppointments', shown);
     }
     select.addEventListener('change', applyFilter);
@@ -1929,8 +2099,10 @@ function closeRegistrationWorkspace() {
                 queueStatus === 'completed' ||
                 appointmentStatus === 'completed' ||
                 appointmentStatus === 'complete';
+            const paymentStatus = String(row.dataset.paymentStatus || '').trim();
+            const alreadyPaid = paymentStatus === '1' || paymentStatus.toLowerCase() === 'paid';
 
-            if (status.toLowerCase() !== 'cancelled' && !consultationCompleted) {
+            if (status.toLowerCase() !== 'cancelled' && !consultationCompleted && !alreadyPaid) {
                 addItem('OPD Payment', 'bi-wallet2', r => {
                     openRegistrationPanel(r.dataset.appointmentId);
                 }, true);
@@ -1992,7 +2164,16 @@ function closeRegistrationWorkspace() {
 
     function hideMenu() { menu.classList.remove('show'); activeRow = null; }
     function goQueue(action, trackId) {
-        location.href = '?q_action=' + encodeURIComponent(action) + '&track_id=' + encodeURIComponent(trackId) + '#nav-appt';
+        const doctorFilter = document.getElementById('appointmentDoctorFilter');
+        const dateFilter = document.getElementById('date_filter');
+        const selectedDate = dateFilter ? dateFilter.value : (new URLSearchParams(location.search).get('date_filter') || '');
+        const selectedDoctor = doctorFilter && doctorFilter.value && doctorFilter.value !== '__ALL__'
+            ? doctorFilter.value
+            : (new URLSearchParams(location.search).get('doctor_filter') || '');
+        const params = new URLSearchParams({q_action: action, track_id: String(trackId)});
+        if (selectedDate) params.set('date_filter', selectedDate);
+        if (selectedDoctor) params.set('doctor_filter', selectedDoctor);
+        location.href = '?' + params.toString() + '#nav-appt';
     }
     function confirmQueue(action, trackId) {
         if (action !== 'out') return;
@@ -2189,6 +2370,26 @@ function clearFamilyPanel() {
 
 
 
+function setAppointmentPatientFieldsLocked(locked) {
+    const nameEl = document.getElementById('appointment_patient_name');
+    const ageEl = document.getElementById('appointment_age');
+    const genderEl = document.getElementById('appointment_gender');
+
+    [nameEl, ageEl].forEach(function (el) {
+        if (!el) return;
+        el.readOnly = !!locked;
+        el.classList.toggle('patient-locked-field', !!locked);
+        el.setAttribute('aria-readonly', locked ? 'true' : 'false');
+    });
+    if (genderEl) {
+        // Keep the select enabled so its value is submitted, but prevent changes for registered patients.
+        genderEl.classList.toggle('patient-locked-field', !!locked);
+        genderEl.style.pointerEvents = locked ? 'none' : '';
+        genderEl.setAttribute('aria-readonly', locked ? 'true' : 'false');
+        genderEl.tabIndex = locked ? -1 : 0;
+    }
+}
+
 function selectAppointmentPatient(patient, closeModal = true) {
 
     const mobileEl = document.getElementById('appointment_mobile');
@@ -2214,16 +2415,24 @@ function selectAppointmentPatient(patient, closeModal = true) {
     nameEl.value = String(patient.fullname || '').toUpperCase();
 
     ageEl.value = patient.age || '';
+        const ageUnitEl = document.getElementById('appointment_age_unit'); if (ageUnitEl) ageUnitEl.value = 'years';
 
     genderEl.value = patient.gender || 'Male';
+    setAppointmentPatientFieldsLocked(true);
 
     mobileEl.value = (patient.mobile || '').split(',')[0].trim() || mobileEl.value;
+    mobileEl.readOnly = true;
+    const clearPatientBtn = document.getElementById('appointment_clear_patient_btn');
+    if (clearPatientBtn) clearPatientBtn.classList.remove('d-none');
+    const countEl = document.getElementById('appointment_mobile_count');
+    if (countEl) countEl.textContent = mobileEl.value.replace(/\D/g, '').length + ' / 10 digits • ' + (appointmentFamilyPatients.length || 1) + ' registered';
 
 
 
-    statusEl.textContent = 'FAMILY MEMBER SELECTED';
-
+    statusEl.innerHTML = 'FAMILY MEMBER SELECTED <button type="button" id="appointment_add_family_inline" class="btn btn-link btn-sm p-0 ms-1">+ ADD FAMILY MEMBER</button>';
     statusEl.className = 'small mt-1 text-success fw-bold';
+    const addInline = document.getElementById('appointment_add_family_inline');
+    if (addInline) addInline.addEventListener('click', startNewFamilyMember);
 
 
 
@@ -2255,15 +2464,22 @@ function startNewFamilyMember() {
 
     if (newFamilyEl) newFamilyEl.value = '1';
 
+    // Unlock demographics when switching from a registered patient to a new family member.
+    setAppointmentPatientFieldsLocked(false);
+
     nameEl.value = '';
 
     ageEl.value = '';
 
     genderEl.value = 'Male';
 
-    statusEl.textContent = 'NEW FAMILY MEMBER — APPOINTMENT ONLY';
+    statusEl.textContent = 'NEW FAMILY MEMBER — SAME MOBILE';
 
     statusEl.className = 'small mt-1 text-primary fw-bold';
+    const mobileEl = document.getElementById('appointment_mobile');
+    if (mobileEl) mobileEl.readOnly = true;
+    const clearPatientBtn = document.getElementById('appointment_clear_patient_btn');
+    if (clearPatientBtn) clearPatientBtn.classList.remove('d-none');
 
 
 
@@ -2381,12 +2597,12 @@ async function lookupAppointmentPatient() {
 
     statusEl.textContent = '';
     statusEl.className = 'small mt-1';
-    // Clear previous patient's details before looking up the newly entered number.
-    if (nameEl) nameEl.value = '';
-    if (ageEl) ageEl.value = '';
-    if (genderEl) genderEl.value = 'Male';
+    // Do not erase a name typed manually while checking a mobile number.
+    // If a registered patient is found, selectAppointmentPatient() will populate
+    // the saved patient details. Existing selected-patient details are cleared
+    // when the mobile input itself is changed.
 
-    if (mobile.length < 10) return;
+    if (mobile.length < 10) { mobileEl.readOnly = false; return; }
 
 
 
@@ -2404,12 +2620,13 @@ async function lookupAppointmentPatient() {
 
 
 
+        const countEl = document.getElementById('appointment_mobile_count');
+        if (countEl) countEl.textContent = mobile.length + ' / 10 digits' + (patients.length ? ' • ' + patients.length + ' registered' : ' • not registered');
         if (patients.length === 0) {
-
+            setAppointmentPatientFieldsLocked(false);
+            mobileEl.readOnly = false;
             if (newFamilyEl) newFamilyEl.value = '1';
-
             return;
-
         }
 
 
@@ -2454,6 +2671,44 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (familyAddBtn) familyAddBtn.addEventListener('click', startNewFamilyMember);
 
+    const clearPatientBtn = document.getElementById('appointment_clear_patient_btn');
+    if (clearPatientBtn) {
+        clearPatientBtn.addEventListener('click', function () {
+            const mobile = document.getElementById('appointment_mobile');
+            const name = document.getElementById('appointment_patient_name');
+            const age = document.getElementById('appointment_age');
+            const gender = document.getElementById('appointment_gender');
+            const uhid = document.getElementById('appointment_uhid');
+            const newFamily = document.getElementById('appointment_new_family_member');
+            const status = document.getElementById('appointment_patient_status');
+            if (mobile) { mobile.readOnly = false; mobile.value = ''; mobile.focus(); }
+            if (name) name.value = '';
+            if (age) age.value = '';
+            if (gender) gender.value = 'Male';
+            setAppointmentPatientFieldsLocked(false);
+            if (uhid) uhid.value = '';
+            if (newFamily) newFamily.value = '1';
+            if (status) { status.textContent = ''; status.className = 'small mt-1'; }
+            const count = document.getElementById('appointment_mobile_count');
+            if (count) count.textContent = '0 / 10 digits';
+            clearFamilyPanel();
+            clearPatientBtn.classList.add('d-none');
+        });
+    }
+    syncDepartmentFromDoctor();
+    filterAppointmentInsurances();
+    const mobileCountEl = document.getElementById('appointment_mobile_count');
+    const mobileInitial = document.getElementById('appointment_mobile');
+    const initialUhid = document.getElementById('appointment_uhid');
+    const clearInitialPatientBtn = document.getElementById('appointment_clear_patient_btn');
+    if (mobileInitial && mobileCountEl) mobileCountEl.textContent = mobileInitial.value.replace(/\D/g, '').length + ' / 10 digits';
+    // When editing an appointment linked to a registered patient, keep the saved demographics locked.
+    if (initialUhid && initialUhid.value.trim() !== '') {
+        setAppointmentPatientFieldsLocked(true);
+        if (mobileInitial) mobileInitial.readOnly = true;
+        if (clearInitialPatientBtn) clearInitialPatientBtn.classList.remove('d-none');
+    }
+
 
 
     const mobileEl = document.getElementById('appointment_mobile');
@@ -2464,21 +2719,32 @@ document.addEventListener('DOMContentLoaded', function () {
 
     mobileEl.addEventListener('input', function () {
 
+        this.readOnly = false;
         this.value = this.value.replace(/\D/g, '').slice(0, 10);
-
-        document.getElementById('appointment_uhid').value = '';
-        // Never leave the previous registered patient's details attached to a new number.
-        const patientNameEl = document.getElementById('appointment_patient_name');
-        const patientAgeEl = document.getElementById('appointment_age');
-        const patientGenderEl = document.getElementById('appointment_gender');
-        const patientStatusEl = document.getElementById('appointment_patient_status');
-        if (patientNameEl) patientNameEl.value = '';
-        if (patientAgeEl) patientAgeEl.value = '';
-        if (patientGenderEl) patientGenderEl.value = 'Male';
-        if (patientStatusEl) { patientStatusEl.textContent = ''; patientStatusEl.className = 'small mt-1'; }
+        const countEl = document.getElementById('appointment_mobile_count');
+        if (countEl) countEl.textContent = this.value.length + ' / 10 digits';
 
         const patientUhidEl = document.getElementById('appointment_uhid');
+        const wasRegisteredPatientSelected = !!(patientUhidEl && patientUhidEl.value);
+
+        // Clear the old saved patient's details only when changing away from a
+        // selected registered patient. Preserve a name manually typed for a new
+        // or unregistered patient while the mobile number is being entered.
+        if (wasRegisteredPatientSelected) {
+            setAppointmentPatientFieldsLocked(false);
+            const patientNameEl = document.getElementById('appointment_patient_name');
+            const patientAgeEl = document.getElementById('appointment_age');
+            const patientGenderEl = document.getElementById('appointment_gender');
+            if (patientNameEl) patientNameEl.value = '';
+            if (patientAgeEl) patientAgeEl.value = '';
+            if (patientGenderEl) patientGenderEl.value = 'Male';
+        }
         if (patientUhidEl) patientUhidEl.value = '';
+
+        const patientStatusEl = document.getElementById('appointment_patient_status');
+        if (patientStatusEl) { patientStatusEl.textContent = ''; patientStatusEl.className = 'small mt-1'; }
+        const clearPatientBtn = document.getElementById('appointment_clear_patient_btn');
+        if (clearPatientBtn) clearPatientBtn.classList.add('d-none');
         const newFamilyEl = document.getElementById('appointment_new_family_member');
         if (newFamilyEl) newFamilyEl.value = this.value.length === 0 ? '1' : '0';
 
@@ -2541,7 +2807,57 @@ document.addEventListener("DOMContentLoaded", function() {
 
 
 
-function filterDoctors() {
+function syncDepartmentFromDoctor() {
+    const doc = document.getElementById('doctor_id');
+    const dept = document.getElementById('department_id');
+    if (!doc || !dept) return;
+    const opt = doc.options[doc.selectedIndex];
+    const deptId = opt ? (opt.getAttribute('data-dept') || '') : '';
+    if (deptId) dept.value = deptId;
+    filterDoctors(false);
+}
+
+function filterAppointmentInsurances() {
+    const cat = document.getElementById('appointment_category_id');
+    const ins = document.getElementById('appointment_insurance_id');
+    if (!cat || !ins) return;
+    const catId = cat.value;
+    if (ins.options[0]) {
+        ins.options[0].textContent = catId
+            ? '-- BASE CATEGORY / NO INSURANCE --'
+            : '-- SELECT CATEGORY FIRST --';
+    }
+    Array.from(ins.options).forEach((opt, index) => {
+        if (index === 0) {
+            opt.hidden = false;
+            opt.disabled = false;
+            return;
+        }
+        const matches = !!catId && opt.getAttribute('data-cat') === catId;
+        opt.hidden = !matches;
+        opt.disabled = !matches;
+    });
+    // Keep the current insurance only when it belongs to the selected category.
+    // Otherwise automatically select the first active provider for this category.
+    const selectedOption = ins.options[ins.selectedIndex];
+    const selectedIsValid = selectedOption &&
+        selectedOption.value !== '' &&
+        selectedOption.getAttribute('data-cat') === catId &&
+        !selectedOption.disabled;
+
+    if (!catId) {
+        ins.value = '';
+    } else if (!selectedIsValid) {
+        const firstMatching = Array.from(ins.options).find((opt, index) =>
+            index > 0 &&
+            opt.getAttribute('data-cat') === catId &&
+            !opt.disabled
+        );
+        ins.value = firstMatching ? firstMatching.value : '';
+    }
+}
+
+function filterDoctors(autoPick = true) {
 
     const deptId = document.getElementById('department_id').value;
 
