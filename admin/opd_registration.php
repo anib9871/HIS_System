@@ -83,51 +83,45 @@ try {
         }
     } catch (Exception $e) { }
 
-    $tenant_pdo->exec("ALTER TABLE patient_master ADD COLUMN IF NOT EXISTS dob DATE NULL AFTER fullname");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS department_id INT NULL AFTER doctor_id");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS service_id INT NULL AFTER department_id");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS category_id INT NULL AFTER service_id");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS insurance_id INT NULL AFTER category_id");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS payment_mode VARCHAR(50) DEFAULT 'Cash'");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS amount_paid DECIMAL(10,2) DEFAULT 0");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS change_return DECIMAL(10,2) DEFAULT 0");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS payment_breakdown TEXT NULL");
-    
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS remark TEXT NULL");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(10,2) DEFAULT 0");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5,2) NOT NULL DEFAULT 0 AFTER discount_amount");
-    $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN IF NOT EXISTS receipt_no BIGINT UNSIGNED NULL AFTER token_no");
-    // Ensure appointment_id exists on MySQL versions that do not support
-    // ALTER TABLE ... ADD COLUMN IF NOT EXISTS. This links one appointment
-    // to at most one OPD visit/bill and avoids the reported unknown-column error.
-    $appointmentColumnCheck = $tenant_pdo->prepare("
-        SELECT COUNT(*)
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = 'opd_visits'
-          AND COLUMN_NAME = 'appointment_id'
-    ");
-    $appointmentColumnCheck->execute();
-    if ((int)$appointmentColumnCheck->fetchColumn() === 0) {
-        $tenant_pdo->exec("ALTER TABLE opd_visits ADD COLUMN appointment_id INT NULL AFTER patient_id");
-    }
+    // Use INFORMATION_SCHEMA checks instead of ADD COLUMN IF NOT EXISTS,
+    // which is unsupported by some MySQL/MariaDB versions and would stop the
+    // entire migration block before appointment_id/token compatibility ran.
+    $ensureColumn = function (string $table, string $column, string $definition) use ($tenant_pdo): void {
+        $check = $tenant_pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?");
+        $check->execute([$table, $column]);
+        if ((int)$check->fetchColumn() === 0) {
+            $tenant_pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");
+        }
+    };
 
-    // Check index by name first so repeated page loads do not rely on a failing CREATE.
-    $appointmentIndexCheck = $tenant_pdo->prepare("
-        SELECT COUNT(*)
-        FROM INFORMATION_SCHEMA.STATISTICS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = 'opd_visits'
-          AND INDEX_NAME = 'uq_opd_visits_appointment'
-    ");
+    $ensureColumn('patient_master', 'dob', 'DATE NULL');
+    $ensureColumn('opd_visits', 'department_id', 'INT NULL');
+    $ensureColumn('opd_visits', 'service_id', 'INT NULL');
+    $ensureColumn('opd_visits', 'category_id', 'INT NULL');
+    $ensureColumn('opd_visits', 'insurance_id', 'INT NULL');
+    $ensureColumn('opd_visits', 'payment_mode', "VARCHAR(50) DEFAULT 'Cash'");
+    $ensureColumn('opd_visits', 'amount_paid', 'DECIMAL(10,2) DEFAULT 0');
+    $ensureColumn('opd_visits', 'change_return', 'DECIMAL(10,2) DEFAULT 0');
+    $ensureColumn('opd_visits', 'payment_breakdown', 'TEXT NULL');
+    $ensureColumn('opd_visits', 'remark', 'TEXT NULL');
+    $ensureColumn('opd_visits', 'discount_amount', 'DECIMAL(10,2) DEFAULT 0');
+    $ensureColumn('opd_visits', 'discount_percent', 'DECIMAL(5,2) NOT NULL DEFAULT 0');
+    $ensureColumn('opd_visits', 'receipt_no', 'BIGINT UNSIGNED NULL');
+    // Link an appointment to its visit so duplicate billing can be prevented.
+    $ensureColumn('opd_visits', 'appointment_id', 'INT NULL');
+
+    // Create the link index if absent. Existing duplicate non-NULL values are
+    // handled safely by leaving the application-level duplicate guard in place.
+    $appointmentIndexCheck = $tenant_pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'opd_visits' AND INDEX_NAME = 'uq_opd_visits_appointment'");
     $appointmentIndexCheck->execute();
     if ((int)$appointmentIndexCheck->fetchColumn() === 0) {
         try {
             $tenant_pdo->exec("CREATE UNIQUE INDEX uq_opd_visits_appointment ON opd_visits (org_id, center_id, appointment_id)");
-        } catch (Exception $indexEx) {
-            // The application still performs a transaction-locked duplicate check below.
+        } catch (Throwable $indexEx) {
+            // Application-level duplicate check remains active if an index cannot be created.
         }
     }
+
 
     $tenant_pdo->exec("
         UPDATE opd_visits
@@ -591,9 +585,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     $pay_status = 1;
                 }
 
-                $token_stmt = $tenant_pdo->prepare("SELECT COUNT(*) FROM opd_visits WHERE visit_date = ? AND org_id = ? AND center_id = ?");
-                $token_stmt->execute([$visit_date, $org_id, $center_id]);
-                $next_token = ((int)$token_stmt->fetchColumn()) + 1;
+                $next_token = 0;
+                if ($appointment_id > 0) {
+                    $apptTokenStmt = $tenant_pdo->prepare("SELECT token_no FROM opd_appointments WHERE appointment_id = ? AND org_id = ? AND center_id = ? LIMIT 1");
+                    $apptTokenStmt->execute([$appointment_id, $org_id, $center_id]);
+                    $next_token = (int)$apptTokenStmt->fetchColumn();
+                }
+                if ($next_token <= 0) {
+                    $token_stmt = $tenant_pdo->prepare("SELECT COALESCE(MAX(token_no), 0) FROM opd_visits WHERE visit_date = ? AND org_id = ? AND center_id = ? AND doctor_id = ?");
+                    $token_stmt->execute([$visit_date, $org_id, $center_id, $doctor_id]);
+                    $lastVisitToken = (int)$token_stmt->fetchColumn();
+                    $appt_token_stmt = $tenant_pdo->prepare("SELECT COALESCE(MAX(token_no), 0) FROM opd_appointments WHERE appointment_date = ? AND org_id = ? AND center_id = ? AND doctor_id = ?");
+                    $appt_token_stmt->execute([$visit_date, $org_id, $center_id, $doctor_id]);
+                    $lastAppointmentToken = (int)$appt_token_stmt->fetchColumn();
+                    $next_token = max($lastVisitToken, $lastAppointmentToken) + 1;
+                }
 
                 $visitTs = strtotime($visit_date);
                 $visitYear = (int)date('Y', $visitTs);
@@ -736,10 +742,10 @@ input[type="number"], input[type="date"], input[inputmode="numeric"], .mob-input
 .native-date-picker { position: absolute; right: 0; top: 0; width: 38px; height: 31px; opacity: 0; cursor: pointer; z-index: 10; pointer-events: auto; }
 .receipt-preview-wrap, .receipt-preview-wrap * { text-transform: uppercase; }
 @media print {
-    @page { size: A5 portrait; margin: 0; }
+    @page { size: A5 landscape; margin: 0; }
     body * { visibility: hidden; }
     #hospitalReceipt, #hospitalReceipt * { visibility: visible; }
-    #hospitalReceipt { position: absolute; left: 0; top: 0; width: 148mm; height: 210mm; margin: 0; padding: 6mm; box-sizing: border-box; background: #fff; border: none !important; box-shadow: none !important; overflow: hidden; }
+    #hospitalReceipt { position: absolute; left: 0; top: 0; width: 210mm; height: 148mm; margin: 0; padding: 5mm; box-sizing: border-box; background: #fff; border: none !important; box-shadow: none !important; overflow: hidden; }
     .no-print { display: none !important; }
 }
 .tariff-box { background-color: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px; padding: 15px; text-align: center; }
@@ -754,11 +760,11 @@ input[type="number"], input[type="date"], input[inputmode="numeric"], .mob-input
 .patient-lookup-box .patient-option { cursor: pointer; }
 .patient-lookup-box .patient-option:hover { background: #eef6ff; }
 #patient_lookup_result { position: relative; z-index: 20; }
-.modal-a5 { width: 158mm; max-width: calc(100vw - 24px); margin: 20px auto; }
+.modal-a5 { width: 220mm; max-width: calc(100vw - 24px); margin: 20px auto; }
 .modal-a5 .modal-content { max-height: calc(100vh - 40px); overflow: hidden; border-radius: 10px; }
 .modal-a5 .modal-body { overflow: auto; padding: 8px; background: #e9ecef; }
-.receipt-preview-wrap { width: 148mm; height: 210mm; max-width: none; min-width: 148mm; margin: 0 auto; padding: 8mm; background: #fff; box-shadow: 0 2px 14px rgba(0,0,0,.18); overflow: hidden; box-sizing: border-box; }
-.receipt-preview-wrap .receipt-sheet { width:100%; max-width:138mm; margin:0 auto; font-family:Arial,sans-serif; color:#111; font-size:11px; }
+.receipt-preview-wrap { width: 210mm; height: 148mm; max-width: none; min-width: 210mm; margin: 0 auto; padding: 5mm; background: #fff; box-shadow: 0 2px 14px rgba(0,0,0,.18); overflow: hidden; box-sizing: border-box; }
+.receipt-preview-wrap .receipt-sheet { width:100%; max-width:200mm; margin:0 auto; font-family:Arial,sans-serif; color:#111; font-size:11px; }
 .receipt-preview-wrap .receipt-header { text-align:center; border-bottom:2px solid #111; padding-bottom:8px; margin-bottom:9px; }
 .receipt-preview-wrap .hospital { font-size:18px; font-weight:800; text-transform:uppercase; }
 .receipt-preview-wrap .center { font-size:13px; font-weight:700; margin-top:2px; }
@@ -777,7 +783,7 @@ input[type="number"], input[type="date"], input[inputmode="numeric"], .mob-input
 .receipt-preview-wrap .discount { color:#c62828; }
 .receipt-preview-wrap .grand td { font-weight:800; background:#f3f4f6; }
 .receipt-preview-wrap .instructions { margin-top:12px; padding-top:7px; border-top:1px dashed #999; font-size:9px; line-height:1.45; }
-@media (max-width: 800px) { .modal-a5 { width: calc(100vw - 16px); max-width: calc(100vw - 16px); margin: 8px auto; } .modal-a5 .modal-content { max-height: calc(100vh - 16px); } .modal-a5 .modal-body { padding: 4px; } .receipt-preview-wrap { width: 148mm; height: 210mm; transform-origin: top left; } }
+@media (max-width: 800px) { .modal-a5 { width: calc(100vw - 16px); max-width: calc(100vw - 16px); margin: 8px auto; } .modal-a5 .modal-content { max-height: calc(100vh - 16px); } .modal-a5 .modal-body { padding: 4px; } .receipt-preview-wrap { width: 148mm; height: 148mm; transform-origin: top left; } }
 .no-print #parcheTable td.text-end.pe-3 { vertical-align: middle !important; white-space: nowrap; }
 .no-print #parcheTable td.text-end.pe-3 > .btn, .no-print #parcheTable td.text-end.pe-3 > a.btn { display: inline-flex !important; align-items: center !important; justify-content: center !important; vertical-align: middle !important; position: relative !important; top: 0 !important; margin-top: 0 !important; margin-bottom: 0 !important; line-height: 1 !important; }
 .no-print #parcheTable td.text-end.pe-3 > a.btn { margin-left: 4px !important; }
@@ -930,6 +936,15 @@ body.opd-embedded-registration #paymentModal .payment-method-card { padding:4px 
 body.opd-embedded-registration #paymentModal .payment-method-card .form-check { margin-bottom:3px !important; }
 body.opd-embedded-registration #paymentModal .btn-success { display:block !important; width:auto !important; min-width:210px !important; max-width:250px !important; margin:5px auto 0 !important; min-height:28px !important; height:28px !important; padding:3px 12px !important; font-size:10px !important; }
 body.opd-embedded-registration .card-body { padding:5px 7px !important; }
+body.opd-embedded-registration #paymentModal .payment-methods-grid { gap:4px !important; margin-bottom:5px !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card { padding:3px 4px !important; border-radius:5px !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card .form-check-label { font-size:8px !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card .form-check { margin-bottom:2px !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card .form-control,
+body.opd-embedded-registration #paymentModal .payment-method-card .input-group-text { height:23px !important; min-height:23px !important; font-size:10px !important; }
+body.opd-embedded-registration #paymentModal .payment-method-card input[type=text] { height:22px !important; min-height:22px !important; margin-top:3px !important; }
+body.opd-embedded-registration #paymentModal .bg-primary.bg-opacity-10 { margin-bottom:5px !important; padding:5px 8px !important; }
+body.opd-embedded-registration #paymentModal .payment-totals-strip { margin-top:4px !important; margin-bottom:5px !important; }
 body.opd-embedded-registration .embedded-patient-summary { margin-bottom:4px !important; }
 @media (max-width: 760px) { body.opd-embedded-registration #paymentModal .payment-methods-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 </style>
@@ -978,7 +993,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     <div class="mb-3">
                         <i class="bi bi-check-circle-fill text-success" style="font-size: 3.5rem;"></i>
                     </div>
-                    <h5 class="fw-bold text-dark mb-1">Registration Successful!</h5>
+                    <h5 class="fw-bold text-dark mb-1">OPD Payment Saved!</h5>
                     <p class="text-muted small mb-3">Patient: <?= htmlspecialchars($token_generated['name']) ?></p>
                     
                     <div class="row g-2 mb-3">
@@ -1235,7 +1250,7 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                                     <select name="category_id" id="category_id" class="form-select form-select-sm" required onchange="filterInsurances()">
                                         <option value="">-- Select --</option>
                                         <?php foreach ($categories as $cat): ?>
-                                            <option value="<?= $cat['id'] ?>" <?= (isset($edit_data['category_id']) && $edit_data['category_id'] == $cat['id']) ? 'selected' : '' ?>><?= htmlspecialchars($cat['category_name']) ?></option>
+                                            <option value="<?= $cat['id'] ?>" <?= (((isset($edit_data['category_id']) && $edit_data['category_id'] == $cat['id']) || (!isset($edit_data['category_id']) && isset($appointment_prefill['category_id']) && $appointment_prefill['category_id'] == $cat['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($cat['category_name']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
@@ -1244,7 +1259,7 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                                     <select name="insurance_id" id="insurance_id" class="form-select form-select-sm" onchange="calculateTariff()">
                                         <option value="">-- Base Category (No specific insurance) --</option>
                                         <?php foreach ($insurances as $ins): ?>
-                                            <option value="<?= $ins['id'] ?>" data-cat="<?= $ins['category_id'] ?>" <?= (isset($edit_data['insurance_id']) && $edit_data['insurance_id'] == $ins['id']) ? 'selected' : '' ?>><?= htmlspecialchars($ins['insurance_name']) ?></option>
+                                            <option value="<?= $ins['id'] ?>" data-cat="<?= $ins['category_id'] ?>" <?= (((isset($edit_data['insurance_id']) && $edit_data['insurance_id'] == $ins['id']) || (!isset($edit_data['insurance_id']) && isset($appointment_prefill['insurance_id']) && $appointment_prefill['insurance_id'] == $ins['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($ins['insurance_name']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
@@ -1260,8 +1275,8 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                             <div class="tariff-box h-100 d-flex flex-column align-items-center justify-content-center">
                                 <span class="d-block text-secondary small fw-bold mb-1">Billing Type</span>
                                 <select name="billing_mode" id="billing_mode" class="form-select form-select-sm mb-2" style="max-width:260px;" onchange="applyBillingMode()">
-                                    <option value="regular" selected>Regular Consultation (Charge)</option>
-                                    <option value="followup">Follow-up Within <?= (int)$followup_validity_days ?> Days (No Fee)</option>
+                                    <option value="regular" selected>Consultation</option>
+                                    <option value="followup">Follow-up</option>
                                 </select>
                                 <span class="d-block text-secondary small fw-bold mb-1">Applicable Tariff Fee</span>
                                 <?php 
@@ -1398,7 +1413,7 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
 
 <!-- PAYMENT MODAL -->
 <div class="modal fade" id="paymentModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered" style="max-width: 400px;">
+    <div class="modal-dialog modal-dialog-centered" style="max-width: 360px;">
         <div class="modal-content border-0 shadow rounded-3">
             <div class="modal-header bg-light py-2 px-3 border-bottom">
                 <h6 class="modal-title fw-bold text-dark m-0"><i class="bi bi-wallet2 text-primary me-2"></i>Payment Details</h6>
@@ -1457,7 +1472,7 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                     <div id="div_input_cash" style="<?= !$edit_data ? 'block' : 'none' ?>;" class="ps-4">
                         <div class="input-group input-group-sm">
                             <span class="input-group-text bg-white fw-bold">₹</span>
-                            <input type="number" id="amt_cash" class="form-control pay-amt fw-bold text-dark" value="<?= $edit_data['amount_paid'] ?? 0 ?>" placeholder="0" onkeyup="calculateModalTotals(false)">
+                            <input type="number" id="amt_cash" class="form-control pay-amt fw-bold text-dark" value="<?= $edit_data['amount_paid'] ?? 0 ?>" placeholder="0" oninput="handlePaymentAmountChange(this)">
                         </div>
                     </div>
                 </div>
@@ -1471,7 +1486,7 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                     <div id="div_input_upi" style="display:none;" class="ps-4">
                         <div class="input-group input-group-sm mb-1">
                             <span class="input-group-text bg-white fw-bold">₹</span>
-                            <input type="number" id="amt_upi" class="form-control pay-amt fw-bold text-dark" value="0" placeholder="0" onkeyup="calculateModalTotals(false)">
+                            <input type="number" id="amt_upi" class="form-control pay-amt fw-bold text-dark" value="0" placeholder="0" oninput="handlePaymentAmountChange(this)">
                         </div>
                         <input type="text" id="utr_upi" class="form-control form-control-sm font-monospace" style="font-size: 0.75rem;" placeholder="Ref / UTR No.">
                     </div>
@@ -1486,7 +1501,7 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                     <div id="div_input_card" style="display:none;" class="ps-4">
                         <div class="input-group input-group-sm mb-1">
                             <span class="input-group-text bg-white fw-bold">₹</span>
-                            <input type="number" id="amt_card" class="form-control pay-amt fw-bold text-dark" value="0" placeholder="0" onkeyup="calculateModalTotals(false)">
+                            <input type="number" id="amt_card" class="form-control pay-amt fw-bold text-dark" value="0" placeholder="0" oninput="handlePaymentAmountChange(this)">
                         </div>
                         <input type="text" id="utr_card" class="form-control form-control-sm font-monospace" style="font-size: 0.75rem;" placeholder="Txn Ref No.">
                     </div>
@@ -1501,16 +1516,17 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                     <div id="div_input_net" style="display:none;" class="ps-4">
                         <div class="input-group input-group-sm mb-1">
                             <span class="input-group-text bg-white fw-bold">₹</span>
-                            <input type="number" id="amt_net" class="form-control pay-amt fw-bold text-dark" value="0" placeholder="0" onkeyup="calculateModalTotals(false)">
+                            <input type="number" id="amt_net" class="form-control pay-amt fw-bold text-dark" value="0" placeholder="0" oninput="handlePaymentAmountChange(this)">
                         </div>
                         <input type="text" id="utr_net" class="form-control form-control-sm font-monospace" style="font-size: 0.75rem;" placeholder="UTR No.">
                     </div>
                 </div>
                 </div><!-- /.payment-methods-grid -->
 
-                <div class="payment-totals-strip small border mb-2">
-                    <div class="d-flex justify-content-between"><span class="text-secondary fw-semibold">Total Paid:</span><strong class="text-success" id="modalTotalPaid">₹<?= number_format($edit_data['amount_paid'] ?? 0, 2) ?></strong></div>
-                    <div class="d-flex justify-content-between"><span class="text-danger fw-semibold">Return Change:</span><strong class="text-danger" id="modalReturnChange">₹<?= number_format($edit_data['change_return'] ?? 0, 2) ?></strong></div>
+                <div class="payment-totals-strip small border mb-2" style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:#eff6ff;border:1px solid #bfdbfe!important;border-radius:7px;padding:6px 9px;margin-top:5px!important;">
+                    <span class="text-primary fw-bold">TOTAL PAYMENT RECEIVED</span>
+                    <strong class="text-primary fs-6" id="modalTotalPaid">₹<?= number_format($edit_data['amount_paid'] ?? 0, 2) ?></strong>
+                    <span id="modalReturnChange" style="display:none" aria-hidden="true">₹0.00</span>
                 </div>
                 <?php if ($embedded_mode): ?>
                 <button type="button" class="btn btn-success btn-sm w-100 fw-bold" onclick="saveEmbeddedOpdPayment()"><i class="bi bi-check-circle me-1"></i> Register &amp; Save OPD Payment</button>
@@ -1536,6 +1552,7 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                 <div id="receiptPreviewContent" class="receipt-preview-wrap"></div>
             </div>
             <div class="modal-footer py-2 px-3">
+                <button type="button" class="btn btn-outline-secondary fw-semibold" onclick="backToAppointmentDesk()"><i class="bi bi-arrow-left me-1"></i> Back to Appointment</button>
                 <button type="button" class="btn btn-light border" data-bs-dismiss="modal">Close</button>
                 <button type="button" class="btn btn-primary fw-bold" onclick="printReceiptFromPreview()">
                     <i class="bi bi-printer me-1"></i> Print A5 Receipt
@@ -2440,27 +2457,71 @@ function handleDiscountChange() {
 }
 
 function togglePaymentInputs(changedMode) {
-    let isChecked = document.getElementById('check_' + changedMode).checked;
-    document.getElementById('div_input_' + changedMode).style.display = isChecked ? 'block' : 'none';
-    
-    if (!isChecked) {
-        document.getElementById('amt_' + changedMode).value = 0;
+    const check = document.getElementById('check_' + changedMode);
+    const amountWrap = document.getElementById('div_input_' + changedMode);
+    const amountInput = document.getElementById('amt_' + changedMode);
+    const isChecked = !!check.checked;
+
+    amountWrap.style.display = isChecked ? 'block' : 'none';
+    if (isChecked) {
+        // Newly selected mode starts blank; keep existing mode amount ready to rebalance.
+        amountInput.value = '';
+        lastPaymentMode = changedMode;
+        amountInput.focus();
     } else {
-        let fee = parseFloat(document.getElementById('consultation_fee').value) || 0;
-        let discount = parseFloat(document.getElementById('modal_discount_input').value) || 0;
-        let payable = fee - discount;
-        if(payable < 0) payable = 0;
-
-        let currentTotalExceptChanged = 0;
-        ['cash', 'upi', 'card', 'net'].forEach(m => {
-            if(m !== changedMode && document.getElementById('check_' + m).checked) {
-                currentTotalExceptChanged += (parseFloat(document.getElementById('amt_' + m).value) || 0);
-            }
-        });
-
-        let remaining = payable - currentTotalExceptChanged;
-        document.getElementById('amt_' + changedMode).value = remaining > 0 ? remaining : 0;
+        amountInput.value = '';
+        const utr = document.getElementById('utr_' + changedMode);
+        if (utr) utr.value = '';
     }
+    calculateModalTotals(false);
+}
+
+let lastPaymentMode = 'cash';
+
+function handlePaymentAmountChange(changedInput) {
+    const changedMode = changedInput.id.replace('amt_', '');
+    const fee = parseFloat(document.getElementById('consultation_fee').value) || 0;
+    const discount = parseFloat(document.getElementById('modal_discount_input').value) || 0;
+    const payable = Math.max(0, fee - discount);
+
+    let entered = parseFloat(changedInput.value) || 0;
+    if (entered < 0) entered = 0;
+    if (entered > payable) entered = payable;
+    changedInput.value = entered === 0 && changedInput.value === '' ? '' : entered;
+
+    const modes = ['cash', 'upi', 'card', 'net'];
+    const otherChecked = modes.filter(mode =>
+        mode !== changedMode && document.getElementById('check_' + mode).checked
+    );
+
+    // Keep the bill's total aligned with the payable amount: the amount just
+    // entered is respected, and the previously used checked mode gets the balance.
+    if (otherChecked.length > 0) {
+        const otherSum = otherChecked.reduce((sum, mode) =>
+            sum + (parseFloat(document.getElementById('amt_' + mode).value) || 0), 0);
+        const targetOtherTotal = Math.max(0, payable - entered);
+
+        if (otherSum > targetOtherTotal) {
+            let excess = otherSum - targetOtherTotal;
+            // Reduce other modes from the most recently used backwards.
+            const reduceOrder = [...otherChecked].reverse();
+            for (const mode of reduceOrder) {
+                const input = document.getElementById('amt_' + mode);
+                const value = parseFloat(input.value) || 0;
+                const reduction = Math.min(value, excess);
+                input.value = Math.max(0, value - reduction);
+                excess -= reduction;
+                if (excess <= 0) break;
+            }
+        } else if (otherSum < targetOtherTotal) {
+            const balanceMode = otherChecked.includes(lastPaymentMode)
+                ? lastPaymentMode
+                : otherChecked[0];
+            const input = document.getElementById('amt_' + balanceMode);
+            input.value = ((parseFloat(input.value) || 0) + (targetOtherTotal - otherSum)).toFixed(2);
+        }
+    }
+    lastPaymentMode = changedMode;
     calculateModalTotals(false);
 }
 
@@ -2555,19 +2616,18 @@ function applyModalPayment() {
 
 <?php if ($token_generated): ?>
 document.addEventListener("DOMContentLoaded", function() {
-    var myModal = new bootstrap.Modal(document.getElementById('successPrintModal'));
-    myModal.show();
+    // Show the receipt directly after a successful save: no intermediate success popup.
     if (window.history.replaceState) {
-        window.history.replaceState(null, null, window.location.pathname);
+        window.history.replaceState(null, null, window.location.pathname + (window.location.search.includes('embedded=1') ? '?embedded=1' : ''));
     }
-    
-    // FIX: Clear form fields so page is empty for next registration
     const form = document.getElementById('opdForm');
     if(form) form.reset();
     clearPatientSelection(true);
-    document.getElementById('display_tariff_fee').innerText = '₹0.00';
+    const tariff = document.getElementById('display_tariff_fee');
+    if (tariff) tariff.innerText = '₹0.00';
     const paymentSummary = document.getElementById('paymentSummaryText');
     if (paymentSummary) paymentSummary.innerText = 'Collect Payment';
+    showGeneratedReceipt();
 });
 
 function showGeneratedReceipt() {
@@ -2647,7 +2707,7 @@ function buildReceiptHtml(data) {
             <div class="hospital">${safe(orgName)}</div>
             <div class="center">${safe(centerName)}</div>
             <div class="address">${safe(centerAddress)}</div>
-            <div class="receipt-title">OPD REGISTRATION & CONSULTATION RECEIPT</div>
+            <div class="receipt-title">OPD CONSULTATION RECEIPT</div>
         </div>
         <div class="token-box">
             <div>
@@ -2655,7 +2715,7 @@ function buildReceiptHtml(data) {
                 <div class="token">${safe(data.token)}</div>
                 <div style="font-size:10px;font-weight:700;margin-top:4px;">RECEIPT NO. ${safe(data.receiptNo)}</div>
             </div>
-            <div class="date-block"><b>Registration Date</b><br>${safe(data.datetime)}</div>
+            <div class="date-block"><b>Receipt Date</b><br>${safe(data.datetime)}</div>
         </div>
         <table class="receipt-table info-table">
             <tr><th>UHID / ID</th><td colspan="3">${safe(data.uhid)}</td></tr>
@@ -2675,63 +2735,96 @@ function buildReceiptHtml(data) {
             ${paymentRows.join('') || '<tr><td>Payment Mode</td><td class="amount">Not Paid</td></tr>'}
             <tr><td>Total Amount Paid</td><td class="amount">₹${amountPaid.toFixed(2)}</td></tr>
             <tr><td>Balance Due</td><td class="amount">₹${balance.toFixed(2)}</td></tr>
-            <tr><td>Change Returned</td><td class="amount">₹${Math.max(0, changeReturn).toFixed(2)}</td></tr>
             <tr class="grand"><td>Payment Status</td><td class="amount">${statusLabel}</td></tr>
         </table>
         <div class="instructions"><b>Instructions</b><br>${receiptInstructions}</div>
     </div>`;
 }
 
-function printReceiptFromPreview() {
-    if (!currentReceiptHtml) return;
-    const printWindow = window.open('', '_blank', 'width=900,height=950');
-    if (!printWindow) {
-        if (window.Swal) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Pop-up Blocked',
-                text: 'Please allow pop-ups in your browser to print the receipt.',
-                confirmButtonText: 'OK',
-                confirmButtonColor: '#2563eb'
-            });
-        } else {
-            window.alert('Please allow pop-ups in your browser to print the receipt.');
-        }
+function backToAppointmentDesk() {
+    const receiptModal = document.getElementById('receiptPreviewModal');
+    if (receiptModal) bootstrap.Modal.getOrCreateInstance(receiptModal).hide();
+    const successModal = document.getElementById('successPrintModal');
+    if (successModal) bootstrap.Modal.getOrCreateInstance(successModal).hide();
+
+    if (window.parent && window.parent !== window) {
+        window.parent.postMessage({type: 'opd-payment-saved', action: 'back-to-appointment'}, '*');
         return;
     }
-    printWindow.document.open();
-    printWindow.document.write(`<!doctype html><html><head><title>OPD Receipt</title>
+    window.location.href = 'opd_appointments.php';
+}
+
+let opdReceiptPrintStarted = false;
+function printReceiptFromPreview() {
+    if (!currentReceiptHtml || opdReceiptPrintStarted) return;
+    opdReceiptPrintStarted = true;
+
+    let frame = document.getElementById('opdReceiptPrintFrame');
+    if (!frame) {
+        frame = document.createElement('iframe');
+        frame.id = 'opdReceiptPrintFrame';
+        frame.title = 'OPD Receipt Print';
+        frame.style.position = 'fixed';
+        frame.style.right = '0';
+        frame.style.bottom = '0';
+        frame.style.width = '0';
+        frame.style.height = '0';
+        frame.style.border = '0';
+        frame.style.visibility = 'hidden';
+        document.body.appendChild(frame);
+    }
+
+    const doc = frame.contentWindow.document;
+    doc.open();
+    doc.write(`<!doctype html><html><head><title>OPD Receipt</title>
 <style>
-@page{size:A5 portrait;margin:8mm}
+@page{size:A5 landscape;margin:5mm}
 *{box-sizing:border-box}
-body{margin:0;font-family:Arial,sans-serif;color:#111;background:#fff;font-size:11px}
-.receipt-sheet{width:100%;max-width:138mm;margin:0 auto}
-.receipt-header{text-align:center;border-bottom:2px solid #111;padding-bottom:8px;margin-bottom:9px}
-.hospital{font-size:18px;font-weight:800;text-transform:uppercase}
-.center{font-size:13px;font-weight:700;margin-top:2px}
-.address{font-size:9px;color:#555;margin-top:2px}
-.receipt-title{font-size:11px;font-weight:800;margin-top:7px}
-.token-box{display:flex;justify-content:space-between;align-items:center;border:1px solid #aaa;background:#f7f7f7;padding:7px;margin-bottom:9px}
-.small-label{font-size:8px;font-weight:700;color:#666}
-.token{font-size:22px;font-weight:800}
-.date-block{text-align:right;font-size:9px;line-height:1.5}
+html,body{width:200mm;margin:0;padding:0}
+body{font-family:Arial,sans-serif;color:#111;background:#fff;font-size:10px}
+.receipt-sheet{width:200mm;max-width:200mm;margin:0 auto}
+.receipt-header{text-align:center;border-bottom:2px solid #111;padding-bottom:5px;margin-bottom:6px}
+.hospital{font-size:16px;font-weight:800;text-transform:uppercase}
+.center{font-size:11px;font-weight:700;margin-top:2px}
+.address{font-size:8px;color:#555;margin-top:2px}
+.receipt-title{font-size:10px;font-weight:800;margin-top:5px}
+.token-box{display:flex;justify-content:space-between;align-items:center;border:1px solid #aaa;background:#f7f7f7;padding:5px;margin-bottom:6px}
+.small-label{font-size:7px;font-weight:700;color:#666}
+.token{font-size:18px;font-weight:800}
+.date-block{text-align:right;font-size:8px;line-height:1.4}
 .receipt-table{width:100%;border-collapse:collapse}
-.receipt-table th,.receipt-table td{border:1px solid #bbb;padding:5px;vertical-align:top}
-.info-table th{width:23%;text-align:left;background:#f1f3f5;font-weight:700}
+.receipt-table th,.receipt-table td{border:1px solid #bbb;padding:3px;vertical-align:top}
+.info-table th{width:20%;text-align:left;background:#f1f3f5;font-weight:700}
 .billing-table td:first-child{width:65%}
-.section-title{font-size:10px;font-weight:800;margin:9px 0 4px;border-bottom:1px solid #222;padding-bottom:2px}
+.section-title{font-size:9px;font-weight:800;margin:5px 0 3px;border-bottom:1px solid #222;padding-bottom:2px}
 .amount{text-align:right;font-weight:700;white-space:nowrap}
 .discount{color:#c62828}
 .grand td{font-weight:800;background:#f3f4f6}
 .billing-table small{color:#666;font-weight:400}
-.instructions{margin-top:12px;padding-top:7px;border-top:1px dashed #999;font-size:9px;line-height:1.45}
+.instructions{margin-top:6px;padding-top:4px;border-top:1px dashed #999;font-size:8px;line-height:1.3}
 </style></head><body>${currentReceiptHtml}</body></html>`);
-    printWindow.document.close();
-    printWindow.onload = function() {
-        setTimeout(() => { printWindow.focus(); printWindow.print(); }, 250);
+    doc.close();
+
+    const returnAfterPrint = () => {
+        if (!opdReceiptPrintStarted) return;
+        opdReceiptPrintStarted = false;
+        backToAppointmentDesk();
+    };
+    // afterprint fires when the user closes the system print dialog (Print or Cancel).
+    frame.contentWindow.onafterprint = returnAfterPrint;
+    frame.onload = function() {
+        frame.onload = null;
+        setTimeout(() => {
+            try {
+                frame.contentWindow.focus();
+                frame.contentWindow.print();
+            } catch (e) {
+                opdReceiptPrintStarted = false;
+                alert('Print dialog could not be opened. Please try again.');
+            }
+        }, 150);
     };
 }
-
 function printExistingParcha(name, uhid, ageGender, mobile, doctor, fee, discount, discountPercent, mode, token, receiptNo, remark, datetime, paymentBreakdownRaw, amountPaid, changeReturn, statusCode) {
     openReceiptPreview(name, uhid, ageGender, mobile, doctor, fee, discount, discountPercent, mode, token, receiptNo, remark, datetime, paymentBreakdownRaw, amountPaid, changeReturn, statusCode);
 }
