@@ -816,18 +816,43 @@ $appointments->execute([$org_id, $center_id, $date_filter]);
 
 $appointments = $appointments->fetchAll(PDO::FETCH_ASSOC);
 
-// Summary data for the right-hand Appointment Desk panel.
-$apptStatusCounts = ['Pending' => 0, 'Patient Present' => 0, 'Patient Checked In' => 0, 'Cancelled' => 0, 'Completed' => 0];
+// Today's Status: calculate one effective state per appointment, using queue timestamps
+// first. Queue timestamps are the most reliable source because a patient may be present,
+// inside the cabin, or completed while the appointment's own status remains Pending.
+$apptStatusCounts = [
+    'Pending' => 0,
+    'Patient Present' => 0,
+    'Patient Checked In' => 0,
+    'Cancelled' => 0,
+    'Completed' => 0
+];
 $apptDepartmentCounts = [];
+
 foreach ($appointments as $summaryAppt) {
     $queueStatusKey = strtolower(trim((string)($summaryAppt['queue_tracking_status'] ?? '')));
     $statusKey = strtolower(trim((string)($summaryAppt['status'] ?? 'pending')));
-    $hasPresentTimestamp = !empty($summaryAppt['queue_present_time']);
-    if (strpos($statusKey, 'cancel') !== false) $apptStatusCounts['Cancelled']++;
-    elseif (strpos($queueStatusKey, 'complete') !== false || strpos($statusKey, 'complete') !== false || strpos($statusKey, 'success') !== false) $apptStatusCounts['Completed']++;
-    elseif (strpos($queueStatusKey, 'inside cabin') !== false || strpos($queueStatusKey, 'check') !== false || strpos($statusKey, 'check') !== false) $apptStatusCounts['Patient Checked In']++;
-    elseif ($hasPresentTimestamp || strpos($queueStatusKey, 'present') !== false || strpos($statusKey, 'present') !== false || strpos($statusKey, 'confirm') !== false) $apptStatusCounts['Patient Present']++;
-    else $apptStatusCounts['Pending']++;
+    $presentAt = trim((string)($summaryAppt['queue_present_time'] ?? ''));
+    $checkedInAt = trim((string)($summaryAppt['queue_in_time'] ?? ''));
+    $completedAt = trim((string)($summaryAppt['queue_out_time'] ?? ''));
+
+    // Keep categories mutually exclusive and prioritize the latest workflow state.
+    if (strpos($statusKey, 'cancel') !== false) {
+        $effectiveStatus = 'Cancelled';
+    } elseif ($completedAt !== '' || strpos($queueStatusKey, 'complete') !== false ||
+              strpos($statusKey, 'complete') !== false || strpos($statusKey, 'success') !== false) {
+        $effectiveStatus = 'Completed';
+    } elseif ($checkedInAt !== '' || strpos($queueStatusKey, 'inside cabin') !== false ||
+              strpos($queueStatusKey, 'checked') !== false || strpos($statusKey, 'check') !== false) {
+        $effectiveStatus = 'Patient Checked In';
+    } elseif ($presentAt !== '' || strpos($queueStatusKey, 'present') !== false ||
+              strpos($queueStatusKey, 'waiting') !== false || strpos($statusKey, 'present') !== false ||
+              strpos($statusKey, 'confirm') !== false) {
+        $effectiveStatus = 'Patient Present';
+    } else {
+        $effectiveStatus = 'Pending';
+    }
+
+    $apptStatusCounts[$effectiveStatus]++;
     $deptLabel = trim((string)($summaryAppt['dept_name'] ?? 'Unassigned')) ?: 'Unassigned';
     $apptDepartmentCounts[$deptLabel] = ($apptDepartmentCounts[$deptLabel] ?? 0) + 1;
 }
@@ -1761,7 +1786,9 @@ body.opd-registration-open #pills-tab { display:none !important; }
                                     data-patient-uhid="<?= htmlspecialchars((string)($row['patient_uhid'] ?? ''), ENT_QUOTES) ?>"
                                     data-track-id="<?= (int)($row['queue_track_id'] ?? 0) ?>"
                                     data-queue-status="<?= htmlspecialchars((string)($row['queue_tracking_status'] ?? ''), ENT_QUOTES) ?>"
-                                    data-present-time="<?= htmlspecialchars((string)($row['queue_present_time'] ?? ''), ENT_QUOTES) ?>">
+                                    data-present-time="<?= htmlspecialchars((string)($row['queue_present_time'] ?? ''), ENT_QUOTES) ?>"
+                                    data-in-time="<?= htmlspecialchars((string)($row['queue_in_time'] ?? ''), ENT_QUOTES) ?>"
+                                    data-out-time="<?= htmlspecialchars((string)($row['queue_out_time'] ?? ''), ENT_QUOTES) ?>">
 
                                     <td class="ps-3 fw-bold text-primary"><?= ($row['real_token_no'] !== null && $row['real_token_no'] !== '') ? htmlspecialchars(getFYToken($row['real_token_no'], $date_filter)) : 'N/A' ?></td>
                                     <td class="fw-bold text-primary">
@@ -1990,33 +2017,61 @@ function closeRegistrationWorkspace() {
     function applyFilter(){
         const value = select.value || '__ALL__';
         let shown = 0;
+        const counts = {pending:0, present:0, checked:0, cancelled:0, completed:0};
+
         rows.forEach(row => {
             const match = value === '__ALL__' || row.dataset.doctorId === value;
             row.style.display = match ? '' : 'none';
-            if (match) shown++;
+            if (!match) return;
+            shown++;
+
+            const queueStatus = (row.dataset.queueStatus || '').trim().toLowerCase();
+            const appointmentStatus = (row.dataset.appointmentStatus || '').trim().toLowerCase();
+            const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
+            const hasInTime = !!String(row.dataset.inTime || '').trim();
+            const hasOutTime = !!String(row.dataset.outTime || '').trim();
+
+            if (appointmentStatus.includes('cancel')) {
+                counts.cancelled++;
+                return;
+            }
+
+            // Count each recorded workflow milestone independently:
+            // PRESENT remains counted even after the patient is checked in/completed.
+            if (hasPresentTime || queueStatus.includes('waiting') || queueStatus.includes('present') ||
+                appointmentStatus.includes('present') || appointmentStatus.includes('confirm')) {
+                counts.present++;
+            }
+            if (hasInTime || queueStatus.includes('inside cabin') || queueStatus.includes('checked') ||
+                appointmentStatus.includes('check')) {
+                counts.checked++;
+            }
+            if (hasOutTime || queueStatus.includes('complete') || appointmentStatus.includes('complete') ||
+                appointmentStatus.includes('success')) {
+                counts.completed++;
+            }
+
+            const hasAnyProgress = hasPresentTime || hasInTime || hasOutTime ||
+                queueStatus.includes('waiting') || queueStatus.includes('present') ||
+                queueStatus.includes('inside cabin') || queueStatus.includes('checked') ||
+                queueStatus.includes('complete') || appointmentStatus.includes('present') ||
+                appointmentStatus.includes('confirm') || appointmentStatus.includes('check') ||
+                appointmentStatus.includes('complete') || appointmentStatus.includes('success');
+            if (!hasAnyProgress) counts.pending++;
         });
+
         if (emptyRow) {
             emptyRow.style.display = shown ? 'none' : '';
             const cell = emptyRow.querySelector('td');
             if (cell) cell.textContent = value === '__ALL__' ? 'No appointments found for this date.' : 'No appointments found for this doctor and date.';
         }
-        const counts = {pending:0, present:0, checked:0, cancelled:0, completed:0};
-        rows.forEach(row => {
-            // Summary counts include all doctors for the selected date, even when
-            // the appointment list itself is filtered to one doctor.
-            const queueStatus = (row.dataset.queueStatus || '').trim().toLowerCase();
-            const appointmentStatus = (row.dataset.appointmentStatus || '').trim().toLowerCase();
-            const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
-            if (appointmentStatus.includes('cancel')) counts.cancelled++;
-            else if (queueStatus.includes('complete') || appointmentStatus.includes('complete') || appointmentStatus.includes('success')) counts.completed++;
-            else if (queueStatus.includes('inside cabin') || queueStatus.includes('check') || appointmentStatus.includes('check')) counts.checked++;
-            else if (hasPresentTime || queueStatus.includes('present') || appointmentStatus.includes('present') || appointmentStatus.includes('confirm')) counts.present++;
-            else counts.pending++;
-        });
         const setCount = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
         setCount('sidePendingCount', counts.pending);
-        setCount('sidePresentCount', counts.present); setCount('sideCheckedCount', counts.checked); setCount('sideCancelledCount', counts.cancelled);
-        setCount('sideCompletedCount', counts.completed); setCount('sideTotalAppointments', shown);
+        setCount('sidePresentCount', counts.present);
+        setCount('sideCheckedCount', counts.checked);
+        setCount('sideCancelledCount', counts.cancelled);
+        setCount('sideCompletedCount', counts.completed);
+        setCount('sideTotalAppointments', shown);
     }
     select.addEventListener('change', applyFilter);
     applyFilter();
