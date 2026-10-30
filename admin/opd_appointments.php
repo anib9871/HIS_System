@@ -139,7 +139,7 @@ try {
 
         INSERT IGNORE INTO opd_queue_tracking (org_id, center_id, visit_id, status, waiting_since, in_time, out_time)
 
-        SELECT org_id, center_id, visit_id, 'Waiting', NULL, NULL, NULL
+        SELECT org_id, center_id, visit_id, 'Scheduled', NULL, NULL, NULL
 
         FROM opd_visits 
 
@@ -147,6 +147,17 @@ try {
 
         AND visit_id NOT IN (SELECT visit_id FROM opd_queue_tracking)
 
+    ");
+
+    // Backfill the arrival timestamp for already-present patients whose timer was never started.
+    $tenant_pdo->exec("
+        UPDATE opd_queue_tracking qt
+        INNER JOIN opd_visits v ON v.visit_id = qt.visit_id
+            AND v.org_id = qt.org_id AND v.center_id = qt.center_id
+        SET qt.waiting_since = NOW()
+        WHERE qt.org_id = {$org_id} AND qt.center_id = {$center_id}
+          AND v.visit_date = CURDATE()
+          AND qt.status = 'Waiting' AND qt.waiting_since IS NULL
     ");
 
 } catch (Exception $e) {}
@@ -1852,8 +1863,8 @@ body.opd-registration-open #pills-tab { display:none !important; }
 
             <div class="card-header appointment-toolbar">
                 <div class="appointment-toolbar-heading">
-                    <h6 class="mb-0 fw-bold text-dark">
-                        <i class="bi bi-calendar2-week text-primary me-2"></i>Consultation Appointments
+                    <h6 class="mb-0 fw-bold text-dark" id="appointmentListHeading">
+                        <i class="bi bi-calendar2-week text-primary me-2"></i>OPD Appointments
                     </h6>
                     <small class="text-muted">Right-click an appointment for billing and queue actions</small>
                 </div>
@@ -2082,11 +2093,11 @@ body.opd-registration-open #pills-tab { display:none !important; }
   </div>
 </div>
 <style>
-.opd-payment-dialog{max-width:1180px;width:calc(100vw - 32px)}
-#opdPaymentWorkspaceModal .modal-content{height:min(88vh,820px);border-radius:12px;overflow:hidden}
-#opdPaymentWorkspaceModal .modal-body{min-height:0;overflow:hidden;background:#f8fafc}
+.opd-payment-dialog{max-width:1180px;width:calc(100vw - 32px);align-items:flex-start!important;margin:1vh auto!important}
+#opdPaymentWorkspaceModal .modal-content{height:96vh;max-height:96vh;border-radius:12px;overflow:hidden}
+#opdPaymentWorkspaceModal .modal-body{min-height:0;overflow:hidden;background:#f8fafc;flex:1 1 auto}
 #opdPaymentWorkspaceFrame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}
-@media(max-width:768px){.opd-payment-dialog{width:calc(100vw - 12px);margin:6px auto}#opdPaymentWorkspaceModal .modal-content{height:94vh}}
+@media(max-width:768px){.opd-payment-dialog{width:calc(100vw - 12px);margin:1vh auto!important}#opdPaymentWorkspaceModal .modal-content{height:98vh;max-height:98vh}}
 
 /* Final refinements: booking fields flow naturally without an inner scrollbar. */
 .appointment-desk-layout {
@@ -2215,7 +2226,17 @@ function closeRegistrationWorkspace() {
     const search = document.getElementById('appointmentSearch');
     const clearSearch = document.getElementById('clearAppointmentSearch');
     const table = document.querySelector('.appointment-schedule-card table');
+    const heading = document.getElementById('appointmentListHeading');
+    const bookingDoctor = document.getElementById('doctor_id');
     if (!select || !table) return;
+
+    function updateAppointmentHeading() {
+        if (!heading) return;
+        const option = select.options[select.selectedIndex];
+        const doctorName = option && option.value !== '__ALL__' ? option.textContent.trim() : '';
+        heading.innerHTML = '<i class="bi bi-calendar2-week text-primary me-2"></i>' +
+            (doctorName ? 'OPD Appointment for ' + doctorName : 'OPD Appointments');
+    }
 
     const rows = Array.from(table.querySelectorAll('tbody tr[data-context-type="appointment"]'));
     const emptyRow = table.querySelector('tbody tr.appointment-empty-row');
@@ -2289,13 +2310,21 @@ function closeRegistrationWorkspace() {
         setCount('sideTotalAppointments', doctorCount);
     }
 
-    select.addEventListener('change', applyFilter);
+    select.addEventListener('change', function(){ applyFilter(); updateAppointmentHeading(); });
+    // Selecting a doctor in Book New Appointment immediately opens that doctor's OPD list.
+    if (bookingDoctor) bookingDoctor.addEventListener('change', function(){
+        if (!this.value) return;
+        select.value = this.value;
+        applyFilter();
+        updateAppointmentHeading();
+    });
     if (search) search.addEventListener('input', applyFilter);
     if (clearSearch) clearSearch.addEventListener('click', function(){
         if (search) { search.value = ''; search.focus(); }
         applyFilter();
     });
     applyFilter();
+    updateAppointmentHeading();
 })();
 
 
@@ -2384,21 +2413,17 @@ function closeRegistrationWorkspace() {
                     openRegistrationPanel(r.dataset.appointmentId);
                 }, true);
             }
-            addItem('View Saved OPD Bills', 'bi-receipt', r => {
-                const q = r.dataset.patientUhid || r.dataset.patientMobile || r.dataset.patientName || '';
-                location.href = 'opd_bills.php?search=' + encodeURIComponent(q);
-            });
-            // Queue actions remain available directly from the Consultation Appointments row.
-            // Patient Present is intentionally omitted here because successful OPD payment
-            // already marks the patient as present automatically.
+            // Patient arrival is a manual action. OPD payment alone must not mark
+            // the appointment as present or start the waiting timer.
             const linkedTrackId = Number(row.dataset.trackId || 0);
             const linkedQueueStatus = String(row.dataset.queueStatus || '').trim();
             const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
             if (linkedTrackId > 0 && linkedQueueStatus !== 'Completed' && appointmentStatus !== 'completed') {
-                if (linkedQueueStatus !== 'Inside Cabin') {
+                if (linkedQueueStatus === 'Scheduled' || linkedQueueStatus === 'Pending' || linkedQueueStatus === '') {
+                    addItem('Patient Present', 'bi-person-check', () => goQueue('waiting', linkedTrackId), true);
+                } else if (linkedQueueStatus === 'Waiting') {
                     addItem('Call In / In Consultation', 'bi-door-open', () => goQueue('in', linkedTrackId), !hasPresentTime);
-                }
-                if (linkedQueueStatus === 'Inside Cabin') {
+                } else if (linkedQueueStatus === 'Inside Cabin') {
                     addItem('Consultation Complete', 'bi-check-circle', () => confirmQueue('out', linkedTrackId), true);
                 }
             }
@@ -2410,13 +2435,19 @@ function closeRegistrationWorkspace() {
                     } else if (confirm('Cancel this appointment?')) location.href = url;
                 }, true);
             }
+            // Keep OPD Bills as the final appointment context-menu action.
+            addItem('OPD Bills', 'bi-receipt', r => {
+                const q = r.dataset.patientUhid || r.dataset.patientMobile || r.dataset.patientName || '';
+                location.href = 'opd_bills.php?search=' + encodeURIComponent(q);
+            });
         } else if (type === 'queue') {
             const trackId = Number(row.dataset.trackId || 0);
             const status = row.dataset.queueStatus || '';
             if (!trackId) return;
             const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
-            if (status === 'Waiting') {
-                if (!hasPresentTime) addItem('Patient Present', 'bi-person-check', () => goQueue('waiting', trackId));
+            if (status === 'Scheduled' || status === 'Pending' || status === '') {
+                addItem('Patient Present', 'bi-person-check', () => goQueue('waiting', trackId));
+            } else if (status === 'Waiting') {
                 addItem('Call In / In Consultation', 'bi-door-open', () => goQueue('in', trackId), !hasPresentTime);
             } else if (status === 'Inside Cabin') {
                 addItem('Consultation Complete', 'bi-check-circle', () => confirmQueue('out', trackId));
