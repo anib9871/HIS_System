@@ -835,18 +835,27 @@ foreach ($appointments as $summaryAppt) {
     $checkedInAt = trim((string)($summaryAppt['queue_in_time'] ?? ''));
     $completedAt = trim((string)($summaryAppt['queue_out_time'] ?? ''));
 
-    // Keep categories mutually exclusive and prioritize the latest workflow state.
+    // Cancellation on the appointment is final. Otherwise, an existing queue
+    // status is the single source of truth; historical timestamps must not override it.
     if (strpos($statusKey, 'cancel') !== false) {
         $effectiveStatus = 'Cancelled';
-    } elseif ($completedAt !== '' || strpos($queueStatusKey, 'complete') !== false ||
-              strpos($statusKey, 'complete') !== false || strpos($statusKey, 'success') !== false) {
+    } elseif ($queueStatusKey !== '') {
+        if (strpos($queueStatusKey, 'complete') !== false) {
+            $effectiveStatus = 'Completed';
+        } elseif (strpos($queueStatusKey, 'inside cabin') !== false ||
+                  strpos($queueStatusKey, 'checked') !== false) {
+            $effectiveStatus = 'Patient Checked In';
+        } elseif (strpos($queueStatusKey, 'waiting') !== false ||
+                  strpos($queueStatusKey, 'present') !== false) {
+            $effectiveStatus = 'Patient Present';
+        } else {
+            $effectiveStatus = 'Pending';
+        }
+    } elseif (strpos($statusKey, 'complete') !== false || strpos($statusKey, 'success') !== false || $completedAt !== '') {
         $effectiveStatus = 'Completed';
-    } elseif ($checkedInAt !== '' || strpos($queueStatusKey, 'inside cabin') !== false ||
-              strpos($queueStatusKey, 'checked') !== false || strpos($statusKey, 'check') !== false) {
+    } elseif (strpos($statusKey, 'check') !== false || $checkedInAt !== '') {
         $effectiveStatus = 'Patient Checked In';
-    } elseif ($presentAt !== '' || strpos($queueStatusKey, 'present') !== false ||
-              strpos($queueStatusKey, 'waiting') !== false || strpos($statusKey, 'present') !== false ||
-              strpos($statusKey, 'confirm') !== false) {
+    } elseif (strpos($statusKey, 'present') !== false || $presentAt !== '') {
         $effectiveStatus = 'Patient Present';
     } else {
         $effectiveStatus = 'Pending';
@@ -1250,11 +1259,47 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 .appointment-booking-card .form-control,.appointment-booking-card .form-select{min-height:34px;font-size:12px;padding:5px 8px;}
 .appointment-booking-card .btn{min-height:35px;font-size:12px;}
 .appointment-schedule-card .table-responsive{overflow:auto!important;max-height:none!important;min-height:0;flex:1 1 auto;}
+/* Consultation Appointments: show about four entries before inner scrolling. */
+.appointment-schedule-card{
+    min-height:460px!important;
+}
+.appointment-schedule-card .appointment-table-wrap{
+    flex:0 0 auto!important;
+    height:350px!important;
+    max-height:350px!important;
+    min-height:0!important;
+    overflow-y:auto!important;
+    overflow-x:auto!important;
+    scrollbar-gutter:stable;
+}
+.appointment-schedule-card .appointment-table-wrap thead th{
+    position:sticky;
+    top:0;
+    z-index:5;
+}
+@media(min-width:761px){
+    .appointment-desk-layout{
+        min-height:480px!important;
+        height:calc(100vh - 190px)!important;
+        max-height:none!important;
+        overflow:visible!important;
+    }
+}
+@media(max-width:760px){
+    .appointment-schedule-card{
+        min-height:460px!important;
+    }
+    .appointment-schedule-card .appointment-table-wrap{
+        height:350px!important;
+        max-height:350px!important;
+    }
+}
+
 .appointment-schedule-card table{min-width:600px;font-size:12px!important;}
 .appointment-schedule-card table th{white-space:nowrap;font-size:11px;text-transform:uppercase;background:#f1f5f9!important;padding:10px 8px!important;}
 .appointment-schedule-card table td{padding:10px 8px!important;border-color:#e2e8f0;}
 .appointment-schedule-card .appt-filter-date-wrap{max-width:145px;}
-.appointment-schedule-card .appointment-doctor-filter{min-width:155px;max-width:210px;font-size:12px;}
+.appointment-schedule-card .appointment-doctor-filter{min-width:155px;max-width:210px;font-size:12px;}\n.appointment-search-wrap{min-width:150px;flex:1 1 170px;max-width:230px!important;}\n.appointment-search-wrap .form-control{min-width:0;font-size:11px;}\n.appointment-search-wrap .input-group-text,.appointment-search-wrap .btn{padding:4px 7px;font-size:11px;}
 .appointment-context-row{transition:background-color .12s ease;}
 .queue-time-stamps{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px;font-size:9px;line-height:1.2;color:#475569;text-transform:uppercase}
 .queue-time-stamps span{white-space:nowrap;background:#f8fafc;border:1px solid #e2e8f0;border-radius:3px;padding:2px 4px}
@@ -1395,6 +1440,129 @@ body.opd-registration-open #pills-tab { display:none !important; }
   .appointment-booking-card .form-control,.appointment-booking-card .form-select { width:100%; min-width:0; }
 }
 
+
+/* FINAL: equal-width, side-by-side appointment fields */
+@media (min-width: 761px) {
+    .appointment-desk-layout > .appointment-booking-card {
+        min-width: 0;
+    }
+}
+.appointment-booking-card form > .row {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 9px 10px !important;
+    align-items: end !important;
+    margin: 0 !important;
+}
+.appointment-booking-card form > .row > [class*="col-"] {
+    grid-column: auto !important;
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    flex: initial !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+.appointment-booking-card .form-label {
+    display: block;
+    min-height: 13px;
+    margin-bottom: 4px !important;
+    line-height: 1.15;
+}
+.appointment-booking-card .form-control,
+.appointment-booking-card .form-select,
+.appointment-booking-card .appt-date-wrap {
+    width: 100%;
+    min-width: 0 !important;
+}
+.appointment-booking-card .age-entry-group {
+    width: 100%;
+    min-width: 0;
+}
+.appointment-booking-card .age-entry-group .form-control {
+    min-width: 0;
+}
+.appointment-booking-card .age-entry-group .form-select {
+    max-width: 76px !important;
+    min-width: 0 !important;
+}
+.appointment-booking-card form > .row > [class*="col-"] > .btn[type="submit"] {
+    width: 100%;
+    min-height: 34px !important;
+}
+@media (max-width: 760px) {
+    .appointment-booking-card form > .row {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    }
+}
+@media (max-width: 360px) {
+    .appointment-booking-card form > .row {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        gap: 7px !important;
+    }
+}
+
+
+/* Consultation appointments toolbar: clear, roomy search field and aligned filters */
+.appointment-schedule-card .appointment-toolbar{
+    display:flex!important; flex-direction:column!important; align-items:stretch!important;
+    gap:9px!important; padding:10px 12px!important; background:#fff!important;
+}
+.appointment-toolbar-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0}
+.appointment-toolbar-heading h6{font-size:12px!important;line-height:1.25}
+.appointment-toolbar-heading small{font-size:9px;white-space:nowrap}
+.appointment-toolbar-controls{
+    display:grid;grid-template-columns:minmax(180px,1fr) 145px 165px;
+    align-items:end;gap:8px;width:100%;min-width:0
+}
+.appointment-search-wrap{
+    position:relative!important;display:flex!important;align-items:center!important;
+    width:100%!important;max-width:none!important;min-width:0!important;height:36px;
+    border:1px solid #cbd5e1;border-radius:7px;background:#fff;
+    transition:border-color .15s,box-shadow .15s;
+}
+.appointment-search-wrap:focus-within{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+.appointment-search-wrap .appointment-search-icon{position:absolute;left:11px;color:#64748b;font-size:14px;pointer-events:none}
+.appointment-search-wrap .form-control{
+    width:100%;height:34px!important;min-width:0;border:0!important;box-shadow:none!important;
+    padding:6px 36px 6px 34px!important;font-size:11px!important;text-transform:none!important;
+    background:transparent!important;border-radius:7px!important;
+}
+.appointment-search-wrap .form-control::placeholder{color:#94a3b8;opacity:1}
+.appointment-search-wrap button{
+    position:absolute;right:5px;top:4px;width:26px;height:26px;display:grid;place-items:center;
+    border:0;border-radius:5px;background:#f1f5f9;color:#64748b;font-size:10px;
+}
+.appointment-search-wrap button:hover{background:#e2e8f0;color:#0f172a}
+.appointment-date-filter,.appointment-doctor-filter-wrap{display:flex;flex-direction:column;gap:3px;min-width:0;margin:0}
+.appointment-date-filter label,.appointment-doctor-filter-wrap label{
+    margin:0;font-size:9px;font-weight:700;letter-spacing:.04em;color:#64748b
+}
+.appointment-date-filter .appt-filter-date-wrap{width:100%;max-width:none}
+.appointment-date-filter .form-control,.appointment-doctor-filter-wrap .form-select{
+    height:36px!important;min-height:36px!important;font-size:11px!important;border-radius:6px!important;
+}
+.appointment-doctor-filter-wrap .appointment-doctor-filter{width:100%;min-width:0;max-width:none}
+@media(max-width:900px){
+ .appointment-toolbar-controls{grid-template-columns:minmax(160px,1fr) 135px; }
+ .appointment-doctor-filter-wrap{grid-column:1/-1}
+}
+@media(max-width:560px){
+ .appointment-toolbar-heading{align-items:flex-start;flex-direction:column;gap:3px}
+ .appointment-toolbar-heading small{white-space:normal}
+ .appointment-toolbar-controls{grid-template-columns:minmax(0,1fr) minmax(115px,135px);gap:7px}
+ .appointment-doctor-filter-wrap{grid-column:1/-1}
+}
+
+
+/* Clear active workflow state: the row tint and state pill always match the current milestone. */
+.queue-state-pill{display:inline-flex;align-items:center;margin-top:3px;padding:2px 7px;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.02em;line-height:1.35;border:1px solid transparent}
+.queue-state-pill.appt-row-present{background:#ede9fe!important;color:#6d28d9!important;border-color:#c4b5fd!important}
+.queue-state-pill.appt-row-checked-in{background:#dbeafe!important;color:#1d4ed8!important;border-color:#93c5fd!important}
+.queue-state-pill.appt-row-confirmed{background:#dcfce7!important;color:#166534!important;border-color:#86efac!important}
+.queue-state-pill.appt-row-cancelled{background:#fee2e2!important;color:#b91c1c!important;border-color:#fca5a5!important}
+.queue-state-pill.appt-row-pending{background:#fef3c7!important;color:#92400e!important;border-color:#fcd34d!important}
+.appointment-context-row.appt-row-present,.appointment-context-row.appt-row-present>*{background-color:#f3efff!important}
 </style>
 
 
@@ -1682,53 +1850,50 @@ body.opd-registration-open #pills-tab { display:none !important; }
 
         <div class="card border-0 shadow-sm rounded-3 appointment-schedule-card">
 
-            <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div class="card-header appointment-toolbar">
+                <div class="appointment-toolbar-heading">
+                    <h6 class="mb-0 fw-bold text-dark">
+                        <i class="bi bi-calendar2-week text-primary me-2"></i>Consultation Appointments
+                    </h6>
+                    <small class="text-muted">Right-click an appointment for billing and queue actions</small>
+                </div>
 
-                <h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-calendar2-week text-primary me-2"></i>Consultation Appointments <small class="text-muted fw-normal d-block mt-1">Right-click for appointment, billing and queue actions</small></h6>
-
-                <form method="GET" class="d-flex gap-2">
-
-                    <label class="small fw-semibold text-secondary align-self-center mb-0">DATE</label>
-
-                    <div class="appt-filter-date-wrap">
-
-                        <input type="hidden" name="date_filter" id="date_filter" value="<?= htmlspecialchars($date_filter) ?>">
-
-                        <input type="text" id="date_filter_display"
-
-                               class="form-control form-control-sm fw-bold text-primary"
-
-                               value="<?= htmlspecialchars(date('d-m-Y', strtotime($date_filter))) ?>"
-
-                               placeholder="DD-MM-YYYY" maxlength="10" autocomplete="off">
-
-                        <button type="button" class="btn btn-outline-secondary appt-filter-date-btn"
-
-                                id="date_filter_btn" title="SELECT DATE">
-
-                            <i class="bi bi-calendar3"></i>
-
-                        </button>
-
-                        <input type="date" id="date_filter_picker"
-
-                               class="appt-native-date"
-
-                               value="<?= htmlspecialchars($date_filter) ?>"
-
-                               aria-label="Select schedule date">
-
+                <div class="appointment-toolbar-controls">
+                    <div class="appointment-search-wrap">
+                        <i class="bi bi-search appointment-search-icon"></i>
+                        <input type="search" id="appointmentSearch" class="form-control"
+                               placeholder="Search patient name, mobile, UHID, token..."
+                               aria-label="Search consultation appointments" autocomplete="off">
+                        <button type="button" id="clearAppointmentSearch" title="Clear search"
+                                aria-label="Clear search"><i class="bi bi-x-lg"></i></button>
                     </div>
 
-                </form>
-                <select id="appointmentDoctorFilter" class="form-select form-select-sm appointment-doctor-filter" aria-label="Filter appointments by doctor">
-                    <?php $initialDoctorFilter = isset($_GET['doctor_filter']) ? (string)(int)$_GET['doctor_filter'] : '__ALL__'; ?>
-                    <option value="__ALL__" <?= $initialDoctorFilter === '__ALL__' ? 'selected' : '' ?>>ALL DOCTORS</option>
-                    <?php foreach ($doctors as $doc): ?>
-                        <option value="<?= (int)$doc['id'] ?>" <?= $initialDoctorFilter === (string)$doc['id'] ? 'selected' : '' ?>><?= htmlspecialchars($doc['full_name']) ?></option>
-                    <?php endforeach; ?>
-                </select>
+                    <form method="GET" class="appointment-date-filter">
+                        <label for="date_filter_display">DATE</label>
+                        <div class="appt-filter-date-wrap">
+                            <input type="hidden" name="date_filter" id="date_filter" value="<?= htmlspecialchars($date_filter) ?>">
+                            <input type="text" id="date_filter_display" class="form-control form-control-sm fw-bold text-primary"
+                                   value="<?= htmlspecialchars(date('d-m-Y', strtotime($date_filter))) ?>"
+                                   placeholder="DD-MM-YYYY" maxlength="10" autocomplete="off">
+                            <button type="button" class="btn btn-outline-secondary appt-filter-date-btn"
+                                    id="date_filter_btn" title="SELECT DATE"><i class="bi bi-calendar3"></i></button>
+                            <input type="date" id="date_filter_picker" class="appt-native-date"
+                                   value="<?= htmlspecialchars($date_filter) ?>" aria-label="Select schedule date">
+                        </div>
+                    </form>
 
+                    <div class="appointment-doctor-filter-wrap">
+                        <label for="appointmentDoctorFilter">DOCTOR</label>
+                        <select id="appointmentDoctorFilter" class="form-select form-select-sm appointment-doctor-filter"
+                                aria-label="Filter appointments by doctor">
+                            <?php $initialDoctorFilter = isset($_GET['doctor_filter']) ? (string)(int)$_GET['doctor_filter'] : '__ALL__'; ?>
+                            <option value="__ALL__" <?= $initialDoctorFilter === '__ALL__' ? 'selected' : '' ?>>ALL DOCTORS</option>
+                            <?php foreach ($doctors as $doc): ?>
+                                <option value="<?= (int)$doc['id'] ?>" <?= $initialDoctorFilter === (string)$doc['id'] ? 'selected' : '' ?>><?= htmlspecialchars($doc['full_name']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                </div>
             </div>
 
 
@@ -1770,8 +1935,44 @@ body.opd-registration-open #pills-tab { display:none !important; }
                             ?>
 
                                 <?php
-                                    $rowStatus = strtolower(trim((string)(($row['queue_tracking_status'] ?? '') ?: ($row['status'] ?? 'pending'))));
-                                    $rowClass = (strpos($rowStatus, 'cancel') !== false) ? 'appt-row-cancelled' : ((strpos($rowStatus, 'check') !== false || strpos($rowStatus, 'inside cabin') !== false) ? 'appt-row-checked-in' : ((strpos($rowStatus, 'present') !== false || strpos($rowStatus, 'confirm') !== false) ? 'appt-row-present' : ((strpos($rowStatus, 'complete') !== false || strpos($rowStatus, 'success') !== false) ? 'appt-row-confirmed' : 'appt-row-pending')));
+                                    // Derive the visible row state from the latest queue milestone.
+                                    // waiting_since remains populated after check-in, so IN/OUT must take priority.
+                                    $rowStatus = strtolower(trim((string)($row['queue_tracking_status'] ?? '')));
+                                    $apptStatus = strtolower(trim((string)($row['status'] ?? 'pending')));
+                                    $rowPresentAt = trim((string)($row['queue_present_time'] ?? ''));
+                                    $rowInAt = trim((string)($row['queue_in_time'] ?? ''));
+                                    $rowOutAt = trim((string)($row['queue_out_time'] ?? ''));
+
+                                    if (strpos($apptStatus, 'cancel') !== false) {
+                                        $rowClass = 'appt-row-cancelled';
+                                        $rowStateLabel = 'CANCELLED';
+                                    } elseif ($rowStatus !== '') {
+                                        if (strpos($rowStatus, 'complete') !== false) {
+                                            $rowClass = 'appt-row-confirmed';
+                                            $rowStateLabel = 'COMPLETED';
+                                        } elseif (strpos($rowStatus, 'inside cabin') !== false || strpos($rowStatus, 'checked') !== false) {
+                                            $rowClass = 'appt-row-checked-in';
+                                            $rowStateLabel = 'PATIENT CHECKED IN';
+                                        } elseif (strpos($rowStatus, 'waiting') !== false || strpos($rowStatus, 'present') !== false) {
+                                            $rowClass = 'appt-row-present';
+                                            $rowStateLabel = 'PATIENT PRESENT';
+                                        } else {
+                                            $rowClass = 'appt-row-pending';
+                                            $rowStateLabel = 'SCHEDULED / PENDING';
+                                        }
+                                    } elseif ($rowOutAt !== '' || strpos($apptStatus, 'complete') !== false) {
+                                        $rowClass = 'appt-row-confirmed';
+                                        $rowStateLabel = 'COMPLETED';
+                                    } elseif ($rowInAt !== '' || strpos($apptStatus, 'check') !== false) {
+                                        $rowClass = 'appt-row-checked-in';
+                                        $rowStateLabel = 'PATIENT CHECKED IN';
+                                    } elseif ($rowPresentAt !== '' || strpos($apptStatus, 'present') !== false) {
+                                        $rowClass = 'appt-row-present';
+                                        $rowStateLabel = 'PATIENT PRESENT';
+                                    } else {
+                                        $rowClass = 'appt-row-pending';
+                                        $rowStateLabel = 'SCHEDULED / PENDING';
+                                    }
                                 ?>
                                 <tr class="appointment-context-row <?= $rowClass ?>" tabindex="0"
                                     data-context-type="appointment"
@@ -1799,6 +2000,7 @@ body.opd-registration-open #pills-tab { display:none !important; }
                                     <td>
 
                                         <div class="fw-bold text-dark"><?= htmlspecialchars($row['patient_display_name'] ?? $row['patient_name']) ?></div>
+                                        <span class="queue-state-pill <?= htmlspecialchars($rowClass, ENT_QUOTES) ?>"><?= htmlspecialchars($rowStateLabel) ?></span>
                                         <?php if (!empty($row['patient_uhid'])): ?><small class="text-muted"><?= htmlspecialchars($row['patient_uhid']) ?></small><?php endif; ?>
                                         <?php if (!empty($row['queue_present_time']) || !empty($row['queue_in_time']) || !empty($row['queue_out_time'])): ?>
                                             <div class="queue-time-stamps">
@@ -2007,75 +2209,95 @@ function closeRegistrationWorkspace() {
     document.body.classList.remove('opd-registration-open');
 }
 
-// Appointment list doctor filter: show all appointments by default; after booking, focus the selected doctor.
+// Consultation appointment doctor filter + instant search.
 (function setupAppointmentDoctorFilter(){
     const select = document.getElementById('appointmentDoctorFilter');
+    const search = document.getElementById('appointmentSearch');
+    const clearSearch = document.getElementById('clearAppointmentSearch');
     const table = document.querySelector('.appointment-schedule-card table');
     if (!select || !table) return;
+
     const rows = Array.from(table.querySelectorAll('tbody tr[data-context-type="appointment"]'));
     const emptyRow = table.querySelector('tbody tr.appointment-empty-row');
+
     function applyFilter(){
-        const value = select.value || '__ALL__';
-        let shown = 0;
+        const doctorValue = select.value || '__ALL__';
+        const query = (search ? search.value : '').trim().toLowerCase();
+        let visibleCount = 0;
+        let doctorCount = 0;
         const counts = {pending:0, present:0, checked:0, cancelled:0, completed:0};
 
         rows.forEach(row => {
-            const match = value === '__ALL__' || row.dataset.doctorId === value;
-            row.style.display = match ? '' : 'none';
-            if (!match) return;
-            shown++;
+            const doctorMatch = doctorValue === '__ALL__' || row.dataset.doctorId === doctorValue;
+            if (doctorMatch) {
+                doctorCount++;
+                const queueStatus = (row.dataset.queueStatus || '').trim().toLowerCase();
+                const appointmentStatus = (row.dataset.appointmentStatus || '').trim().toLowerCase();
+                const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
+                const hasInTime = !!String(row.dataset.inTime || '').trim();
+                const hasOutTime = !!String(row.dataset.outTime || '').trim();
 
-            const queueStatus = (row.dataset.queueStatus || '').trim().toLowerCase();
-            const appointmentStatus = (row.dataset.appointmentStatus || '').trim().toLowerCase();
-            const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
-            const hasInTime = !!String(row.dataset.inTime || '').trim();
-            const hasOutTime = !!String(row.dataset.outTime || '').trim();
-
-            if (appointmentStatus.includes('cancel')) {
-                counts.cancelled++;
-                return;
+                // The CURRENT queue status wins over retained historical timestamps.
+                // For example, Patient Present changes status to Waiting but may retain
+                // an earlier in_time; that old timestamp must not count as Checked In.
+                if (appointmentStatus.includes('cancel')) {
+                    counts.cancelled++;
+                } else if (queueStatus) {
+                    // Current queue status wins over old appointment status and timestamps.
+                    if (queueStatus.includes('complete')) {
+                        counts.completed++;
+                    } else if (queueStatus.includes('inside cabin') || queueStatus.includes('checked')) {
+                        counts.checked++;
+                    } else if (queueStatus.includes('waiting') || queueStatus.includes('present')) {
+                        counts.present++;
+                    } else {
+                        counts.pending++;
+                    }
+                } else if (appointmentStatus.includes('complete') || appointmentStatus.includes('success') || hasOutTime) {
+                    counts.completed++;
+                } else if (appointmentStatus.includes('check') || hasInTime) {
+                    counts.checked++;
+                } else if (appointmentStatus.includes('present') || hasPresentTime) {
+                    counts.present++;
+                } else {
+                    // Pending and Confirmed appointments remain scheduled until arrival is marked.
+                    counts.pending++;
+                }
             }
 
-            // Count each recorded workflow milestone independently:
-            // PRESENT remains counted even after the patient is checked in/completed.
-            if (hasPresentTime || queueStatus.includes('waiting') || queueStatus.includes('present') ||
-                appointmentStatus.includes('present') || appointmentStatus.includes('confirm')) {
-                counts.present++;
-            }
-            if (hasInTime || queueStatus.includes('inside cabin') || queueStatus.includes('checked') ||
-                appointmentStatus.includes('check')) {
-                counts.checked++;
-            }
-            if (hasOutTime || queueStatus.includes('complete') || appointmentStatus.includes('complete') ||
-                appointmentStatus.includes('success')) {
-                counts.completed++;
-            }
-
-            const hasAnyProgress = hasPresentTime || hasInTime || hasOutTime ||
-                queueStatus.includes('waiting') || queueStatus.includes('present') ||
-                queueStatus.includes('inside cabin') || queueStatus.includes('checked') ||
-                queueStatus.includes('complete') || appointmentStatus.includes('present') ||
-                appointmentStatus.includes('confirm') || appointmentStatus.includes('check') ||
-                appointmentStatus.includes('complete') || appointmentStatus.includes('success');
-            if (!hasAnyProgress) counts.pending++;
+            const rowText = (row.innerText || row.textContent || '').toLowerCase();
+            const searchMatch = !query || rowText.includes(query);
+            const show = doctorMatch && searchMatch;
+            row.style.display = show ? '' : 'none';
+            if (show) visibleCount++;
         });
 
         if (emptyRow) {
-            emptyRow.style.display = shown ? 'none' : '';
+            emptyRow.style.display = visibleCount ? 'none' : '';
             const cell = emptyRow.querySelector('td');
-            if (cell) cell.textContent = value === '__ALL__' ? 'No appointments found for this date.' : 'No appointments found for this doctor and date.';
+            if (cell) cell.textContent = query
+                ? 'No matching appointments found.'
+                : (doctorValue === '__ALL__' ? 'No appointments found for this date.' : 'No appointments found for this doctor and date.');
         }
+
         const setCount = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
         setCount('sidePendingCount', counts.pending);
         setCount('sidePresentCount', counts.present);
         setCount('sideCheckedCount', counts.checked);
         setCount('sideCancelledCount', counts.cancelled);
         setCount('sideCompletedCount', counts.completed);
-        setCount('sideTotalAppointments', shown);
+        setCount('sideTotalAppointments', doctorCount);
     }
+
     select.addEventListener('change', applyFilter);
+    if (search) search.addEventListener('input', applyFilter);
+    if (clearSearch) clearSearch.addEventListener('click', function(){
+        if (search) { search.value = ''; search.focus(); }
+        applyFilter();
+    });
     applyFilter();
 })();
+
 
 // Doctor dropdown + search + live status counts.
 (function setupQueueFilters() {
@@ -2166,14 +2388,13 @@ function closeRegistrationWorkspace() {
                 const q = r.dataset.patientUhid || r.dataset.patientMobile || r.dataset.patientName || '';
                 location.href = 'opd_bills.php?search=' + encodeURIComponent(q);
             });
-            // Queue actions are also available directly from the Consultation Appointments row.
+            // Queue actions remain available directly from the Consultation Appointments row.
+            // Patient Present is intentionally omitted here because successful OPD payment
+            // already marks the patient as present automatically.
             const linkedTrackId = Number(row.dataset.trackId || 0);
             const linkedQueueStatus = String(row.dataset.queueStatus || '').trim();
             const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
             if (linkedTrackId > 0 && linkedQueueStatus !== 'Completed' && appointmentStatus !== 'completed') {
-                if (!hasPresentTime && linkedQueueStatus !== 'Inside Cabin') {
-                    addItem('Patient Present', 'bi-person-check', () => goQueue('waiting', linkedTrackId), true);
-                }
                 if (linkedQueueStatus !== 'Inside Cabin') {
                     addItem('Call In / In Consultation', 'bi-door-open', () => goQueue('in', linkedTrackId), !hasPresentTime);
                 }
