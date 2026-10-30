@@ -1,5 +1,7 @@
 <?php
 // admin/opd_registration.php
+// Keep all receipt timestamps in India Standard Time.
+date_default_timezone_set('Asia/Kolkata');
 $page_title = "OPD Payment";
 require_once __DIR__ . '/../config/tenant_db.php';
 require_once __DIR__ . '/../config/alerts.php'; 
@@ -99,6 +101,7 @@ try {
     $ensureColumn('opd_visits', 'service_id', 'INT NULL');
     $ensureColumn('opd_visits', 'category_id', 'INT NULL');
     $ensureColumn('opd_visits', 'insurance_id', 'INT NULL');
+    $ensureColumn('opd_visits', 'payment_date', 'DATE NULL');
     $ensureColumn('opd_visits', 'payment_mode', "VARCHAR(50) DEFAULT 'Cash'");
     $ensureColumn('opd_visits', 'amount_paid', 'DECIMAL(10,2) DEFAULT 0');
     $ensureColumn('opd_visits', 'change_return', 'DECIMAL(10,2) DEFAULT 0');
@@ -354,10 +357,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
         }
     }
 
-    $mobile_post = $_POST['mobile'] ?? [];
+    $mobile_post = $_POST['mobile'] ?? ($appointment_prefill['master_mobile'] ?? ($appointment_prefill['mobile'] ?? []));
     $mobile = is_array($mobile_post) ? implode(', ', array_filter(array_map('trim', $mobile_post), fn($v) => $v !== '')) : trim((string)$mobile_post);
     
     $visit_date    = !empty($_POST['visit_date']) ? $_POST['visit_date'] : date('Y-m-d');
+    $payment_date = trim((string)($_POST['payment_date'] ?? date('Y-m-d')));
+    $paymentDateObj = DateTime::createFromFormat('!Y-m-d', $payment_date);
+    if (!$paymentDateObj || $paymentDateObj->format('Y-m-d') !== $payment_date) {
+        $err = "Please select a valid Payment Date.";
+        $payment_date = date('Y-m-d');
+    }
 
     $age = calculateAgeFromDob($dob, $visit_date);
     if ($age === null) {
@@ -447,11 +456,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
 
                 $tenant_pdo->prepare("
                     UPDATE opd_visits 
-                    SET visit_date = ?, doctor_id = ?, department_id = ?, service_id = ?, category_id = ?, insurance_id = ?, 
+                    SET visit_date = ?, payment_date = ?, doctor_id = ?, department_id = ?, service_id = ?, category_id = ?, insurance_id = ?, 
                         consultation_fee = ?, discount_amount = ?, discount_percent = ?, remark = ?, payment_mode = ?, amount_paid = ?, change_return = ?, 
                         payment_breakdown = ?, payment_status = ? 
                     WHERE visit_id = ? AND org_id = ?
-                ")->execute([$visit_date, $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status, $post_edit_id, $org_id]);
+                ")->execute([$visit_date, $payment_date, $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status, $post_edit_id, $org_id]);
 
                 if ($appointment_id > 0) {
                     $tenant_pdo->prepare("
@@ -621,13 +630,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                 $v_stmt = $tenant_pdo->prepare("
                     INSERT INTO opd_visits (
                         org_id, center_id, patient_id, appointment_id, doctor_id, department_id, service_id,
-                        category_id, insurance_id, token_no, receipt_no, visit_date,
+                        category_id, insurance_id, token_no, receipt_no, visit_date, payment_date,
                         consultation_fee, discount_amount, discount_percent, remark,
                         payment_mode, amount_paid, change_return, payment_breakdown, payment_status, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Waiting')
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Waiting')
                 ");
 
-                $v_stmt->execute([$org_id, $center_id, $patient_id, ($appointment_id > 0 ? $appointment_id : null), $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $next_token, $next_receipt_no, $visit_date, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status]);
+                $v_stmt->execute([$org_id, $center_id, $patient_id, ($appointment_id > 0 ? $appointment_id : null), $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $next_token, $next_receipt_no, $visit_date, $payment_date, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status]);
 
                 if ($appointment_id > 0) {
                     $tenant_pdo->prepare("
@@ -666,7 +675,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     'paid'         => $total_paid,
                     'status'       => $pay_status,
                     'return'       => $change_ret,
-                    'date_time'    => date('d-m-Y h:i A'),
+                    'date_time'    => date('d-m-Y', strtotime($payment_date)) . ' ' . date('h:i A'),
+                    'payment_date' => $payment_date,
                     'remark'       => $remark
                 ];
             }
@@ -727,7 +737,7 @@ try {
 }
 
 if ($embedded_mode) {
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>OPD Payment</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"><style>body{margin:0!important;padding:12px!important;background:#fff!important;overflow-x:hidden!important}.main-content,main,.content-wrapper,.page-content{margin:0!important;padding:0!important;width:100%!important;max-width:100%!important}.sidebar,.sidebar-wrapper,.topbar,.navbar,.app-sidebar,.main-sidebar,.clinic-sidebar,.layout-sidebar,header.app-header{display:none!important}body>.container,body>.container-fluid{width:100%!important;max-width:100%!important;padding:0!important}</style></head><body class="opd-embedded-frame">';
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>OPD Payment</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css"><script src="https://cdn.jsdelivr.net/npm/flatpickr"></script><style>body{margin:0!important;padding:12px!important;background:#fff!important;overflow-x:hidden!important}.main-content,main,.content-wrapper,.page-content{margin:0!important;padding:0!important;width:100%!important;max-width:100%!important}.sidebar,.sidebar-wrapper,.topbar,.navbar,.app-sidebar,.main-sidebar,.clinic-sidebar,.layout-sidebar,header.app-header{display:none!important}body>.container,body>.container-fluid{width:100%!important;max-width:100%!important;padding:0!important}</style></head><body class="opd-embedded-frame">';
 } else {
     require_once __DIR__ . '/layout_header.php';
 }
@@ -859,7 +869,57 @@ input[type="number"], input[type="date"], input[inputmode="numeric"], .mob-input
 #paymentModal .modal-content{border:1px solid #cbd5e1!important;border-radius:10px!important;box-shadow:none!important}
 #paymentModal .modal-body{max-height:none!important;overflow:visible!important}
 #paymentModal .btn-close{display:none!important}
-body.opd-embedded-frame #paymentModal{margin-top:8px}
+/* Compact payment-date calendar: smaller footprint while keeping month/year navigation visible. */
+.flatpickr-calendar.payment-date-calendar-compact,
+.flatpickr-calendar.payment-date-calendar-compact.open {
+    width: 248px !important;
+    padding: 4px !important;
+    z-index: 999999 !important;
+    box-sizing: border-box !important;
+    font-size: 11px !important;
+}
+.flatpickr-calendar.payment-date-calendar-compact .flatpickr-months {
+    height: 30px !important;
+    display: flex !important;
+    align-items: center !important;
+}
+.flatpickr-calendar.payment-date-calendar-compact .flatpickr-months .flatpickr-month {
+    height: 30px !important;
+}
+.flatpickr-calendar.payment-date-calendar-compact .flatpickr-current-month {
+    padding-top: 5px !important;
+    font-size: 12px !important;
+    height: 30px !important;
+}
+.flatpickr-calendar.payment-date-calendar-compact .flatpickr-current-month input.cur-year,
+.flatpickr-calendar.payment-date-calendar-compact .flatpickr-current-month .flatpickr-monthDropdown-months {
+    font-size: 12px !important;
+}
+.flatpickr-calendar.payment-date-calendar-compact .flatpickr-weekdays,
+.flatpickr-calendar.payment-date-calendar-compact span.flatpickr-weekday {
+    height: 24px !important;
+    line-height: 24px !important;
+    font-size: 10px !important;
+}
+.flatpickr-calendar.payment-date-calendar-compact .flatpickr-days,
+.flatpickr-calendar.payment-date-calendar-compact .dayContainer {
+    width: 238px !important;
+    min-width: 238px !important;
+    max-width: 238px !important;
+}
+.flatpickr-calendar.payment-date-calendar-compact .flatpickr-day {
+    height: 30px !important;
+    line-height: 30px !important;
+    max-width: 34px !important;
+    flex-basis: 14.2857% !important;
+    font-size: 11px !important;
+}
+body.opd-embedded-registration .flatpickr-calendar.payment-date-calendar-compact {
+    position: absolute !important;
+}
+html:has(body.opd-embedded-frame), body.opd-embedded-frame{height:100% !important; overflow:hidden !important}
+body.opd-embedded-frame{margin:0 !important; padding:5px !important; overflow-x:hidden !important; overflow-y:hidden !important}
+body.opd-embedded-frame #paymentModal{margin-top:4px}
 </style>
 
 <?php if ($embedded_mode && $appointment_id > 0): ?>
@@ -946,6 +1006,10 @@ body.opd-embedded-registration #paymentModal .payment-method-card input[type=tex
 body.opd-embedded-registration #paymentModal .bg-primary.bg-opacity-10 { margin-bottom:5px !important; padding:5px 8px !important; }
 body.opd-embedded-registration #paymentModal .payment-totals-strip { margin-top:4px !important; margin-bottom:5px !important; }
 body.opd-embedded-registration .embedded-patient-summary { margin-bottom:4px !important; }
+body.opd-embedded-registration #paymentModal { width:100% !important; }
+body.opd-embedded-registration #paymentModal .modal-body { min-height:0 !important; }
+body.opd-embedded-registration #opdForm .form-control[aria-readonly="true"] { display:flex; align-items:center; min-height:27px !important; height:27px !important; }
+body.opd-embedded-frame { min-height:100% !important; }
 @media (max-width: 760px) { body.opd-embedded-registration #paymentModal .payment-methods-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 </style>
 <script>
@@ -1100,6 +1164,7 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                     <input type="hidden" name="modal_change_return" id="modal_change_return" value="<?= $edit_data['change_return'] ?? 0 ?>">
                     <input type="hidden" name="payment_breakdown_json" id="payment_breakdown_json" value="<?= htmlspecialchars($edit_data['payment_breakdown'] ?? '') ?>">
                     <input type="hidden" name="summary_payment_mode" id="summary_payment_mode" value="<?= htmlspecialchars($edit_data['payment_mode'] ?? 'CASH: ₹0') ?>">
+                    <input type="hidden" name="payment_date" id="payment_date" value="<?= htmlspecialchars($edit_data['payment_date'] ?? date('Y-m-d')) ?>">
 
                     <!-- PATIENT INFO -->
                     <!-- TOP ROW: ONLY VISIT DATE + MOBILE -->
@@ -1247,21 +1312,43 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                                             <i class="bi bi-arrow-clockwise"></i>
                                         </a>
                                     </label>
-                                    <select name="category_id" id="category_id" class="form-select form-select-sm" required onchange="filterInsurances()">
-                                        <option value="">-- Select --</option>
-                                        <?php foreach ($categories as $cat): ?>
-                                            <option value="<?= $cat['id'] ?>" <?= (((isset($edit_data['category_id']) && $edit_data['category_id'] == $cat['id']) || (!isset($edit_data['category_id']) && isset($appointment_prefill['category_id']) && $appointment_prefill['category_id'] == $cat['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($cat['category_name']) ?></option>
-                                        <?php endforeach; ?>
-                                    </select>
+                                    <?php if ($embedded_mode && $appointment_id > 0):
+                                        $selectedCategoryId = (int)($edit_data['category_id'] ?? $appointment_prefill['category_id'] ?? 0);
+                                        $selectedCategoryName = '—';
+                                        foreach ($categories as $categoryRow) {
+                                            if ((int)$categoryRow['id'] === $selectedCategoryId) { $selectedCategoryName = $categoryRow['category_name']; break; }
+                                        }
+                                    ?>
+                                        <div class="form-control form-control-sm bg-light fw-semibold" aria-readonly="true"><?= htmlspecialchars($selectedCategoryName) ?></div>
+                                        <input type="hidden" name="category_id" id="category_id" value="<?= $selectedCategoryId ?>">
+                                    <?php else: ?>
+                                        <select name="category_id" id="category_id" class="form-select form-select-sm" required onchange="filterInsurances()">
+                                            <option value="">-- Select --</option>
+                                            <?php foreach ($categories as $cat): ?>
+                                                <option value="<?= $cat['id'] ?>" <?= (((isset($edit_data['category_id']) && $edit_data['category_id'] == $cat['id']) || (!isset($edit_data['category_id']) && isset($appointment_prefill['category_id']) && $appointment_prefill['category_id'] == $cat['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($cat['category_name']) ?></option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    <?php endif; ?>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small fw-semibold text-primary">Insurance / Provider</label>
-                                    <select name="insurance_id" id="insurance_id" class="form-select form-select-sm" onchange="calculateTariff()">
-                                        <option value="">-- Base Category (No specific insurance) --</option>
-                                        <?php foreach ($insurances as $ins): ?>
-                                            <option value="<?= $ins['id'] ?>" data-cat="<?= $ins['category_id'] ?>" <?= (((isset($edit_data['insurance_id']) && $edit_data['insurance_id'] == $ins['id']) || (!isset($edit_data['insurance_id']) && isset($appointment_prefill['insurance_id']) && $appointment_prefill['insurance_id'] == $ins['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($ins['insurance_name']) ?></option>
-                                        <?php endforeach; ?>
-                                    </select>
+                                    <?php if ($embedded_mode && $appointment_id > 0):
+                                        $selectedInsuranceId = (int)($edit_data['insurance_id'] ?? $appointment_prefill['insurance_id'] ?? 0);
+                                        $selectedInsuranceName = 'GENERAL';
+                                        foreach ($insurances as $insuranceRow) {
+                                            if ((int)$insuranceRow['id'] === $selectedInsuranceId) { $selectedInsuranceName = $insuranceRow['insurance_name']; break; }
+                                        }
+                                    ?>
+                                        <div class="form-control form-control-sm bg-light fw-semibold" aria-readonly="true"><?= htmlspecialchars($selectedInsuranceName) ?></div>
+                                        <input type="hidden" name="insurance_id" id="insurance_id" value="<?= $selectedInsuranceId > 0 ? $selectedInsuranceId : '' ?>">
+                                    <?php else: ?>
+                                        <select name="insurance_id" id="insurance_id" class="form-select form-select-sm" onchange="calculateTariff()">
+                                            <option value="">-- Base Category (No specific insurance) --</option>
+                                            <?php foreach ($insurances as $ins): ?>
+                                                <option value="<?= $ins['id'] ?>" data-cat="<?= $ins['category_id'] ?>" <?= (((isset($edit_data['insurance_id']) && $edit_data['insurance_id'] == $ins['id']) || (!isset($edit_data['insurance_id']) && isset($appointment_prefill['insurance_id']) && $appointment_prefill['insurance_id'] == $ins['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($ins['insurance_name']) ?></option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    <?php endif; ?>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small fw-semibold text-secondary">Remarks (Optional)</label>
@@ -1389,7 +1476,7 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                                             <?= htmlspecialchars(json_encode((string)($tv['token_no'] ?? 0)), ENT_QUOTES, 'UTF-8') ?>,
                                             <?= htmlspecialchars(json_encode($list_fy_formatted . '/' . str_pad((int)($tv['receipt_no'] ?? 0), 2, '0', STR_PAD_LEFT)), ENT_QUOTES, 'UTF-8') ?>,
                                             <?= htmlspecialchars(json_encode($tv['remark'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
-                                            <?= htmlspecialchars(json_encode(!empty($tv['created_at']) ? date('d-m-Y h:i A', strtotime($tv['created_at'])) : date('d-m-Y h:i A', strtotime($tv['visit_date'] ?? 'now'))), ENT_QUOTES, 'UTF-8') ?>,
+                                            <?= htmlspecialchars(json_encode((!empty($tv['payment_date']) ? date('d-m-Y', strtotime($tv['payment_date'])) : date('d-m-Y', strtotime($tv['visit_date'] ?? 'now'))) . ' ' . (!empty($tv['created_at']) ? date('h:i A', strtotime($tv['created_at'])) : date('h:i A'))), ENT_QUOTES, 'UTF-8') ?>,
                                             <?= htmlspecialchars(json_encode($tv['payment_breakdown'] ?? ''), ENT_QUOTES, 'UTF-8') ?>,
                                             <?= htmlspecialchars(json_encode($tv['amount_paid'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
                                             <?= htmlspecialchars(json_encode($tv['change_return'] ?? 0), ENT_QUOTES, 'UTF-8') ?>,
@@ -1420,9 +1507,14 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body p-3">
-                <div class="d-flex align-items-center justify-content-between mb-2">
-                    <span class="fw-semibold text-secondary small">Tariff Amount:</span>
-                    <strong class="text-dark" id="modalTariffAmount">₹0.00</strong>
+                <div class="row g-2 align-items-end mb-2">
+                    <div class="col-6">
+                        <label for="payment_date_picker" class="form-label small fw-semibold text-secondary mb-1">Payment Date</label>
+                        <input type="text" class="form-control form-control-sm" id="payment_date_picker" value="<?= htmlspecialchars(date('d-m-Y', strtotime($edit_data['payment_date'] ?? date('Y-m-d')))) ?>" placeholder="DD-MM-YYYY" autocomplete="off" required>
+                    </div>
+                    <div class="col-6 d-flex align-items-center justify-content-end pb-1">
+                        <div class="text-end"><span class="fw-semibold text-secondary small d-block">Tariff Amount:</span><strong class="text-dark" id="modalTariffAmount">₹0.00</strong></div>
+                    </div>
                 </div>
                 <?php if ($edit_data): ?>
                 <?php
@@ -2348,6 +2440,56 @@ try {
 <?php endif; ?>
 
 document.addEventListener('DOMContentLoaded', function() {
+    const isAppointmentEmbedded = <?= ($embedded_mode && $appointment_id > 0) ? 'true' : 'false' ?>;
+    if (isAppointmentEmbedded) {
+        const form = document.getElementById('opdForm');
+        const paymentPanel = document.getElementById('paymentModal');
+        // Keep the original appointment-linked layout:
+        // patient summary -> Service/Category/Insurance/Billing Type -> Payment Details.
+        // Do not move the payment panel above the billing fields.
+        const billingFieldsRow = form ? form.querySelector('.row.g-3.mb-3') : null;
+        if (form && paymentPanel) {
+            if (billingFieldsRow) {
+                billingFieldsRow.insertAdjacentElement('afterend', paymentPanel);
+            } else {
+                form.appendChild(paymentPanel);
+            }
+            paymentPanel.classList.add('payment-panel-after-billing-fields');
+        }
+    }
+
+    // Use the same Flatpickr calendar configuration as layout_footer.php.
+    const paymentDateInput = document.getElementById('payment_date_picker');
+    const paymentDateHidden = document.getElementById('payment_date');
+    if (paymentDateInput && paymentDateHidden && typeof flatpickr !== 'undefined' && !paymentDateInput._flatpickr) {
+        const isNewAppointmentPayment = isAppointmentEmbedded && Number(document.querySelector('input[name="post_edit_id"]')?.value || 0) === 0;
+        const browserToday = new Date();
+        const browserTodayIso = [
+            browserToday.getFullYear(),
+            String(browserToday.getMonth() + 1).padStart(2, '0'),
+            String(browserToday.getDate()).padStart(2, '0')
+        ].join('-');
+        if (isNewAppointmentPayment) paymentDateHidden.value = browserTodayIso;
+
+        flatpickr(paymentDateInput, {
+            altInput: false,
+            dateFormat: 'd-m-Y',
+            defaultDate: isNewAppointmentPayment ? browserToday : (paymentDateHidden.value || new Date()),
+            disableMobile: true,
+            allowInput: false,
+            // The appointment payment form is displayed in a short iframe.
+            // Open the calendar upward so its full month grid stays inside the frame.
+            position: 'above',
+            onReady: function(selectedDates, dateStr, instance) {
+                instance.calendarContainer.classList.add('payment-date-calendar-compact');
+                if (selectedDates[0]) paymentDateHidden.value = instance.formatDate(selectedDates[0], 'Y-m-d');
+            },
+            onChange: function(selectedDates, dateStr, instance) {
+                paymentDateHidden.value = selectedDates[0] ? instance.formatDate(selectedDates[0], 'Y-m-d') : '';
+            }
+        });
+    }
+
     const opdForm = document.getElementById('opdForm');
     if (opdForm) {
         opdForm.addEventListener('submit', function(e) {
@@ -2404,7 +2546,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     const cat = document.getElementById('category_id');
-    if (cat && cat.value) filterInsurances();
+    if (cat && cat.value && !<?= ($embedded_mode && $appointment_id > 0) ? 'true' : 'false' ?>) filterInsurances();
 });
 
 function syncDiscountHiddenFields() {
@@ -2551,6 +2693,14 @@ function calculateModalTotals(fromDiscountChange) {
 }
 
 function saveEmbeddedOpdPayment() {
+    const paymentDatePicker = document.getElementById('payment_date_picker');
+    const paymentDateHidden = document.getElementById('payment_date');
+    if (paymentDatePicker && paymentDateHidden) {
+        const dateParts = paymentDatePicker.value.trim().split('-');
+        if (dateParts.length === 3 && dateParts[0].length === 2 && dateParts[1].length === 2 && dateParts[2].length === 4) {
+            paymentDateHidden.value = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
+        }
+    }
     // Apply the selected payment modes to hidden fields, then submit the one OPD form.
     applyModalPayment();
     const form = document.getElementById('opdForm');
