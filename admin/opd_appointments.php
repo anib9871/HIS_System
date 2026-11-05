@@ -166,54 +166,96 @@ try {
 
 // ==============================================================
 
-// 1. QUEUE TRACKING ACTIONS (Patient Present -> Call In -> Consultation Complete)
-if (isset($_GET['q_action']) && isset($_GET['track_id'])) {
+// 1. QUEUE TRACKING ACTIONS. If the appointment has no OPD visit yet,
+// create exactly one visit linked to that appointment before queue actions.
+if (isset($_GET['q_action']) && (isset($_GET['track_id']) || isset($_GET['appointment_id']))) {
     $action = (string)$_GET['q_action'];
-    $track_id = (int)$_GET['track_id'];
+    $track_id = (int)($_GET['track_id'] ?? 0);
+    $appointment_id = (int)($_GET['appointment_id'] ?? 0);
 
     try {
-        if ($action === 'waiting') {
-            $q = $tenant_pdo->prepare("UPDATE opd_queue_tracking
-                SET waiting_since = COALESCE(waiting_since, NOW()), status = 'Waiting'
-                WHERE track_id = ? AND org_id = ? AND center_id = ?
-                  AND out_time IS NULL AND status <> 'Completed'");
-            $q->execute([$track_id, $org_id, $center_id]);
-            if (function_exists('set_flash_msg')) set_flash_msg($q->rowCount() ? "PATIENT PRESENT TIME CAPTURED!" : "PATIENT IS ALREADY COMPLETED OR PRESENT.");
+        $tenant_pdo->beginTransaction();
 
-        } elseif ($action === 'in') {
-            $q = $tenant_pdo->prepare("UPDATE opd_queue_tracking
-                SET waiting_since = COALESCE(waiting_since, NOW()),
-                    status = 'Inside Cabin', in_time = COALESCE(in_time, NOW())
-                WHERE track_id = ? AND org_id = ? AND center_id = ?
-                  AND out_time IS NULL AND status <> 'Completed'");
-            $q->execute([$track_id, $org_id, $center_id]);
-            if (function_exists('set_flash_msg')) set_flash_msg($q->rowCount() ? "PATIENT CALLED IN — TIME CAPTURED!" : "PATIENT IS ALREADY COMPLETED.");
+        if ($track_id <= 0) {
+            if ($appointment_id <= 0) throw new Exception('Invalid appointment selected.');
+            $a = $tenant_pdo->prepare("SELECT * FROM opd_appointments WHERE appointment_id=? AND org_id=? AND center_id=? LIMIT 1 FOR UPDATE");
+            $a->execute([$appointment_id, $org_id, $center_id]);
+            $appt = $a->fetch(PDO::FETCH_ASSOC);
+            if (!$appt) throw new Exception('Appointment not found.');
+            if (strtolower((string)$appt['status']) === 'cancelled') throw new Exception('Cancelled appointment cannot enter the OPD queue.');
 
-        } elseif ($action === 'out') {
-            $q = $tenant_pdo->prepare("UPDATE opd_queue_tracking
-                SET status = 'Completed', out_time = COALESCE(out_time, NOW())
-                WHERE track_id = ? AND org_id = ? AND center_id = ?
-                  AND status = 'Inside Cabin' AND out_time IS NULL");
-            $q->execute([$track_id, $org_id, $center_id]);
-            if ($q->rowCount()) {
-                $sync = $tenant_pdo->prepare("UPDATE opd_appointments a
-                    JOIN opd_visits v ON v.appointment_id = a.appointment_id
-                    JOIN opd_queue_tracking qt ON qt.visit_id = v.visit_id
-                    SET a.status = 'Completed'
-                    WHERE qt.track_id = ? AND a.org_id = ? AND a.center_id = ?
-                      AND v.org_id = ? AND v.center_id = ?");
-                $sync->execute([$track_id, $org_id, $center_id, $org_id, $center_id]);
-                if (function_exists('set_flash_msg')) set_flash_msg("CONSULTATION COMPLETED — CHECK-OUT TIME CAPTURED!");
-            } else {
-                if (function_exists('set_flash_msg')) set_flash_msg("CALL THE PATIENT IN BEFORE CHECK-OUT.");
+            $v = $tenant_pdo->prepare("SELECT visit_id FROM opd_visits WHERE org_id=? AND center_id=? AND appointment_id=? ORDER BY visit_id DESC LIMIT 1 FOR UPDATE");
+            $v->execute([$org_id, $center_id, $appointment_id]);
+            $visit_id = (int)$v->fetchColumn();
+
+            if ($visit_id <= 0) {
+                $patient = $tenant_pdo->prepare("SELECT patient_id FROM patient_master WHERE org_id=? AND center_id=? AND uhid=? LIMIT 1");
+                $patient->execute([$org_id, $center_id, (string)$appt['uhid']]);
+                $patient_id = (int)$patient->fetchColumn();
+                if ($patient_id <= 0) throw new Exception('Patient master record not found for this appointment.');
+
+                $visitValues = [
+                    'org_id'=>$org_id, 'center_id'=>$center_id, 'patient_id'=>$patient_id,
+                    'appointment_id'=>$appointment_id, 'doctor_id'=>(int)$appt['doctor_id'],
+                    'department_id'=>(int)($appt['department_id'] ?? 0),
+                    'visit_date'=>(string)$appt['appointment_date'], 'token_no'=>(int)($appt['token_no'] ?? 0),
+                    'category_id'=>(int)($appt['category_id'] ?? 0), 'insurance_id'=>(int)($appt['insurance_id'] ?? 0),
+                    'created_by'=>$created_by, 'payment_status'=>3, 'consultation_fee'=>0,
+                    'discount_amount'=>0, 'discount_percent'=>0, 'remark'=>(string)($appt['remark'] ?? '')
+                ];
+                // Read the actual tenant schema and populate mandatory columns safely.
+                $meta = $tenant_pdo->query("SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='opd_visits'")->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($meta as $col) {
+                    $name = $col['COLUMN_NAME'];
+                    if (isset($visitValues[$name]) || stripos((string)$col['EXTRA'], 'auto_increment') !== false || $col['COLUMN_DEFAULT'] !== null || $col['IS_NULLABLE'] === 'YES') continue;
+                    if (in_array($col['DATA_TYPE'], ['int','bigint','smallint','tinyint','decimal','float','double'], true)) $visitValues[$name] = 0;
+                    elseif (in_array($col['DATA_TYPE'], ['date'], true)) $visitValues[$name] = (string)$appt['appointment_date'];
+                    elseif (in_array($col['DATA_TYPE'], ['datetime','timestamp'], true)) $visitValues[$name] = date('Y-m-d H:i:s');
+                    else $visitValues[$name] = '';
+                }
+                $allowed = array_column($meta, 'COLUMN_NAME');
+                $visitValues = array_intersect_key($visitValues, array_flip($allowed));
+                $columns = array_keys($visitValues);
+                $sql = 'INSERT INTO opd_visits (`'.implode('`,`', $columns).'`) VALUES ('.implode(',', array_fill(0, count($columns), '?')).')';
+                $ins = $tenant_pdo->prepare($sql);
+                $ins->execute(array_values($visitValues));
+                $visit_id = (int)$tenant_pdo->lastInsertId();
             }
+
+            $queue = $tenant_pdo->prepare("INSERT IGNORE INTO opd_queue_tracking (org_id, center_id, visit_id, status, waiting_since, in_time, out_time) VALUES (?, ?, ?, 'Scheduled', NULL, NULL, NULL)");
+            $queue->execute([$org_id, $center_id, $visit_id]);
+            $findTrack = $tenant_pdo->prepare("SELECT track_id FROM opd_queue_tracking WHERE org_id=? AND center_id=? AND visit_id=? LIMIT 1");
+            $findTrack->execute([$org_id, $center_id, $visit_id]);
+            $track_id = (int)$findTrack->fetchColumn();
+            if ($track_id <= 0) throw new Exception('Could not create or locate the OPD queue record.');
         }
 
+        if ($action === 'waiting') {
+            $q = $tenant_pdo->prepare("UPDATE opd_queue_tracking SET waiting_since=COALESCE(waiting_since,NOW()), status='Waiting' WHERE track_id=? AND org_id=? AND center_id=? AND out_time IS NULL AND status<>'Completed'");
+            $q->execute([$track_id, $org_id, $center_id]);
+            if (function_exists('set_flash_msg')) set_flash_msg($q->rowCount() ? 'PATIENT PRESENT TIME CAPTURED!' : 'PATIENT IS ALREADY COMPLETED OR PRESENT.');
+        } elseif ($action === 'in') {
+            $q = $tenant_pdo->prepare("UPDATE opd_queue_tracking SET waiting_since=COALESCE(waiting_since,NOW()), status='Inside Cabin', in_time=COALESCE(in_time,NOW()) WHERE track_id=? AND org_id=? AND center_id=? AND out_time IS NULL AND status<>'Completed'");
+            $q->execute([$track_id, $org_id, $center_id]);
+            if (function_exists('set_flash_msg')) set_flash_msg($q->rowCount() ? 'PATIENT CALLED IN — TIME CAPTURED!' : 'PATIENT IS ALREADY COMPLETED.');
+        } elseif ($action === 'out') {
+            $q = $tenant_pdo->prepare("UPDATE opd_queue_tracking SET status='Completed', out_time=COALESCE(out_time,NOW()) WHERE track_id=? AND org_id=? AND center_id=? AND out_time IS NULL AND status<>'Completed'");
+            $q->execute([$track_id, $org_id, $center_id]);
+            if ($q->rowCount()) {
+                $sync = $tenant_pdo->prepare("UPDATE opd_appointments a JOIN opd_visits v ON v.appointment_id=a.appointment_id JOIN opd_queue_tracking qt ON qt.visit_id=v.visit_id SET a.status='Completed' WHERE qt.track_id=? AND a.org_id=? AND a.center_id=? AND v.org_id=? AND v.center_id=?");
+                $sync->execute([$track_id, $org_id, $center_id, $org_id, $center_id]);
+                if (function_exists('set_flash_msg')) set_flash_msg('CONSULTATION COMPLETED — CHECK-OUT TIME CAPTURED!');
+            } else if (function_exists('set_flash_msg')) set_flash_msg('CALL THE PATIENT IN BEFORE CHECK-OUT.');
+        }
+        $tenant_pdo->commit();
         $returnDate = (string)($_GET['date_filter'] ?? $today_date);
         $returnDoctor = (int)($_GET['doctor_filter'] ?? 0);
-        header("Location: opd_appointments.php?date_filter=" . urlencode($returnDate) . ($returnDoctor > 0 ? "&doctor_filter=" . $returnDoctor : "") . "#nav-appt");
+        header('Location: opd_appointments.php?date_filter='.urlencode($returnDate).($returnDoctor>0?'&doctor_filter='.$returnDoctor:'').'#nav-appt');
         exit;
-    } catch (Exception $e) { $err = $e->getMessage(); }
+    } catch (Exception $e) {
+        if ($tenant_pdo->inTransaction()) $tenant_pdo->rollBack();
+        $err = $e->getMessage();
+    }
 }
 
 // EDIT APPOINTMENT LOAD
@@ -1332,6 +1374,8 @@ input[type="number"], input[type="date"], input[type="time"], input[inputmode="n
 .appointment-summary-line{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px dotted #cbd5e1;font-size:10px;}
 .appointment-summary-line strong{color:#0f172a;}
 .appointment-summary-line:last-child{border-bottom:0;}
+.appointment-active-doctor-line strong{max-width:62%;text-align:right;white-space:normal;overflow-wrap:anywhere;color:#0759b8!important;}
+
 .appointment-summary-section{margin-top:12px;}
 @media(max-width:1100px){.appointment-desk-layout{grid-template-columns:245px minmax(0,1fr);height:calc(100vh - 225px);min-height:420px;}.appointment-side-summary{grid-column:1 / -1;grid-row:2;max-height:180px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;}}
 @media(max-width:760px){.appointment-desk-layout{grid-template-columns:minmax(0,1fr);height:auto;max-height:none;min-height:0;overflow:visible;}.appointment-desk-layout>.appointment-booking-card{height:390px;}.appointment-desk-layout>.appointment-schedule-card{height:55vh;min-height:320px;}.appointment-side-summary{grid-column:1;grid-row:auto;max-height:none;display:block;}.appointment-booking-card .card-body{overflow-y:auto;}.appointment-schedule-card .table-responsive{max-height:none!important;}}
@@ -1523,8 +1567,8 @@ body.opd-registration-open #pills-tab { display:none !important; }
 .appointment-toolbar-heading h6{font-size:12px!important;line-height:1.25}
 .appointment-toolbar-heading small{font-size:9px;white-space:nowrap}
 .appointment-toolbar-controls{
-    display:grid;grid-template-columns:minmax(180px,1fr) 145px 165px;
-    align-items:end;gap:8px;width:100%;min-width:0
+    display:grid;grid-template-columns:minmax(0,1fr) 112px 132px;
+    align-items:end;gap:7px;width:100%;max-width:100%;min-width:0;box-sizing:border-box
 }
 .appointment-search-wrap{
     position:relative!important;display:flex!important;align-items:center!important;
@@ -1555,7 +1599,7 @@ body.opd-registration-open #pills-tab { display:none !important; }
 }
 .appointment-doctor-filter-wrap .appointment-doctor-filter{width:100%;min-width:0;max-width:none}
 @media(max-width:900px){
- .appointment-toolbar-controls{grid-template-columns:minmax(160px,1fr) 135px; }
+ .appointment-toolbar-controls{grid-template-columns:minmax(0,1fr) 112px; }
  .appointment-doctor-filter-wrap{grid-column:1/-1}
 }
 @media(max-width:560px){
@@ -1807,7 +1851,7 @@ body.opd-registration-open #pills-tab { display:none !important; }
                         </div>
 
                         <div class="col-md-3">
-                            <label class="form-label small fw-semibold text-secondary mb-1">Patient Category / Billing Type</label>
+                            <label class="form-label small fw-semibold text-secondary mb-1">Category</label>
                             <select name="category_id" id="appointment_category_id" class="form-select form-select-sm" onchange="filterAppointmentInsurances()">
                                 <option value="">-- Select Category --</option>
                                 <?php foreach ($categories as $cat): ?>
@@ -1816,7 +1860,7 @@ body.opd-registration-open #pills-tab { display:none !important; }
                             </select>
                         </div>
                         <div class="col-md-3">
-                            <label class="form-label small fw-semibold text-secondary mb-1">Insurance / Provider</label>
+                            <label class="form-label small fw-semibold text-secondary mb-1">Insurance</label>
                             <select name="insurance_id" id="appointment_insurance_id" class="form-select form-select-sm">
                                 <option value="">-- Base Category / No Insurance --</option>
                                 <?php foreach ($insurances as $ins): ?>
@@ -2048,6 +2092,7 @@ body.opd-registration-open #pills-tab { display:none !important; }
         <aside class="appointment-side-summary" aria-label="Appointment status summary">
             <section class="appointment-summary-section" style="margin-top:0">
                 <h6>Today's Status</h6>
+                <div class="appointment-summary-line appointment-active-doctor-line"><span>Doctor</span><strong id="sideActiveDoctorName">All Doctors</strong></div>
                 <div class="appointment-summary-line"><span>Scheduled / Pending</span><strong id="sidePendingCount"><?= (int)$apptStatusCounts['Pending'] ?></strong></div>
                 
                 <div class="appointment-summary-line"><span>Patient Present</span><strong id="sidePresentCount"><?= (int)$apptStatusCounts['Patient Present'] ?></strong></div>
@@ -2234,6 +2279,8 @@ function closeRegistrationWorkspace() {
         if (!heading) return;
         const option = select.options[select.selectedIndex];
         const doctorName = option && option.value !== '__ALL__' ? option.textContent.trim() : '';
+        const activeDoctorLabel = document.getElementById('sideActiveDoctorName');
+        if (activeDoctorLabel) activeDoctorLabel.textContent = doctorName || 'All Doctors';
         heading.innerHTML = '<i class="bi bi-calendar2-week text-primary me-2"></i>' +
             (doctorName ? 'OPD Appointment for ' + doctorName : 'OPD Appointments');
     }
@@ -2397,35 +2444,27 @@ function closeRegistrationWorkspace() {
                     location.href = '?date_filter=' + encodeURIComponent(r.dataset.appointmentDate) + '&edit_appointment=' + encodeURIComponent(r.dataset.appointmentId);
                 });
             }
-            // Payment is available only before consultation is completed.
-            // A completed queue visit must not offer another registration/payment entry.
-            const queueStatus = String(row.dataset.queueStatus || '').trim().toLowerCase();
-            const appointmentStatus = String(status || '').trim().toLowerCase();
-            const consultationCompleted =
-                queueStatus === 'completed' ||
-                appointmentStatus === 'completed' ||
-                appointmentStatus === 'complete';
-            const paymentStatus = String(row.dataset.paymentStatus || '').trim();
-            const alreadyPaid = paymentStatus === '1' || paymentStatus.toLowerCase() === 'paid';
+            // Hide OPD Payment only after full payment is confirmed.
+            // Partial (2), pending (3), blank, or unknown statuses remain payable.
+            // Consultation completion must NOT hide payment: unpaid patients can pay later.
+            const paymentStatus = String(row.dataset.paymentStatus || '').trim().toLowerCase();
+            const alreadyPaid = paymentStatus === '1' || paymentStatus === 'paid';
 
-            if (status.toLowerCase() !== 'cancelled' && !consultationCompleted && !alreadyPaid) {
+            if (status.toLowerCase() !== 'cancelled' && !alreadyPaid) {
                 addItem('OPD Payment', 'bi-wallet2', r => {
                     openRegistrationPanel(r.dataset.appointmentId);
                 }, true);
             }
-            // Patient arrival is a manual action. OPD payment alone must not mark
-            // the appointment as present or start the waiting timer.
+            // Queue actions remain visible even before an OPD visit exists.
+            // The server creates/reuses the appointment-linked visit and queue row.
             const linkedTrackId = Number(row.dataset.trackId || 0);
-            const linkedQueueStatus = String(row.dataset.queueStatus || '').trim();
-            const hasPresentTime = !!String(row.dataset.presentTime || '').trim();
-            if (linkedTrackId > 0 && linkedQueueStatus !== 'Completed' && appointmentStatus !== 'completed') {
-                if (linkedQueueStatus === 'Scheduled' || linkedQueueStatus === 'Pending' || linkedQueueStatus === '') {
-                    addItem('Patient Present', 'bi-person-check', () => goQueue('waiting', linkedTrackId), true);
-                } else if (linkedQueueStatus === 'Waiting') {
-                    addItem('Call In / In Consultation', 'bi-door-open', () => goQueue('in', linkedTrackId), !hasPresentTime);
-                } else if (linkedQueueStatus === 'Inside Cabin') {
-                    addItem('Consultation Complete', 'bi-check-circle', () => confirmQueue('out', linkedTrackId), true);
-                }
+            const linkedQueueStatus = String(row.dataset.queueStatus || '').trim().toLowerCase();
+            const isCompleted = linkedQueueStatus === 'completed' || status.toLowerCase() === 'completed';
+            if (status.toLowerCase() !== 'cancelled' && !isCompleted) {
+                const queueAction = (action) => goQueue(action, linkedTrackId, id, date);
+                addItem('Patient Present', 'bi-person-check', () => queueAction('waiting'), true);
+                addItem('Call In / In Consultation', 'bi-door-open', () => queueAction('in'));
+                addItem('Consultation Complete', 'bi-check-circle', () => confirmQueue('out', linkedTrackId, id, date));
             }
             if (status === 'Pending' || status === 'Confirmed') {
                 addItem('Cancel Appointment', 'bi-x-circle', r => {
@@ -2470,23 +2509,25 @@ function closeRegistrationWorkspace() {
     }
 
     function hideMenu() { menu.classList.remove('show'); activeRow = null; }
-    function goQueue(action, trackId) {
+    function goQueue(action, trackId, appointmentId, appointmentDate) {
         const doctorFilter = document.getElementById('appointmentDoctorFilter');
         const dateFilter = document.getElementById('date_filter');
-        const selectedDate = dateFilter ? dateFilter.value : (new URLSearchParams(location.search).get('date_filter') || '');
+        const selectedDate = appointmentDate || (dateFilter ? dateFilter.value : (new URLSearchParams(location.search).get('date_filter') || ''));
         const selectedDoctor = doctorFilter && doctorFilter.value && doctorFilter.value !== '__ALL__'
-            ? doctorFilter.value
-            : (new URLSearchParams(location.search).get('doctor_filter') || '');
-        const params = new URLSearchParams({q_action: action, track_id: String(trackId)});
+            ? doctorFilter.value : (new URLSearchParams(location.search).get('doctor_filter') || '');
+        const params = new URLSearchParams({q_action: action});
+        if (trackId > 0) params.set('track_id', String(trackId));
+        else params.set('appointment_id', String(appointmentId || 0));
         if (selectedDate) params.set('date_filter', selectedDate);
         if (selectedDoctor) params.set('doctor_filter', selectedDoctor);
         location.href = '?' + params.toString() + '#nav-appt';
     }
-    function confirmQueue(action, trackId) {
+    function confirmQueue(action, trackId, appointmentId, appointmentDate) {
         if (action !== 'out') return;
+        const proceed = () => goQueue(action, trackId, appointmentId, appointmentDate);
         if (window.Swal) {
-            Swal.fire({icon:'question', title:'Complete Consultation?', text:'Mark this patient as completed and capture check-out time?', showCancelButton:true, confirmButtonText:'Complete Consultation', cancelButtonText:'Go Back', confirmButtonColor:'#2563eb', cancelButtonColor:'#64748b'}).then(result => { if (result.isConfirmed) goQueue(action, trackId); });
-        } else if (confirm('Mark consultation complete and capture check-out time?')) goQueue(action, trackId);
+            Swal.fire({icon:'question', title:'Complete Consultation?', text:'Mark this patient as completed and capture check-out time?', showCancelButton:true, confirmButtonText:'Complete Consultation', cancelButtonText:'Go Back', confirmButtonColor:'#2563eb', cancelButtonColor:'#64748b'}).then(result => { if (result.isConfirmed) proceed(); });
+        } else if (confirm('Mark consultation complete and capture check-out time?')) proceed();
     }
 
     document.addEventListener('contextmenu', function (event) {
