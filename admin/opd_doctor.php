@@ -49,6 +49,13 @@ try {
     ensureVisitColumn($tenant_pdo, 'follow_up_date', 'DATE NULL', 'doctor_notes');
     ensureVisitColumn($tenant_pdo, 'consultation_started_at', 'DATETIME NULL', 'follow_up_date');
     ensureVisitColumn($tenant_pdo, 'consultation_completed_at', 'DATETIME NULL', 'consultation_started_at');
+    // Role behaviour migration (safe: adds the column only when missing).
+    $roleTypeCheck = $tenant_pdo->query("SHOW COLUMNS FROM tenant_roles LIKE 'role_type'")->fetch(PDO::FETCH_ASSOC);
+    if (!$roleTypeCheck) {
+        $tenant_pdo->exec("ALTER TABLE tenant_roles ADD COLUMN role_type VARCHAR(20) NOT NULL DEFAULT 'general' AFTER role_name");
+        // Preserve the legacy Doctor role's expected behaviour.
+        $tenant_pdo->exec("UPDATE tenant_roles SET role_type = 'doctor' WHERE LOWER(TRIM(role_name)) = 'doctor'");
+    }
 } catch (Exception $e) {
     $err = 'DOCTOR DESK DATABASE SETUP ERROR: ' . $e->getMessage();
 }
@@ -57,13 +64,72 @@ try {
    DOCTOR MASTER
    ========================================================== */
 $doctors = [];
+$is_logged_in_doctor = false;
+$logged_doctor_id = 0;
+$logged_doctor_name = '';
+
 try {
     $d = $tenant_pdo->prepare("SELECT id, full_name, department_id FROM master_doctors WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY full_name");
     $d->execute([$org_id, $center_id]);
     $doctors = $d->fetchAll(PDO::FETCH_ASSOC) ?: [];
-} catch (Exception $e) {}
 
-$doctor_id = (int)($_GET['doctor_id'] ?? ($_POST['doctor_id'] ?? ($_SESSION['doctor_id'] ?? 0)));
+    // Resolve the signed-in staff account and its role.
+    if ($user_id > 0) {
+        $u = $tenant_pdo->prepare("
+            SELECT tu.fullname, tu.center_id, tu.doctor_id, tu.is_admin, tr.role_name, tr.role_type
+            FROM tenant_users tu
+            LEFT JOIN tenant_roles tr ON tr.role_id = tu.role_id
+            WHERE tu.user_id = ? AND tu.status = 1
+            LIMIT 1
+        ");
+        $u->execute([$user_id]);
+        $logged_user = $u->fetch(PDO::FETCH_ASSOC);
+
+        // Master-created Hospital Admin and tenant Full Admin sessions are never
+        // restricted by a coincident tenant user_id.
+        $session_is_admin = ((int)($_SESSION['is_admin'] ?? 0) === 1);
+
+        // A Doctor login is restricted only through an explicit Doctor Master ID.
+        if (!$session_is_admin
+            && $logged_user
+            && (int)($logged_user['is_admin'] ?? 0) !== 1
+            && strtolower(trim((string)($logged_user['role_type'] ?? 'general'))) === 'doctor') {
+
+            $is_logged_in_doctor = true;
+            $logged_doctor_name = trim((string)$logged_user['fullname']);
+            $doctor_center_id = (int)$logged_user['center_id'];
+            $logged_doctor_id = (int)($logged_user['doctor_id'] ?? 0);
+
+            if ($logged_doctor_id > 0) {
+                $match = $tenant_pdo->prepare("
+                    SELECT id, full_name, department_id
+                    FROM master_doctors
+                    WHERE id = ? AND org_id = ? AND center_id = ? AND status = 1
+                    LIMIT 1
+                ");
+                $match->execute([$logged_doctor_id, $org_id, $doctor_center_id]);
+                $doctor_record = $match->fetch(PDO::FETCH_ASSOC);
+
+                if ($doctor_record) {
+                    $doctors = [$doctor_record];
+                } else {
+                    $doctors = [];
+                    $logged_doctor_id = 0;
+                    $err = 'THE LINKED DOCTOR MASTER RECORD IS INACTIVE OR DOES NOT MATCH THIS CENTER. PLEASE CHECK STAFF USER MAPPING.';
+                }
+            } else {
+                $doctors = [];
+                $err = 'DOCTOR LOGIN IS NOT LINKED TO DOCTOR MASTER. PLEASE EDIT THIS STAFF USER AND SELECT THE CORRECT DOCTOR.';
+            }
+        }
+    }
+} catch (Exception $e) {
+    $err = $err ?: 'DOCTOR LOOKUP ERROR: ' . $e->getMessage();
+}
+
+$doctor_id = $is_logged_in_doctor
+    ? $logged_doctor_id
+    : (int)($_GET['doctor_id'] ?? ($_POST['doctor_id'] ?? ($_SESSION['doctor_id'] ?? 0)));
 $selected_visit_id = (int)($_GET['visit_id'] ?? ($_POST['visit_id'] ?? 0));
 
 /* ==========================================================
@@ -451,7 +517,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'get_masters') {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['doctor_action'] ?? '';
     $visit_id = (int)($_POST['visit_id'] ?? 0);
-    $doctor_post = (int)($_POST['doctor_id'] ?? 0);
+    // Never allow a Doctor-role account to post another doctor's ID.
+    $doctor_post = $is_logged_in_doctor ? $logged_doctor_id : (int)($_POST['doctor_id'] ?? 0);
     if ($doctor_post > 0) $doctor_id = $doctor_post;
 
     if ($visit_id > 0 && in_array($action, ['start', 'save', 'complete'], true)) {
@@ -461,8 +528,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $visit_row = $find->fetch(PDO::FETCH_ASSOC);
 
             if (!$visit_row) throw new Exception('PATIENT VISIT NOT FOUND.');
+            if ($is_logged_in_doctor && (int)$visit_row['doctor_id'] !== $logged_doctor_id) {
+                throw new Exception('YOU CAN ONLY ACCESS YOUR OWN PATIENT VISITS.');
+            }
 
-            $save_doctor_id = $doctor_id > 0 ? $doctor_id : (int)$visit_row['doctor_id'];
+            $save_doctor_id = $is_logged_in_doctor ? $logged_doctor_id : ($doctor_id > 0 ? $doctor_id : (int)$visit_row['doctor_id']);
             if ($save_doctor_id <= 0) throw new Exception('PLEASE SELECT A DOCTOR.');
 
             if ($action === 'start') {
@@ -623,7 +693,11 @@ $visit_list = [];
 try {
     $whereDoctor = '';
     $params = [$org_id, $center_id, $today];
-    if ($doctor_id > 0) {
+    if ($is_logged_in_doctor) {
+        // Keep the query restricted even when the Doctor Master link is missing.
+        $whereDoctor = ' AND v.doctor_id = ? ';
+        $params[] = $logged_doctor_id;
+    } elseif ($doctor_id > 0) {
         $whereDoctor = ' AND v.doctor_id = ? ';
         $params[] = $doctor_id;
     }
@@ -659,6 +733,16 @@ $past_visits = [];
 
 if ($selected_visit_id > 0) {
     try {
+        // Prevent a Doctor-behaviour account from opening another doctor's visit by URL.
+        if ($is_logged_in_doctor) {
+            $accessCheck = $tenant_pdo->prepare("SELECT doctor_id FROM opd_visits WHERE visit_id = ? AND org_id = ? AND center_id = ? LIMIT 1");
+            $accessCheck->execute([$selected_visit_id, $org_id, $center_id]);
+            $assignedDoctorId = $accessCheck->fetchColumn();
+            if ($assignedDoctorId === false || (int)$assignedDoctorId !== $logged_doctor_id) {
+                throw new Exception('YOU CAN ONLY OPEN YOUR OWN PATIENT VISITS.');
+            }
+        }
+
         $autoIn = $tenant_pdo->prepare("
             UPDATE opd_visits
             SET status = 'Inside Cabin',
@@ -807,7 +891,27 @@ input[type="number"], textarea { text-transform: none; }
 .dd-section-title { font-size:9px; font-weight:900; color:#0f172a; letter-spacing:.3px; }
 .dd-vital { border:1px solid #e5e7eb; border-radius:9px; padding:7px; min-height:66px; background:#fff; }
 .dd-vital label { font-size:9px; color:#64748b; font-weight:800; margin-bottom:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:block; }
-.dd-vital input { font-weight:800; }
+.dd-vital input { font-weight:800; color:#1e293b; }
+.dd-vital input::placeholder {
+    color:#cbd5e1 !important;
+    opacity:1;
+    font-weight:500;
+}
+.dd-vital input::-webkit-input-placeholder {
+    color:#cbd5e1 !important;
+    opacity:1;
+    font-weight:500;
+}
+.dd-vital input::-moz-placeholder {
+    color:#cbd5e1 !important;
+    opacity:1;
+    font-weight:500;
+}
+.dd-vital input:-ms-input-placeholder {
+    color:#cbd5e1 !important;
+    opacity:1;
+    font-weight:500;
+}
 
 /* COMPACT MEDICINE ROW CSS */
 .dd-medicine-row { border:1px solid #dfe5ec; border-radius:7px; padding:6px 6px 7px; margin-bottom:5px; background:#fafbfc; }
@@ -907,6 +1011,9 @@ input[type="number"], textarea { text-transform: none; }
 
 </style>
 
+<!-- SweetAlert2: required by Swal.fire() calls in Doctor Desk -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
 <div class="doctor-desk-wrap">
     
     <script>
@@ -935,12 +1042,17 @@ input[type="number"], textarea { text-transform: none; }
         </div>
         <form method="GET" class="d-flex align-items-center gap-2">
             <label class="small fw-bold text-secondary mb-0">DOCTOR</label>
-            <select name="doctor_id" class="form-select form-select-sm" onchange="this.form.submit()" style="min-width:190px;">
-                <option value="0">ALL DOCTORS</option>
-                <?php foreach ($doctors as $doc): ?>
-                    <option value="<?= (int)$doc['id'] ?>" <?= $doctor_id == (int)$doc['id'] ? 'selected' : '' ?>><?= htmlspecialchars($doc['full_name']) ?></option>
-                <?php endforeach; ?>
-            </select>
+            <?php if ($is_logged_in_doctor): ?>
+                <input type="hidden" name="doctor_id" value="<?= (int)$logged_doctor_id ?>">
+                <input type="text" class="form-control form-control-sm" value="<?= htmlspecialchars($logged_doctor_name) ?>" readonly style="min-width:190px;">
+            <?php else: ?>
+                <select name="doctor_id" class="form-select form-select-sm" onchange="this.form.submit()" style="min-width:190px;">
+                    <option value="0">ALL DOCTORS</option>
+                    <?php foreach ($doctors as $doc): ?>
+                        <option value="<?= (int)$doc['id'] ?>" <?= $doctor_id == (int)$doc['id'] ? 'selected' : '' ?>><?= htmlspecialchars($doc['full_name']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            <?php endif; ?>
         </form>
     </div>
 
