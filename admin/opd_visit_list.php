@@ -30,6 +30,7 @@ try {
     
     $params = [$org_id, $center_id, $from_date, $to_date];
 
+    // Optional: Keep backend search fallback, though JS will handle the instant search
     if ($search !== '') {
         $sql .= " AND (p.fullname LIKE ? OR p.uhid LIKE ? OR p.mobile LIKE ?)";
         $params[] = "%$search%";
@@ -66,6 +67,7 @@ require_once __DIR__ . '/layout_header.php';
             <form method="GET" class="row g-2 align-items-end">
                 <div class="col-md-3">
                     <label class="form-label small fw-bold text-secondary mb-1">FROM DATE</label>
+                    <!-- HTML5 date inputs always use YYYY-MM-DD for their values, but the browser formats it for the user -->
                     <input type="date" name="from_date" class="form-control form-control-sm" value="<?= htmlspecialchars($from_date) ?>" required>
                 </div>
                 <div class="col-md-3">
@@ -73,12 +75,13 @@ require_once __DIR__ . '/layout_header.php';
                     <input type="date" name="to_date" class="form-control form-control-sm" value="<?= htmlspecialchars($to_date) ?>" required>
                 </div>
                 <div class="col-md-4">
-                    <label class="form-label small fw-bold text-secondary mb-1">SEARCH (NAME / UHID / MOBILE)</label>
-                    <input type="text" name="search" class="form-control form-control-sm" placeholder="Search Patient..." value="<?= htmlspecialchars($search) ?>">
+                    <label class="form-label small fw-bold text-secondary mb-1">INSTANT SEARCH</label>
+                    <!-- Added id="searchInput" and onkeyup for JS instant filter -->
+                    <input type="text" name="search" id="searchInput" onkeyup="filterTable()" class="form-control form-control-sm" placeholder="Type Name, UHID, or Mobile to filter..." value="<?= htmlspecialchars($search) ?>">
                 </div>
                 <div class="col-md-2">
                     <button type="submit" class="btn btn-sm btn-primary w-100 fw-bold">
-                        <i class="bi bi-search me-1"></i> SEARCH
+                        <i class="bi bi-funnel me-1"></i> FILTER
                     </button>
                 </div>
             </form>
@@ -99,7 +102,8 @@ require_once __DIR__ . '/layout_header.php';
                             <th class="text-end pe-3">ACTION</th>
                         </tr>
                     </thead>
-                    <tbody>
+                    <!-- Added id="visitTableBody" for JS targeting -->
+                    <tbody id="visitTableBody">
                         <?php if (empty($visits)): ?>
                             <tr>
                                 <td colspan="5" class="text-center py-5 text-muted fw-bold text-uppercase">
@@ -111,7 +115,8 @@ require_once __DIR__ . '/layout_header.php';
                             <?php foreach ($visits as $v): ?>
                                 <tr>
                                     <td class="ps-3">
-                                        <div class="fw-bold text-dark"><?= date('d M Y', strtotime($v['visit_date'])) ?></div>
+                                        <!-- Changed date format to DD-MM-YYYY -->
+                                        <div class="fw-bold text-dark"><?= date('d-m-Y', strtotime($v['visit_date'])) ?></div>
                                         <div class="small text-primary fw-bold">TOKEN #<?= (int)$v['token_no'] ?></div>
                                     </td>
                                     <td>
@@ -135,11 +140,9 @@ require_once __DIR__ . '/layout_header.php';
                                         </span>
                                     </td>
                                     <td class="text-end pe-3">
-                                        <!-- Edit button seamlessly links into the doctor desk with the context of this visit -->
                                         <a href="opd_doctor.php?visit_id=<?= (int)$v['visit_id'] ?>" class="btn btn-sm btn-outline-primary fw-bold me-1" title="Open in Doctor Desk">
                                             <i class="bi bi-pencil-square"></i> EDIT
                                         </a>
-                                        <!-- Direct Print button added here -->
                                         <a href="print_prescription.php?visit_id=<?= (int)$v['visit_id'] ?>" target="_blank" class="btn btn-sm btn-dark fw-bold" title="Print Prescription">
                                             <i class="bi bi-printer"></i> PRINT
                                         </a>
@@ -153,5 +156,27 @@ require_once __DIR__ . '/layout_header.php';
         </div>
     </div>
 </div>
+
+<!-- Instant Search Script -->
+<script>
+function filterTable() {
+    let input = document.getElementById("searchInput");
+    let filter = input.value.toLowerCase();
+    let tbody = document.getElementById("visitTableBody");
+    let tr = tbody.getElementsByTagName("tr");
+
+    for (let i = 0; i < tr.length; i++) {
+        // Skip filtering on the "No visits found" empty state row
+        if (tr[i].getElementsByTagName("td").length === 1) continue;
+
+        let rowText = tr[i].textContent || tr[i].innerText;
+        if (rowText.toLowerCase().indexOf(filter) > -1) {
+            tr[i].style.display = "";
+        } else {
+            tr[i].style.display = "none";
+        }
+    }
+}
+</script>
 
 <?php require_once __DIR__ . '/layout_footer.php'; ?>
