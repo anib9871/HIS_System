@@ -18,9 +18,9 @@ try {
     $total_centers  = $tenant_pdo->query("SELECT COUNT(*) FROM master_centers WHERE status = 1")->fetchColumn() ?: 0;
 
     $recent_opd = $tenant_pdo->query("
-        SELECT v.token_no, v.status, v.consultation_fee, p.fullname, p.uhid, p.mobile 
-        FROM opd_visits v 
-        JOIN opd_patients p ON v.patient_id = p.patient_id 
+        SELECT v.token_no, v.status, v.consultation_fee, p.fullname, p.uhid, p.mobile
+        FROM opd_visits v
+        JOIN opd_patients p ON v.patient_id = p.patient_id
         ORDER BY v.visit_id DESC LIMIT 5
     ")->fetchAll();
 } catch (Exception $e) {
@@ -98,12 +98,12 @@ try {
                 <?php else: ?>
                     <?php foreach ($recent_opd as $row): ?>
                         <tr>
-                            <td><span class="badge bg-primary fs-6">#<?= $row['token_no'] ?></span></td>
-                            <td><code><?= htmlspecialchars($row['uhid']) ?></code></td>
-                            <td class="fw-semibold"><?= htmlspecialchars($row['fullname']) ?></td>
-                            <td><?= htmlspecialchars($row['mobile']) ?></td>
-                            <td><span class="badge bg-secondary"><?= htmlspecialchars($row['status']) ?></span></td>
-                            <td class="fw-bold">₹<?= number_format($row['consultation_fee'], 2) ?></td>
+                            <td><span class="badge bg-primary fs-6">#<?= htmlspecialchars((string)$row['token_no']) ?></span></td>
+                            <td><code><?= htmlspecialchars((string)$row['uhid']) ?></code></td>
+                            <td class="fw-semibold"><?= htmlspecialchars((string)$row['fullname']) ?></td>
+                            <td><?= htmlspecialchars((string)$row['mobile']) ?></td>
+                            <td><span class="badge bg-secondary"><?= htmlspecialchars((string)$row['status']) ?></span></td>
+                            <td class="fw-bold">₹<?= number_format((float)$row['consultation_fee'], 2) ?></td>
                         </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>
