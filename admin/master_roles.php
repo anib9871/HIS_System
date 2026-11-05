@@ -106,7 +106,7 @@ require_once __DIR__ . '/layout_header.php';
           </form>
         </div>
       </div>
-      <div class="alert alert-info small mt-3 mb-0"><i class="bi bi-info-circle me-1"></i>Role name Staff & Users page ke Role dropdown mein automatically available hoga. Doctor Desk ka dropdown selected Role Type ke according behave karega. Menu permissions user creation screen par assign hongi.</div>
+      <div class="alert alert-info small mt-3 mb-0"><i class="bi bi-info-circle me-1"></i>The role name will automatically appear in the Role dropdown on the Staff & Users page. The Doctor Desk dropdown will behave according to the selected Role Type. Menu permissions can be assigned while creating a user.</div>
     </div>
     <div class="col-lg-8">
       <div class="card border-0 shadow-sm">
