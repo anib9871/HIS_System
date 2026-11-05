@@ -18,7 +18,8 @@ $opd_pages = [
     'opd_registration.php',
     'opd_bills.php',
     'opd_doctor.php',
-    'opd_visit_list.php'
+    'opd_visit_list.php',
+    'opd_daily_collection.php'
 ];
 $is_opd_active = in_array($current_page, $opd_pages);
 
@@ -50,6 +51,7 @@ $general_master_pages = [
     'master_financial_year.php',
     'master_centers.php', 
     'users.php', 
+    'master_roles.php',
     'patient_master.php', // ADDED PATIENT MASTER HERE
     'master_doctors.php', 
     'master_departments.php',
@@ -92,6 +94,24 @@ if (is_string($user_menus)) {
 }
 $is_full_admin = !empty($_SESSION['is_admin']) && (int)$_SESSION['is_admin'] === 1;
 
+// Resolve the allotted center name only when this login has a center assigned.
+// The center is optional: users without an allocation will not see a Center label.
+$header_center_name = trim((string)($_SESSION['center_name'] ?? ''));
+$header_center_id = (int)($_SESSION['center_id'] ?? 0);
+if ($header_center_name === '' && $header_center_id > 0 && isset($tenant_pdo) && $tenant_pdo instanceof PDO) {
+    try {
+        $center_stmt = $tenant_pdo->prepare("SELECT center_name FROM master_centers WHERE center_id = ? AND status = 1 LIMIT 1");
+        $center_stmt->execute([$header_center_id]);
+        $header_center_name = trim((string)($center_stmt->fetchColumn() ?: ''));
+        if ($header_center_name !== '') {
+            $_SESSION['center_name'] = $header_center_name;
+        }
+    } catch (Throwable $e) {
+        // Keep the header usable if center allocation/table is not configured.
+        $header_center_name = '';
+    }
+}
+
 function has_access($menu_key, $is_full_admin, $user_menus) {
     if ($is_full_admin) return true;
     return in_array($menu_key, $user_menus);
@@ -105,6 +125,13 @@ function has_any_access($keys, $is_full_admin, $user_menus) {
     return false;
 }
 
+// Dashboard page-level permission guard.
+// Keep this before the HTML output so unauthorized users cannot access it by URL.
+if ($current_page === 'dashboard.php' && !has_access('dashboard', $is_full_admin, $user_menus)) {
+    http_response_code(403);
+    exit('Access denied. You do not have permission to access the Dashboard.');
+}
+
 // Group Key Arrays for Submenu Visibility
 $rx_keys = [
     'rx_units', 'rx_frequency', 'rx_meals', 'rx_durations', 'rx_medicines',
@@ -112,18 +139,18 @@ $rx_keys = [
 ];
 
 $fac_keys = [
-    'fac_buildings', 'fac_blocks', 'fac_floors', 'fac_room_categories', 'fac_rooms'
+    'fac_buildings', 'fac_blocks', 'fac_floors', 'fac_room_categories', 'fac_rooms', 'fac_bed'
 ];
 
 $master_keys = array_merge([
     'masters_org', 'masters_states', 'masters_city', 'masters_financial_year',
-    'masters_centers', 'masters_users', 'masters_patients', 'masters_doctors', 'masters_departments', // ADDED 'masters_patients'
+    'masters_centers', 'masters_users', 'masters_roles', 'masters_patients', 'masters_doctors', 'masters_departments', // ADDED 'masters_patients'
     'masters_qualifications', 'masters_specializations', 'masters_days',
     'masters_payment_modes', 'masters_insurance_categories', 'masters_doctor_services',
     'masters_doctor_tariff'
 ], $rx_keys, $fac_keys);
 
-$opd_keys = ['opd_appt', 'opd_reg', 'opd_queue', 'opd_doctor', 'opd_visit_list'];
+$opd_keys = ['opd_appt', 'opd_reg', 'opd_queue', 'opd_doctor', 'opd_visit_list', 'opd_collection'];
 $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; // NEW IPD KEYS
 ?>
 <!DOCTYPE html>
@@ -518,6 +545,7 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
     
     <ul class="sidebar-menu">
         <!-- 1. DASHBOARD -->
+        <?php if (has_access('dashboard', $is_full_admin, $user_menus)): ?>
         <li>
             <a href="dashboard.php" class="sidebar-link <?= ($current_page == 'dashboard.php') ? 'active' : '' ?>">
                 <div class="link-inner">
@@ -526,6 +554,7 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
                 </div>
             </a>
         </li>
+        <?php endif; ?>
 
         <!-- 2. MASTERS MODULE -->
         <?php if (has_any_access($master_keys, $is_full_admin, $user_menus)): ?>
@@ -590,6 +619,14 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
                     <li>
                         <a href="users.php" class="<?= ($current_page == 'users.php') ? 'active-child' : '' ?>">
                             <i class="bi bi-people"></i> Staff & Users
+                        </a>
+                    </li>
+                    <?php endif; ?>
+
+                    <?php if (has_access('masters_roles', $is_full_admin, $user_menus)): ?>
+                    <li>
+                        <a href="master_roles.php" class="<?= ($current_page == 'master_roles.php') ? 'active-child' : '' ?>">
+                            <i class="bi bi-person-gear"></i> Role Master
                         </a>
                     </li>
                     <?php endif; ?>
@@ -856,16 +893,15 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
                     <?php endif; ?>
 
                     <?php if (has_access('opd_reg', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_registration.php" class="<?= ($current_page == 'opd_registration.php') ? 'active-child' : '' ?>"><i class="bi bi-wallet2"></i> OPD Payment</a></li>
                     <li><a href="opd_bills.php" class="<?= ($current_page == 'opd_bills.php') ? 'active-child' : '' ?>"><i class="bi bi-receipt"></i> OPD Bills</a></li>
-                    <?php endif; ?>
-
-                    <?php if (has_access('opd_queue', $is_full_admin, $user_menus)): ?>
-                    <li><a href="opd_appointments.php#nav-queue" id="headerQueueDisplayLink" class="<?= ($current_page == 'opd_appointments.php') ? 'active-child' : '' ?>"><i class="bi bi-display"></i> Queue Display</a></li>
                     <?php endif; ?>
 
                     <?php if (has_access('opd_doctor', $is_full_admin, $user_menus)): ?>
                     <li><a href="opd_doctor.php" class="<?= ($current_page == 'opd_doctor.php') ? 'active-child' : '' ?>"><i class="bi bi-prescription2"></i> Doctor Desk (Rx)</a></li>
+                    <?php endif; ?>
+
+                    <?php if (has_access('opd_collection', $is_full_admin, $user_menus)): ?>
+                    <li><a href="opd_daily_collection.php" class="<?= ($current_page == 'opd_daily_collection.php') ? 'active-child' : '' ?>"><i class="bi bi-cash-coin"></i> Daily OPD Collection</a></li>
                     <?php endif; ?>
                     
                     <?php if (has_access('opd_visit_list', $is_full_admin, $user_menus)): ?>
@@ -932,12 +968,46 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
         </div>
         
         <div class="d-flex align-items-center gap-2 gap-sm-3">
-            <div class="d-flex align-items-center gap-2">
-                <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center" style="width: 32px; height: 32px; font-size: 0.9rem;">
-                    <i class="bi bi-person-badge"></i>
+            <?php
+                $header_login_name = trim((string)($_SESSION['fullname'] ?? ''));
+                if ($header_login_name === '') {
+                    $header_login_name = trim((string)($_SESSION['username'] ?? 'Admin'));
+                }
+                $header_org_name = trim((string)($_SESSION['org_name'] ?? ''));
+            ?>
+            <?php if (($_SESSION['login_source'] ?? '') === 'master' && (int)($_SESSION['role_id'] ?? 0) !== 1): ?>
+                <!-- Superadmin-created Hospital Admin: show organization only. -->
+                <?php if ($header_org_name !== ''): ?>
+                    <div class="d-flex align-items-center gap-1 small text-dark" title="Organization">
+                        <i class="bi bi-building text-primary"></i>
+                        <span class="fw-semibold"><?= htmlspecialchars($header_org_name, ENT_QUOTES, 'UTF-8') ?></span>
+                    </div>
+                <?php endif; ?>
+            <?php else: ?>
+                <!-- Tenant users: show login name, organization and allotted center. -->
+                <div class="d-flex align-items-center gap-2" title="Logged-in user">
+                    <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center" style="width: 32px; height: 32px; font-size: 0.9rem; flex: 0 0 32px;">
+                        <i class="bi bi-person-badge"></i>
+                    </div>
+                    <span class="fw-bold small text-dark"><?= htmlspecialchars($header_login_name, ENT_QUOTES, 'UTF-8') ?></span>
                 </div>
-                <span class="fw-bold small text-dark d-none d-sm-inline"><?= htmlspecialchars($_SESSION['fullname'] ?? $_SESSION['username'] ?? 'Admin') ?></span>
-            </div>
+
+                <?php if ($header_org_name !== ''): ?>
+                    <div class="vr my-1 text-muted" style="height: 20px;"></div>
+                    <div class="d-flex align-items-center gap-1 small text-dark" title="Organization">
+                        <i class="bi bi-building text-primary"></i>
+                        <span class="fw-semibold"><?= htmlspecialchars($header_org_name, ENT_QUOTES, 'UTF-8') ?></span>
+                    </div>
+                <?php endif; ?>
+
+                <?php if ($header_center_name !== ''): ?>
+                    <div class="vr my-1 text-muted" style="height: 20px;"></div>
+                    <div class="d-flex align-items-center gap-1 small text-dark" title="Assigned Center">
+                        <i class="bi bi-geo-alt text-info"></i>
+                        <span class="fw-semibold"><?= htmlspecialchars($header_center_name, ENT_QUOTES, 'UTF-8') ?></span>
+                    </div>
+                <?php endif; ?>
+            <?php endif; ?>
 
             <div class="vr my-1 text-muted d-none d-sm-block" style="height: 20px;"></div>
 
