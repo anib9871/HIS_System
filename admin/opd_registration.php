@@ -165,6 +165,29 @@ $org_name = $_SESSION['org_name'] ?? 'City Care Multispeciality Hospital';
 $embedded_mode = (isset($_GET['embedded']) && $_GET['embedded'] === '1');
 $followup_validity_days = 7; // Follow-up validity window; adjust here if hospital policy differs.
 
+// OPD/IPD-ready payment ledger. Idempotent table creation; no existing bill data is changed.
+$tenant_pdo->exec("CREATE TABLE IF NOT EXISTS opd_payment_transactions (
+    transaction_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    org_id INT NOT NULL DEFAULT 1,
+    center_id INT NOT NULL DEFAULT 1,
+    source_type VARCHAR(10) NOT NULL DEFAULT 'OPD',
+    source_id BIGINT UNSIGNED NOT NULL,
+    transaction_type VARCHAR(10) NOT NULL DEFAULT 'PAYMENT',
+    payment_date DATE NOT NULL,
+    payment_mode VARCHAR(50) NOT NULL,
+    amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    transaction_ref VARCHAR(150) NULL,
+    remarks TEXT NULL,
+    received_by INT NULL,
+    status VARCHAR(12) NOT NULL DEFAULT 'ACTIVE',
+    legacy_key VARCHAR(100) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (transaction_id),
+    UNIQUE KEY uq_opd_payment_legacy (legacy_key),
+    KEY idx_payment_day (org_id, center_id, payment_date, status),
+    KEY idx_payment_source (org_id, center_id, source_type, source_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 
 
 // ============================================================
@@ -637,6 +660,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                 ");
 
                 $v_stmt->execute([$org_id, $center_id, $patient_id, ($appointment_id > 0 ? $appointment_id : null), $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $next_token, $next_receipt_no, $visit_date, $payment_date, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status]);
+
+                // Record each payment mode as its own ledger row. The visit remains the bill master.
+                $new_visit_id = (int)$tenant_pdo->lastInsertId();
+                if ($total_paid > 0 && !in_array(strtoupper($pay_mode), ['FOLLOW-UP - NO CHARGE', 'FOLLOWUP - NO CHARGE'], true)) {
+                    $breakdownRows = json_decode($pay_breakdown, true);
+                    if (!is_array($breakdownRows) || !$breakdownRows) {
+                        $breakdownRows = ['Cash' => ['amount' => $total_paid]];
+                    }
+                    $ledgerInsert = $tenant_pdo->prepare("INSERT INTO opd_payment_transactions
+                        (org_id, center_id, source_type, source_id, transaction_type, payment_date, payment_mode, amount, transaction_ref, remarks, status)
+                        VALUES (?, ?, 'OPD', ?, 'PAYMENT', ?, ?, ?, ?, ?, 'ACTIVE')");
+                    foreach ($breakdownRows as $modeName => $modeData) {
+                        $modeAmount = is_array($modeData) ? (float)($modeData['amount'] ?? 0) : (float)$modeData;
+                        if ($modeAmount <= 0) continue;
+                        $modeKey = strtolower((string)$modeName);
+                        $ledgerMode = (stripos($modeKey, 'cash') !== false) ? 'Cash'
+                            : ((stripos($modeKey, 'upi') !== false) ? 'UPI'
+                            : ((stripos($modeKey, 'card') !== false) ? 'Card'
+                            : ((stripos($modeKey, 'net') !== false || stripos($modeKey, 'bank') !== false) ? 'Net Banking' : ucfirst((string)$modeName))));
+                        $reference = is_array($modeData) ? (string)($modeData['utr'] ?? '') : '';
+                        $ledgerInsert->execute([$org_id, $center_id, $new_visit_id, $payment_date, $ledgerMode, $modeAmount, ($reference !== '' ? $reference : null), $remark]);
+                    }
+                }
 
                 if ($appointment_id > 0) {
                     $tenant_pdo->prepare("
@@ -1145,10 +1191,9 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
             </div>
             <div class="card-body p-3">
                 <?php if ($embedded_mode && $appointment_prefill): ?>
-                <div class="embedded-patient-summary d-flex flex-wrap align-items-center gap-3 mb-3 px-3 py-2 rounded-3 border bg-primary bg-opacity-10">
-                  <div><span class="small text-secondary d-block">PATIENT NAME</span><strong><?= htmlspecialchars($appointment_prefill['master_fullname'] ?? $appointment_prefill['patient_name'] ?? '') ?></strong></div>
-                  <div><span class="small text-secondary d-block">UHID</span><strong class="text-primary font-monospace"><?= htmlspecialchars($appointment_prefill['master_uhid'] ?? $appointment_prefill['uhid'] ?? 'UHID will be generated') ?></strong></div>
-                  <div class="ms-auto small text-secondary">Appointment #<?= (int)$appointment_prefill['appointment_id'] ?></div>
+                <div class="embedded-patient-summary d-flex flex-wrap align-items-center gap-2 mb-3 px-3 py-2 rounded-3 border bg-primary bg-opacity-10">
+                  <div class="fw-semibold text-dark">Patient Name: <strong><?= htmlspecialchars($appointment_prefill['master_fullname'] ?? $appointment_prefill['patient_name'] ?? '') ?></strong></div>
+                  <div class="fw-semibold text-dark">UHID:- <strong class="text-primary font-monospace"><?= htmlspecialchars($appointment_prefill['master_uhid'] ?? $appointment_prefill['uhid'] ?? 'UHID will be generated') ?></strong></div>
                 </div>
                 <?php endif; ?>
                 <form method="POST" id="opdForm">
@@ -1304,52 +1349,40 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+                                <?php if ($embedded_mode && $appointment_id > 0): ?>
+                                    <?php
+                                        // Keep the selected billing masters in the POST payload while
+                                        // hiding their controls in appointment-linked payment mode.
+                                        $selectedCategoryId = (int)($edit_data['category_id'] ?? $appointment_prefill['category_id'] ?? 0);
+                                        $selectedInsuranceId = (int)($edit_data['insurance_id'] ?? $appointment_prefill['insurance_id'] ?? 0);
+                                    ?>
+                                    <input type="hidden" name="category_id" id="category_id" value="<?= $selectedCategoryId ?>">
+                                    <input type="hidden" name="insurance_id" id="insurance_id" value="<?= $selectedInsuranceId > 0 ? $selectedInsuranceId : '' ?>">
+                                <?php else: ?>
                                 <div class="col-md-4">
-                                    <!-- FIX: Added AJAX Refresh Button for Categories & Insurances -->
                                     <label class="form-label small fw-semibold text-primary">
                                         Category *
                                         <a href="javascript:void(0)" onclick="refreshMasters()" class="ms-1 text-primary" title="Refresh Dropdowns">
                                             <i class="bi bi-arrow-clockwise"></i>
                                         </a>
                                     </label>
-                                    <?php if ($embedded_mode && $appointment_id > 0):
-                                        $selectedCategoryId = (int)($edit_data['category_id'] ?? $appointment_prefill['category_id'] ?? 0);
-                                        $selectedCategoryName = '—';
-                                        foreach ($categories as $categoryRow) {
-                                            if ((int)$categoryRow['id'] === $selectedCategoryId) { $selectedCategoryName = $categoryRow['category_name']; break; }
-                                        }
-                                    ?>
-                                        <div class="form-control form-control-sm bg-light fw-semibold" aria-readonly="true"><?= htmlspecialchars($selectedCategoryName) ?></div>
-                                        <input type="hidden" name="category_id" id="category_id" value="<?= $selectedCategoryId ?>">
-                                    <?php else: ?>
-                                        <select name="category_id" id="category_id" class="form-select form-select-sm" required onchange="filterInsurances()">
-                                            <option value="">-- Select --</option>
-                                            <?php foreach ($categories as $cat): ?>
-                                                <option value="<?= $cat['id'] ?>" <?= (((isset($edit_data['category_id']) && $edit_data['category_id'] == $cat['id']) || (!isset($edit_data['category_id']) && isset($appointment_prefill['category_id']) && $appointment_prefill['category_id'] == $cat['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($cat['category_name']) ?></option>
-                                            <?php endforeach; ?>
-                                        </select>
-                                    <?php endif; ?>
+                                    <select name="category_id" id="category_id" class="form-select form-select-sm" required onchange="filterInsurances()">
+                                        <option value="">-- Select --</option>
+                                        <?php foreach ($categories as $cat): ?>
+                                            <option value="<?= $cat['id'] ?>" <?= (((isset($edit_data['category_id']) && $edit_data['category_id'] == $cat['id']) || (!isset($edit_data['category_id']) && isset($appointment_prefill['category_id']) && $appointment_prefill['category_id'] == $cat['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($cat['category_name']) ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
                                 </div>
                                 <div class="col-md-4">
                                     <label class="form-label small fw-semibold text-primary">Insurance / Provider</label>
-                                    <?php if ($embedded_mode && $appointment_id > 0):
-                                        $selectedInsuranceId = (int)($edit_data['insurance_id'] ?? $appointment_prefill['insurance_id'] ?? 0);
-                                        $selectedInsuranceName = 'GENERAL';
-                                        foreach ($insurances as $insuranceRow) {
-                                            if ((int)$insuranceRow['id'] === $selectedInsuranceId) { $selectedInsuranceName = $insuranceRow['insurance_name']; break; }
-                                        }
-                                    ?>
-                                        <div class="form-control form-control-sm bg-light fw-semibold" aria-readonly="true"><?= htmlspecialchars($selectedInsuranceName) ?></div>
-                                        <input type="hidden" name="insurance_id" id="insurance_id" value="<?= $selectedInsuranceId > 0 ? $selectedInsuranceId : '' ?>">
-                                    <?php else: ?>
-                                        <select name="insurance_id" id="insurance_id" class="form-select form-select-sm" onchange="calculateTariff()">
-                                            <option value="">-- Base Category (No specific insurance) --</option>
-                                            <?php foreach ($insurances as $ins): ?>
-                                                <option value="<?= $ins['id'] ?>" data-cat="<?= $ins['category_id'] ?>" <?= (((isset($edit_data['insurance_id']) && $edit_data['insurance_id'] == $ins['id']) || (!isset($edit_data['insurance_id']) && isset($appointment_prefill['insurance_id']) && $appointment_prefill['insurance_id'] == $ins['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($ins['insurance_name']) ?></option>
-                                            <?php endforeach; ?>
-                                        </select>
-                                    <?php endif; ?>
+                                    <select name="insurance_id" id="insurance_id" class="form-select form-select-sm" onchange="calculateTariff()">
+                                        <option value="">-- Base Category (No specific insurance) --</option>
+                                        <?php foreach ($insurances as $ins): ?>
+                                            <option value="<?= $ins['id'] ?>" data-cat="<?= $ins['category_id'] ?>" <?= (((isset($edit_data['insurance_id']) && $edit_data['insurance_id'] == $ins['id']) || (!isset($edit_data['insurance_id']) && isset($appointment_prefill['insurance_id']) && $appointment_prefill['insurance_id'] == $ins['id']))) ? 'selected' : '' ?>><?= htmlspecialchars($ins['insurance_name']) ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
                                 </div>
+                                <?php endif; ?>
                                 <div class="col-md-4">
                                     <label class="form-label small fw-semibold text-secondary">Remarks (Optional)</label>
                                     <input type="text" name="remark" class="form-control form-control-sm" placeholder="Any remark..." value="<?= htmlspecialchars($edit_data['remark'] ?? '') ?>">
@@ -1638,14 +1671,14 @@ body:has(.opd-payment-hero) .form-control:focus,body:has(.opd-payment-hero) .for
         <div class="modal-content border-0 shadow-lg rounded-3">
             <div class="modal-header py-2 px-3 bg-dark text-white">
                 <h6 class="modal-title fw-bold"><i class="bi bi-receipt me-2"></i>OPD Receipt Preview <span class="badge bg-light text-dark ms-2"></span></h6>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close btn-close-white" aria-label="Back to Appointment Desk" onclick="backToAppointmentDesk()"></button>
             </div>
             <div class="modal-body bg-light p-3">
                 <div id="receiptPreviewContent" class="receipt-preview-wrap"></div>
             </div>
             <div class="modal-footer py-2 px-3">
                 <button type="button" class="btn btn-outline-secondary fw-semibold" onclick="backToAppointmentDesk()"><i class="bi bi-arrow-left me-1"></i> Back to Appointment</button>
-                <button type="button" class="btn btn-light border" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-light border" onclick="backToAppointmentDesk()">Cancel / Appointment Desk</button>
                 <button type="button" class="btn btn-primary fw-bold" onclick="printReceiptFromPreview()">
                     <i class="bi bi-printer me-1"></i> Print A5 Receipt
                 </button>
@@ -2547,6 +2580,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
     const cat = document.getElementById('category_id');
     if (cat && cat.value && !<?= ($embedded_mode && $appointment_id > 0) ? 'true' : 'false' ?>) filterInsurances();
+
+    // Category/insurance controls are hidden in appointment-linked mode, but
+    // their hidden values still drive the same doctor/service tariff lookup.
+    if (isAppointmentEmbedded) {
+        const doctor = document.getElementById('doctor_id')?.value;
+        const service = document.getElementById('service_id')?.value;
+        const category = document.getElementById('category_id')?.value;
+        if (doctor && service && category) calculateTariff();
+    }
 });
 
 function syncDiscountHiddenFields() {
@@ -2924,6 +2966,39 @@ function printReceiptFromPreview() {
         document.body.appendChild(frame);
     }
 
+    let returnedFromPrintDialog = false;
+    const returnAfterPrint = () => {
+        if (!opdReceiptPrintStarted || returnedFromPrintDialog) return;
+        returnedFromPrintDialog = true;
+        opdReceiptPrintStarted = false;
+        backToAppointmentDesk();
+    };
+
+    // Register load/print handlers BEFORE writing the iframe document.
+    frame.onload = function() {
+        frame.onload = null;
+        frame.contentWindow.onafterprint = returnAfterPrint;
+        // The parent window's afterprint event is also raised in some browsers.
+        window.addEventListener('afterprint', returnAfterPrint, { once: true });
+        try {
+            const printMedia = frame.contentWindow.matchMedia('print');
+            if (printMedia && printMedia.addEventListener) {
+                printMedia.addEventListener('change', event => {
+                    if (!event.matches) returnAfterPrint();
+                }, { once: true });
+            }
+        } catch (e) {}
+        setTimeout(() => {
+            try {
+                frame.contentWindow.focus();
+                frame.contentWindow.print();
+            } catch (e) {
+                opdReceiptPrintStarted = false;
+                alert('Print dialog could not be opened. Please try again.');
+            }
+        }, 150);
+    };
+
     const doc = frame.contentWindow.document;
     doc.open();
     doc.write(`<!doctype html><html><head><title>OPD Receipt</title>
@@ -2954,26 +3029,6 @@ body{font-family:Arial,sans-serif;color:#111;background:#fff;font-size:10px}
 .instructions{margin-top:6px;padding-top:4px;border-top:1px dashed #999;font-size:8px;line-height:1.3}
 </style></head><body>${currentReceiptHtml}</body></html>`);
     doc.close();
-
-    const returnAfterPrint = () => {
-        if (!opdReceiptPrintStarted) return;
-        opdReceiptPrintStarted = false;
-        backToAppointmentDesk();
-    };
-    // afterprint fires when the user closes the system print dialog (Print or Cancel).
-    frame.contentWindow.onafterprint = returnAfterPrint;
-    frame.onload = function() {
-        frame.onload = null;
-        setTimeout(() => {
-            try {
-                frame.contentWindow.focus();
-                frame.contentWindow.print();
-            } catch (e) {
-                opdReceiptPrintStarted = false;
-                alert('Print dialog could not be opened. Please try again.');
-            }
-        }, 150);
-    };
 }
 function printExistingParcha(name, uhid, ageGender, mobile, doctor, fee, discount, discountPercent, mode, token, receiptNo, remark, datetime, paymentBreakdownRaw, amountPaid, changeReturn, statusCode) {
     openReceiptPreview(name, uhid, ageGender, mobile, doctor, fee, discount, discountPercent, mode, token, receiptNo, remark, datetime, paymentBreakdownRaw, amountPaid, changeReturn, statusCode);
