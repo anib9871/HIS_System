@@ -15,6 +15,26 @@ $selected_ipd_id = (int)($_GET['ipd_id'] ?? 0);
 $err = '';
 $success = '';
 
+/* Bill-level discount storage (safe, repeatable migration). */
+try {
+    $tenant_pdo->exec("CREATE TABLE IF NOT EXISTS ipd_billing_discounts (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        org_id INT NOT NULL,
+        center_id INT NOT NULL,
+        ipd_id INT NOT NULL,
+        discount_type VARCHAR(20) NOT NULL DEFAULT 'fixed',
+        discount_value DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        discount_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        reason VARCHAR(255) NULL,
+        created_by INT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_ipd_bill_discount (org_id, center_id, ipd_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+} catch (Throwable $e) {
+    $err = 'Discount setup failed: ' . $e->getMessage();
+}
+
 /* ==========================================================
    SAVE ACTIONS (ADD CHARGE & DISCHARGE)
    ========================================================== */
@@ -41,6 +61,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $err = "Please select a valid service and enter the rate.";
         }
+    }
+
+    // ACTION: SAVE BILL-LEVEL DISCOUNT
+    if ($action === 'save_discount' && $ipd_id > 0) {
+        try {
+            $type = ($_POST['discount_type'] ?? 'fixed') === 'percent' ? 'percent' : 'fixed';
+            $value = max(0, (float)($_POST['discount_value'] ?? 0));
+            $reason = trim($_POST['discount_reason'] ?? '');
+
+            // Confirm that this IPD belongs to the current organization and center.
+            $patientCheck = $tenant_pdo->prepare("SELECT ipd_id, status FROM ipd_admissions WHERE ipd_id = ? AND org_id = ? AND center_id = ? LIMIT 1");
+            $patientCheck->execute([$ipd_id, $org_id, $center_id]);
+            $admission = $patientCheck->fetch(PDO::FETCH_ASSOC);
+            if (!$admission) {
+                throw new Exception('Invalid IPD patient.');
+            }
+            if ((int)$admission['status'] !== 1) {
+                throw new Exception('Discount can only be changed for an admitted patient.');
+            }
+
+            $sumStmt = $tenant_pdo->prepare("SELECT COALESCE(SUM(amount), 0) FROM ipd_billing_services WHERE ipd_id = ? AND org_id = ? AND center_id = ?");
+            $sumStmt->execute([$ipd_id, $org_id, $center_id]);
+            $gross = (float)$sumStmt->fetchColumn();
+            $discountAmount = $type === 'percent' ? ($gross * min($value, 100) / 100) : min($value, $gross);
+            if ($type === 'percent' && $value > 100) {
+                throw new Exception('Percentage discount cannot exceed 100%.');
+            }
+            $value = min($value, $type === 'percent' ? 100 : $gross);
+
+            $save = $tenant_pdo->prepare("INSERT INTO ipd_billing_discounts (org_id, center_id, ipd_id, discount_type, discount_value, discount_amount, reason, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE discount_type = VALUES(discount_type), discount_value = VALUES(discount_value), discount_amount = VALUES(discount_amount), reason = VALUES(reason), created_by = VALUES(created_by), updated_at = CURRENT_TIMESTAMP");
+            $save->execute([$org_id, $center_id, $ipd_id, $type, $value, $discountAmount, $reason, $user_id]);
+            $_SESSION['swal_success'] = 'Bill discount saved successfully.';
+            header('Location: ipd_billing.php?ipd_id=' . $ipd_id);
+            exit;
+        } catch (Throwable $e) { $err = $e->getMessage(); }
     }
 
     // ACTION: DISCHARGE PATIENT
@@ -90,6 +145,9 @@ $bill_items = [];
 $total_charges = 0;
 $advance_paid = 0;
 $balance_due = 0;
+$discount_data = null;
+$discount_amount = 0;
+$net_charges = 0;
 
 if ($selected_ipd_id > 0) {
     foreach ($patients_list as $pt) {
@@ -113,7 +171,12 @@ if ($selected_ipd_id > 0) {
             $total_charges += (float)$item['amount'];
         }
 
-        $balance_due = $total_charges - $advance_paid;
+        $dStmt = $tenant_pdo->prepare("SELECT * FROM ipd_billing_discounts WHERE ipd_id = ? AND org_id = ? AND center_id = ? LIMIT 1");
+        $dStmt->execute([$selected_ipd_id, $org_id, $center_id]);
+        $discount_data = $dStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+        $discount_amount = $discount_data ? min($total_charges, (float)$discount_data['discount_amount']) : 0;
+        $net_charges = max(0, $total_charges - $discount_amount);
+        $balance_due = $net_charges - $advance_paid;
     }
 }
 
@@ -281,28 +344,32 @@ input[type="number"], input[type="date"] { text-transform: none; }
                     </div>
 
                     <!-- FINANCIAL SUMMARY BOXES (HIDDEN IN PRINT) -->
-                    <div class="row g-3 mb-4 bill-summary-container">
-                        <div class="col-md-4 col-4">
-                            <div class="bill-summary-box text-center">
-                                <div class="text-muted small fw-bold mb-1">TOTAL CHARGES</div>
-                                <div class="bill-val text-dark">₹<?= number_format($total_charges, 2) ?></div>
-                            </div>
-                        </div>
-                        <div class="col-md-4 col-4">
-                            <div class="bill-summary-box text-center">
-                                <div class="text-muted small fw-bold mb-1">ADVANCE DEPOSIT</div>
-                                <div class="bill-val text-success">₹<?= number_format($advance_paid, 2) ?></div>
-                            </div>
-                        </div>
-                        <div class="col-md-4 col-4">
-                            <div class="bill-summary-box text-center border-primary bg-primary-subtle">
-                                <div class="text-primary small fw-bold mb-1">BALANCE DUE</div>
-                                <div class="bill-val <?= $balance_due > 0 ? 'text-danger' : 'text-success' ?>">
-                                    ₹<?= number_format($balance_due, 2) ?>
+                    <div class="row g-2 mb-3 bill-summary-container">
+                        <div class="col-md-3 col-6"><div class="bill-summary-box text-center"><div class="text-muted small fw-bold mb-1">TOTAL CHARGES</div><div class="bill-val text-dark">₹<?= number_format($total_charges, 2) ?></div></div></div>
+                        <div class="col-md-3 col-6"><div class="bill-summary-box text-center"><div class="text-muted small fw-bold mb-1">DISCOUNT</div><div class="bill-val text-warning">₹<?= number_format($discount_amount, 2) ?></div></div></div>
+                        <div class="col-md-3 col-6"><div class="bill-summary-box text-center"><div class="text-muted small fw-bold mb-1">ADVANCE DEPOSIT</div><div class="bill-val text-success">₹<?= number_format($advance_paid, 2) ?></div></div></div>
+                        <div class="col-md-3 col-6"><div class="bill-summary-box text-center border-primary bg-primary-subtle"><div class="text-primary small fw-bold mb-1">BALANCE DUE</div><div class="bill-val <?= $balance_due > 0 ? 'text-danger' : 'text-success' ?>">₹<?= number_format(max(0, $balance_due), 2) ?></div></div></div>
+                    </div>
+
+                    <?php if($is_admitted): ?>
+                    <!-- BILL DISCOUNT -->
+                    <div class="card border shadow-none mb-3 add-charge-section print-hide">
+                        <div class="card-header bg-light py-2 px-3 border-bottom"><h6 class="mb-0 fw-bold text-dark small"><i class="bi bi-percent text-warning me-2"></i>BILL DISCOUNT</h6></div>
+                        <div class="card-body p-3">
+                            <form method="POST">
+                                <input type="hidden" name="billing_action" value="save_discount">
+                                <input type="hidden" name="ipd_id" value="<?= $selected_ipd_id ?>">
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-2 col-4"><label class="form-label small fw-bold">DISCOUNT TYPE</label><select name="discount_type" id="discount_type" class="form-select compact-input"><option value="percent" <?= ($discount_data['discount_type'] ?? '') === 'percent' ? 'selected' : '' ?>>PERCENT (%)</option><option value="fixed" <?= ($discount_data['discount_type'] ?? 'fixed') === 'fixed' ? 'selected' : '' ?>>FIXED (₹)</option></select></div>
+                                    <div class="col-md-2 col-4"><label class="form-label small fw-bold">VALUE</label><input type="number" name="discount_value" class="form-control compact-input" min="0" step="0.01" max="<?= ($discount_data['discount_type'] ?? '') === 'percent' ? '100' : '' ?>" value="<?= htmlspecialchars((string)($discount_data['discount_value'] ?? '0')) ?>" required></div>
+                                    <div class="col-md-5 col-8"><label class="form-label small fw-bold">REASON</label><input type="text" name="discount_reason" class="form-control compact-input" maxlength="255" placeholder="DISCOUNT REASON" value="<?= htmlspecialchars($discount_data['reason'] ?? '', ENT_QUOTES) ?>"></div>
+                                    <div class="col-md-3 col-12"><button type="submit" class="btn btn-warning compact-input w-100 fw-bold">SAVE DISCOUNT</button></div>
                                 </div>
-                            </div>
+                                <?php if($discount_data): ?><div class="small text-muted mt-2">CURRENT DISCOUNT: <?= $discount_data['discount_type'] === 'percent' ? number_format((float)$discount_data['discount_value'], 2) . '%' : '₹' . number_format((float)$discount_data['discount_value'], 2) ?> (₹<?= number_format($discount_amount, 2) ?>)</div><?php endif; ?>
+                            </form>
                         </div>
                     </div>
+                    <?php endif; ?>
 
                     <!-- ADD NEW CHARGE (Only if Admitted - Hidden in Print) -->
                     <?php if($is_admitted): ?>
@@ -376,18 +443,11 @@ input[type="number"], input[type="date"] { text-transform: none; }
                                         <?php endforeach; ?>
                                         
                                         <!-- CLEAN TOTALS ROWS (No vertical lines in print) -->
-                                        <tr class="totals-row totals-row-top">
-                                            <td colspan="4" class="text-end fw-bold text-dark" style="font-size: 11pt;">TOTAL CHARGES:</td>
-                                            <td class="text-end pe-2 fw-bold text-dark" style="font-size: 12pt;">₹<?= number_format($total_charges, 2) ?></td>
-                                        </tr>
-                                        <tr class="totals-row">
-                                            <td colspan="4" class="text-end fw-bold text-success" style="font-size: 10pt;">ADVANCE PAID:</td>
-                                            <td class="text-end pe-2 fw-bold text-success" style="font-size: 11pt;">₹<?= number_format($advance_paid, 2) ?></td>
-                                        </tr>
-                                        <tr class="totals-row totals-row-final">
-                                            <td colspan="4" class="text-end fw-bold <?= $balance_due > 0 ? 'text-danger' : 'text-success' ?>" style="font-size: 12pt;">BALANCE DUE:</td>
-                                            <td class="text-end pe-2 fw-bold <?= $balance_due > 0 ? 'text-danger' : 'text-success' ?>" style="font-size: 14pt;">₹<?= number_format($balance_due, 2) ?></td>
-                                        </tr>
+                                        <tr class="totals-row totals-row-top"><td colspan="4" class="text-end fw-bold">TOTAL CHARGES:</td><td class="text-end pe-2 fw-bold">₹<?= number_format($total_charges, 2) ?></td></tr>
+                                        <tr class="totals-row"><td colspan="4" class="text-end fw-bold text-warning">DISCOUNT:</td><td class="text-end pe-2 fw-bold text-warning">- ₹<?= number_format($discount_amount, 2) ?></td></tr>
+                                        <tr class="totals-row"><td colspan="4" class="text-end fw-bold">NET BILL:</td><td class="text-end pe-2 fw-bold">₹<?= number_format($net_charges, 2) ?></td></tr>
+                                        <tr class="totals-row"><td colspan="4" class="text-end fw-bold text-success">ADVANCE PAID:</td><td class="text-end pe-2 fw-bold text-success">₹<?= number_format($advance_paid, 2) ?></td></tr>
+                                        <tr class="totals-row totals-row-final"><td colspan="4" class="text-end fw-bold <?= $balance_due > 0 ? 'text-danger' : 'text-success' ?>">BALANCE DUE:</td><td class="text-end pe-2 fw-bold <?= $balance_due > 0 ? 'text-danger' : 'text-success' ?>">₹<?= number_format(max(0, $balance_due), 2) ?></td></tr>
                                     <?php endif; ?>
                                 </tbody>
                             </table>
