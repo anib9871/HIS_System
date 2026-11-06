@@ -486,7 +486,7 @@ input[type="number"], textarea { text-transform: none; }
                 <div class="tab-content p-3" id="consultationTabsContent">
                     <!-- CLINICAL NOTES TAB -->
                     <div class="tab-pane fade show active" id="notes-pane" role="tabpanel">
-                        <div id="vitalsSection" class="mb-3 d-none">
+                        <div id="vitalsSection" class="mb-3">
                             <div class="dd-section-title mb-2">TODAY'S VITALS</div>
                             <div class="row g-2" id="vitalsContainer"></div>
                         </div>
@@ -626,14 +626,9 @@ let selectedData = { symptom: [], diagnosis: [], investigation: [], advice: [] }
 let medicineList = [];
 
 document.addEventListener('DOMContentLoaded', function () {
+    // Load every active master once. Opening the modal must not re-apply a template
+    // or clear the doctor's current selections.
     fetchMasters();
-    const roundModal = document.getElementById('combinedConsultationModal');
-    if (roundModal) {
-        roundModal.addEventListener('shown.bs.modal', function () {
-            const templateSelect = document.getElementById('prescription_template_id');
-            if (templateSelect && templateSelect.value) fetchMasters().then(() => applyPrescriptionTemplate());
-        });
-    }
     document.querySelectorAll('#combinedConsultationModal input[type="text"], #combinedConsultationModal textarea').forEach(field => {
         field.addEventListener('input', function () {
             const start = this.selectionStart; const end = this.selectionEnd;
@@ -681,7 +676,7 @@ function renderVitalsForm() {
     allMasters.vitals.forEach(v => {
         let unitHtml = v.unit ? ` <span class="text-muted">(${v.unit})</span>` : '';
         vc.innerHTML += `
-            <div class="col-md-3 col-sm-4 col-6 d-none">
+            <div class="col-md-3 col-sm-4 col-6">
                 <div class="dd-vital">
                     <label>${v.vital_name}${unitHtml}</label>
                     <input type="text" class="form-control form-control-sm text-uppercase vital-input border-0 bg-light" data-id="${v.id}" data-key="${v.vital_key}" placeholder="${v.placeholder || ''}">
@@ -923,8 +918,11 @@ function syncPrescription() {
 
 // 🔴 THE APPEND MULTIPLE TEMPLATES FUNCTION
 function applyPrescriptionTemplate() {
-    const tId = document.getElementById('prescription_template_id').value;
-    if (!tId) { Swal.fire('Template required', 'Please select a template first.', 'warning'); return; }
+    const tId = document.getElementById('prescription_template_id')?.value || '';
+    if (!tId) {
+        Swal.fire('Template required', 'Please select a template first.', 'warning');
+        return;
+    }
 
     fetch('?ajax=get_prescription_template&template_id=' + encodeURIComponent(tId))
         .then(res => res.json())
@@ -933,124 +931,56 @@ function applyPrescriptionTemplate() {
                 Swal.fire('Error', data.message || 'Template not found.', 'error');
                 return;
             }
+
             const t = data.template;
-            let schema = {};
-            try {
-                schema = t.custom_fields_schema ? (typeof t.custom_fields_schema === 'string' ? JSON.parse(t.custom_fields_schema) : t.custom_fields_schema) : {};
-            } catch (e) { schema = {}; }
 
-            // Template controls which sections are available. Defaults are used only to infer
-            // configuration/visibility; they are never copied into the patient's clinical selections.
-            const hasSchema = schema && typeof schema === 'object' && Object.keys(schema).length > 0;
-            const schemaEnabled = (keys) => {
-                if (!hasSchema) return null;
-                for (const key of keys) {
-                    if (Object.prototype.hasOwnProperty.call(schema, key)) {
-                        const v = schema[key];
-                        return typeof v === 'object' && v !== null ? v.enabled !== false : v !== false;
-                    }
+            // IMPORTANT:
+            // A template is only a preset. It must never filter the active master lists,
+            // hide clinical sections, or erase patient-specific selections already entered.
+            ['symptomSection', 'diagnosisSection', 'investigationsSection',
+             'adviceSection', 'investigationAdviceRow', 'progressNotesSection'].forEach(id => {
+                document.getElementById(id)?.classList.remove('d-none');
+            });
+
+            // Keep every active vital visible, regardless of which vitals were ticked
+            // in the selected template.
+            document.getElementById('vitalsSection')?.classList.toggle(
+                'd-none', !(allMasters.vitals && allMasters.vitals.length)
+            );
+            document.querySelectorAll('#vitalsContainer > div').forEach(el => el.classList.remove('d-none'));
+
+            // Keep the medicines tab available even when the template has no medicines.
+            document.getElementById('meds-tab')?.closest('li')?.classList.remove('d-none');
+            document.getElementById('meds-pane')?.classList.remove('d-none');
+
+            // Append template medicines without deleting medicines already entered.
+            // The clinical master datalists remain populated from get_masters (all active rows).
+            const existingMedicineKeys = new Set(medicineList.map(item =>
+                String(item.medicine_id || item.medicine_name || item.name || '').trim().toLowerCase()
+            ));
+            (Array.isArray(t.items) ? t.items : []).forEach(item => {
+                const key = String(item.medicine_id || item.master_medicine_name || item.medicine_name || '').trim().toLowerCase();
+                if (!key || !existingMedicineKeys.has(key)) {
+                    addMedicine(item);
+                    if (key) existingMedicineKeys.add(key);
                 }
-                return null;
-            };
-            const hasText = value => typeof value === 'string' && value.trim() !== '';
-            // Template editor stores selected vitals as newline-separated keys (bp\npulse),
-            // not JSON. Accept both formats so the IPD desk follows the saved template exactly.
-            const parseList = value => {
-                if (Array.isArray(value)) return value;
-                if (value === null || value === undefined || value === '') return [];
-                if (typeof value === 'object') return Object.values(value);
-                const raw = String(value).trim();
-                if (!raw) return [];
-                try {
-                    const parsed = JSON.parse(raw);
-                    if (Array.isArray(parsed)) return parsed;
-                    if (parsed && typeof parsed === 'object') return Object.values(parsed);
-                } catch (e) {}
-                return raw.split(/[\r\n,;]+/).map(v => v.trim()).filter(Boolean);
-            };
-            const parseJsonArray = parseList;
-            const configured = {
-                symptom: schemaEnabled(['symptom', 'symptoms', 'complaints']) ?? hasText(t.default_symptoms),
-                diagnosis: schemaEnabled(['diagnosis', 'diagnoses']) ?? hasText(t.default_diagnosis),
-                investigation: schemaEnabled(['investigation', 'investigations', 'tests']) ?? hasText(t.default_investigations),
-                advice: schemaEnabled(['advice', 'advices']) ?? hasText(t.default_advice),
-                vitals: parseList(t.default_vitals).length > 0,
-                medicines: schemaEnabled(['medicines', 'medicine', 'prescription']) ?? (Array.isArray(t.items) && t.items.length > 0),
-                notes: schemaEnabled(['doctor_notes', 'notes', 'progress_notes']) ?? false
-            };
-
-            // Every newly opened template starts with a clean patient-specific selection.
-            ['symptom','diagnosis','investigation','advice'].forEach(type => {
-                selectedData[type] = [];
-                renderChips(type);
-                const input = document.getElementById(type + 'Search');
-                if (input) { input.value = ''; input.blur(); }
             });
-            medicineList = [];
-            renderMedicineTable();
-            document.querySelectorAll('.vital-input').forEach(input => input.value = '');
-            document.getElementById('doctor_notes').value = '';
 
-            const sectionMap = {
-                symptom: [document.getElementById('symptomSection')],
-                diagnosis: [document.getElementById('diagnosisSection')],
-                investigation: [document.getElementById('investigationsSection')],
-                advice: [document.getElementById('adviceSection')]
-            };
-            Object.keys(sectionMap).forEach(key => {
-                sectionMap[key].forEach(el => { if (el) el.classList.toggle('d-none', !configured[key]); });
+            // Rebuild datalists from the complete master response after applying a template.
+            populateDatalist('symptomMasterList', allMasters.symptoms || [], 'symptom_name');
+            populateDatalist('diagnosisMasterList', allMasters.diagnoses || [], 'diagnosis_name');
+            populateDatalist('investigationMasterList', allMasters.investigations || [], 'investigation_name');
+            populateDatalist('adviceMasterList', allMasters.advices || [], 'advice_name');
+            populateDatalist('medicineMasterList', allMasters.medicines || [], 'medicine_name');
+
+            syncPrescription();
+            Swal.fire({
+                icon: 'success',
+                title: 'Template applied',
+                text: 'Template medicines added. All active clinical masters and sections remain available.',
+                timer: 1800,
+                showConfirmButton: false
             });
-            const iaRow = document.getElementById('investigationAdviceRow');
-            if (iaRow) iaRow.classList.toggle('d-none', !configured.investigation && !configured.advice);
-
-            const notesBox = document.getElementById('progressNotesSection');
-            if (notesBox) notesBox.classList.toggle('d-none', !configured.notes);
-            const medsTab = document.getElementById('meds-tab');
-            const medsPane = document.getElementById('meds-pane');
-            if (medsTab) medsTab.closest('li')?.classList.toggle('d-none', !configured.medicines);
-            if (medsPane) medsPane.classList.toggle('d-none', !configured.medicines);
-            // If the current tab was hidden, return to Clinical Notes.
-            if (!configured.medicines) bootstrap.Tab.getOrCreateInstance(document.getElementById('notes-tab')).show();
-
-            // Show only vitals configured for this template, and never prefill their values.
-            const vitalKeys = parseList(t.default_vitals).map(v => {
-                if (typeof v === 'object' && v !== null) return [v.id, v.vital_id, v.vital_key, v.key, v.name, v.vital_name].filter(Boolean);
-                return [String(v)];
-            }).flat().map(v => String(v).trim()).filter(Boolean);
-            const normalizeVital = value => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-            const vitalAliases = {
-                bp: ['bp', 'bloodpressure', 'bloodpressuremmhg', 'bloodpressuremm'],
-                pulse: ['pulse', 'pulserate', 'heartrate', 'heartratebpm'],
-                temperature: ['temperature', 'temp', 'bodytemperature'],
-                spo2: ['spo2', 'oxygen', 'oxygensaturation', 'spo2percent'],
-                weight: ['weight', 'weightkg', 'bodyweight'],
-                height: ['height', 'heightcm', 'bodyheight']
-            };
-            const expandVitalKey = value => {
-                const normalized = normalizeVital(value);
-                const group = Object.keys(vitalAliases).find(k => vitalAliases[k].includes(normalized) || k === normalized);
-                return new Set([normalized, ...(group ? vitalAliases[group] : [])]);
-            };
-            const selectedVitalKeys = new Set();
-            vitalKeys.forEach(key => expandVitalKey(key).forEach(alias => selectedVitalKeys.add(alias)));
-            let visibleVitalCount = 0;
-            document.querySelectorAll('.vital-input').forEach(input => {
-                const parent = input.closest('.col-md-3, .col-sm-4, .col-6');
-                const vital = (allMasters.vitals || []).find(v => String(v.vital_key || '') === String(input.dataset.key || ''));
-                const candidates = [input.dataset.id, input.dataset.key, vital?.id, vital?.vital_name].filter(Boolean);
-                const visible = configured.vitals && selectedVitalKeys.size > 0 && candidates.some(candidate => {
-                    for (const alias of expandVitalKey(candidate)) if (selectedVitalKeys.has(alias)) return true;
-                    return false;
-                });
-                if (parent) parent.classList.toggle('d-none', !visible);
-                if (visible) visibleVitalCount++;
-            });
-            const vitalSection = document.getElementById('vitalsSection');
-            if (vitalSection) vitalSection.classList.toggle('d-none', visibleVitalCount === 0);
-
-            // A template can be selected with its defaults empty; keep the UI empty rather than
-            // guessing clinical decisions. Explicit schema-enabled sections remain selectable.
-            Swal.fire({icon:'success', title:'Template applied', text:'Template layout loaded. Choose only the symptoms, diagnosis, tests, advice and medicines required for this patient.', timer:2200, showConfirmButton:false});
         })
         .catch(() => Swal.fire('Error', 'Unable to load template. Please try again.', 'error'));
 }
