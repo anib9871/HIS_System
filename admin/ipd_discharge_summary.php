@@ -185,11 +185,49 @@ input[type="date"], textarea { text-transform: none; }
     .print-bill-container .border-start, .print-bill-container .border-end { border-color: #000 !important; }
     .text-success, .text-danger { color: #000 !important; }
     
-    /* Compact Signatures */
-    .print-signatures { display: flex; justify-content: space-between; margin-top: 30px; page-break-inside: avoid; }
-    .print-signatures > div { width: 35%; text-align: center; }
-    .print-signatures hr { border-top: 1px solid #000; margin: 0 0 5px 0; }
-    .print-signatures span { font-size: 8pt; }
+    /* Professional hospital discharge document */
+    @page { size: A4 portrait; margin: 13mm 14mm 14mm; }
+    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    body { font-family: Arial, Helvetica, sans-serif !important; font-size: 9.5pt !important; line-height: 1.42 !important; color: #172033 !important; }
+    .row.justify-content-center, .col-md-11, .col-lg-10 { display: block !important; width: 100% !important; max-width: 100% !important; margin: 0 !important; padding: 0 !important; }
+    .card, .card-body { border: 0 !important; box-shadow: none !important; padding: 0 !important; margin: 0 !important; }
+    .invoice-header { display: block !important; text-align: left !important; position: relative; border: 0 !important; border-bottom: 3px solid #173b67 !important; padding: 0 0 11px !important; margin: 0 0 15px !important; }
+    .invoice-header h2 { color: #173b67 !important; font-size: 21pt !important; font-weight: 800 !important; letter-spacing: .2px !important; margin: 0 0 3px !important; }
+    .invoice-header h6 { color: #263b55 !important; font-size: 11pt !important; font-weight: 700 !important; letter-spacing: 1.1px !important; margin: 0 !important; }
+    .invoice-header:after { content: "INPATIENT DEPARTMENT  |  CLINICAL RECORD"; display: block; color: #64748b; font-size: 7.5pt; font-weight: 700; letter-spacing: .8px; margin-top: 5px; }
+    .dd-patient-banner { display: flex !important; justify-content: space-between !important; align-items: flex-start !important; gap: 16px !important; flex-wrap: nowrap !important; background: #f1f5f9 !important; border: 1px solid #cbd5e1 !important; border-left: 4px solid #2563eb !important; border-radius: 5px !important; padding: 11px 13px !important; margin: 0 0 15px !important; page-break-inside: avoid; }
+    .dd-patient-banner .fs-5 { font-size: 13pt !important; color: #14243a !important; margin-bottom: 3px !important; }
+    .dd-patient-banner .text-success { color: #334155 !important; font-size: 8.5pt !important; }
+    .dd-patient-banner .text-danger { color: #173b67 !important; font-size: 9pt !important; }
+    .dd-patient-banner .text-muted, .dd-patient-banner .text-dark { color: #475569 !important; }
+    .dd-patient-banner .print-only { display: block !important; margin-top: 5px !important; }
+    .row.g-4 { --bs-gutter-x: 12px !important; --bs-gutter-y: 10px !important; margin-top: 0 !important; }
+    .row.g-4 > [class*="col-"] { width: 50% !important; flex: 0 0 50% !important; }
+    .row.g-4 > .col-md-12 { width: 100% !important; flex: 0 0 100% !important; }
+    .form-label { display: block !important; color: #173b67 !important; font-size: 8pt !important; font-weight: 800 !important; letter-spacing: .45px !important; border: 0 !important; margin: 0 0 4px !important; padding: 0 0 3px !important; border-bottom: 1px solid #dbe3ec !important; }
+    .form-control, .form-select, textarea.auto-resize { display: block !important; width: 100% !important; min-height: 30px !important; height: auto !important; border: 1px solid #d9e1ea !important; border-radius: 3px !important; background: #fff !important; color: #1e293b !important; padding: 6px 8px !important; font-size: 9pt !important; font-weight: 500 !important; line-height: 1.4 !important; white-space: pre-wrap !important; overflow: visible !important; box-shadow: none !important; }
+    textarea.auto-resize { resize: none !important; }
+    .print-only { display: block !important; }
+    .print-hide, .sidebar, .topbar, header, nav, footer, .btn, .card-header, .add-med-section, .print-hide, .table .print-hide { display: none !important; }
+    .mt-4 { margin-top: 12px !important; }
+    .mb-3 { margin-bottom: 9px !important; }
+    .p-3 { padding: 9px !important; }
+    .print-med-container, .print-bill-container { background: #fff !important; border: 1px solid #cbd5e1 !important; border-radius: 5px !important; padding: 10px 11px !important; margin-top: 13px !important; page-break-inside: avoid; }
+    .print-med-container h6, .print-bill-container h6 { color: #173b67 !important; font-size: 9pt !important; font-weight: 800 !important; letter-spacing: .35px !important; border-bottom: 1px solid #dbe3ec; padding-bottom: 6px; margin-bottom: 7px !important; }
+    #medTable { width: 100% !important; border-collapse: collapse !important; margin: 0 !important; }
+    #medTable th { background: #edf2f7 !important; color: #173b67 !important; font-size: 8pt !important; font-weight: 800 !important; border: 1px solid #cbd5e1 !important; padding: 6px 7px !important; }
+    #medTable td { color: #1e293b !important; font-size: 8.5pt !important; border: 1px solid #dbe3ec !important; padding: 6px 7px !important; }
+    .print-bill-container .row { display: flex !important; align-items: stretch !important; }
+    .print-bill-container .row > div { flex: 1 1 33.333% !important; width: 33.333% !important; }
+    .print-bill-container .fw-bold.text-muted { color: #64748b !important; font-size: 7.5pt !important; letter-spacing: .35px; }
+    .print-bill-container .fs-6 { color: #14243a !important; font-size: 12pt !important; font-weight: 800 !important; }
+    .print-bill-container .border-start, .print-bill-container .border-end { border-color: #dbe3ec !important; }
+    .text-success, .text-danger { color: #172033 !important; }
+    .print-signatures { display: flex !important; justify-content: space-between !important; gap: 35px !important; margin-top: 42px !important; page-break-inside: avoid; }
+    .print-signatures > div { width: 42% !important; text-align: center !important; }
+    .print-signatures hr { border: 0 !important; border-top: 1px solid #64748b !important; margin: 0 0 6px !important; }
+    .print-signatures span { color: #334155 !important; font-size: 7.5pt !important; font-weight: 700 !important; letter-spacing: .3px; }
+    .auto-resize, .print-med-container, .print-bill-container, .print-signatures { page-break-inside: avoid; }
 }
 </style>
 
@@ -274,8 +312,9 @@ input[type="date"], textarea { text-transform: none; }
                     
                     <!-- HOSPITAL PRINT HEADER -->
                     <div class="print-only invoice-header">
-                        <h2><?= htmlspecialchars($_SESSION['org_name'] ?? 'HOSPITAL INVOICE') ?></h2>
+                        <h2><?= htmlspecialchars($_SESSION['org_name'] ?? 'HOSPITAL') ?></h2>
                         <h6>CLINICAL DISCHARGE SUMMARY</h6>
+                        <div style="font-size:8pt;color:#64748b;margin-top:5px;font-weight:600;">INPATIENT CARE &amp; MEDICAL RECORD</div>
                     </div>
 
                     <!-- PATIENT BANNER -->
@@ -285,7 +324,10 @@ input[type="date"], textarea { text-transform: none; }
                             <div class="text-success font-monospace fw-bold" style="font-size: 12px;"><?= htmlspecialchars($selected['ipd_no']) ?> | <?= htmlspecialchars($selected['uhid']) ?></div>
                             <div class="small text-muted mt-1 print-only" style="font-size:10px;">
                                 <strong>ADMITTED:</strong> <?= date('d-M-Y h:i A', strtotime($selected['admission_date'])) ?><br>
-                                <strong>GENDER/AGE:</strong> <?= htmlspecialchars($selected['gender']) ?> / <?= htmlspecialchars($selected['age']) ?> YRS
+                                <?php if(!empty($selected['discharge_date'])): ?>
+                                    <strong>DISCHARGED:</strong> <?= date('d-M-Y h:i A', strtotime($selected['discharge_date'])) ?><br>
+                                <?php endif; ?>
+                                <strong>GENDER / AGE:</strong> <?= htmlspecialchars($selected['gender']) ?> / <?= htmlspecialchars($selected['age']) ?> YRS
                             </div>
                         </div>
                         <div class="text-end d-flex flex-column align-items-end">
