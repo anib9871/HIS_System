@@ -285,12 +285,14 @@ input[type="date"], textarea { text-transform: none; }
                                                 <?php endif; ?>
                                             </td>
                                             <td class="text-end pe-3">
-                                                <a href="?ipd_id=<?= $pt['ipd_id'] ?>" class="btn btn-sm btn-outline-primary py-1 px-2 fw-bold" style="font-size: 10px;" title="Edit Summary">
-                                                    <i class="bi bi-pencil me-1"></i> BUILD
-                                                </a>
-                                                <a href="?ipd_id=<?= $pt['ipd_id'] ?>&print=1" class="btn btn-sm btn-outline-dark py-1 px-2 fw-bold" style="font-size: 10px;" title="Print Summary">
-                                                    <i class="bi bi-printer me-1"></i> PRINT
-                                                </a>
+                                                <div class="d-flex justify-content-end align-items-center gap-2 flex-nowrap">
+                                                    <a href="?ipd_id=<?= $pt['ipd_id'] ?>" class="btn btn-sm btn-outline-primary py-1 px-2 fw-bold" style="font-size: 10px; white-space: nowrap;" title="Edit Summary">
+                                                        <i class="bi bi-pencil me-1"></i> BUILD
+                                                    </a>
+                                                    <a href="?ipd_id=<?= $pt['ipd_id'] ?>&print=1" class="btn btn-sm btn-outline-dark py-1 px-2 fw-bold" style="font-size: 10px; white-space: nowrap;" title="Print Summary">
+                                                        <i class="bi bi-printer me-1"></i> PRINT
+                                                    </a>
+                                                </div>
                                             </td>
                                         </tr>
                                     <?php endforeach; ?>
