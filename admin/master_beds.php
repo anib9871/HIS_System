@@ -27,28 +27,45 @@ if (isset($_GET['check_name'])) {
     exit;
 }
 
-// Save / Update
+// Save / Update (AJAX: page refresh ke bina)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_bed'])) {
-    $room_id     = (int)($_POST['room_id'] ?? 0);
-    // FULL CAPITALIZATION - Text hamesha uppercase mein save hoga
-    $bed_no      = strtoupper(trim($_POST['bed_no'] ?? ''));
-    $status      = isset($_POST['status']) ? 1 : 0;
-    $edit_id     = (int)($_POST['edit_id'] ?? 0);
+    $isAjax = strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest';
+    $room_id = (int)($_POST['room_id'] ?? 0);
+    $bed_no = strtoupper(trim($_POST['bed_no'] ?? ''));
+    $status = isset($_POST['status']) ? 1 : 0;
+    $edit_id = (int)($_POST['edit_id'] ?? 0);
 
-    if ($room_id === 0 or empty($bed_no)) {$_SESSION['swal_error'] = "Room selection and Bed No are required.";
-    } else {
-        try {
-            if ($edit_id > 0) {
-                $stmt =$tenant_pdo->prepare("UPDATE master_beds SET room_id = ?, bed_no = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
-                $stmt->execute([$room_id, $bed_no,$status, $edit_id,$org_id, $center_id]);$_SESSION['swal_success'] = "Bed updated successfully.";
-            } else {
-                $stmt =$tenant_pdo->prepare("INSERT INTO master_beds (org_id, center_id, room_id, bed_no, status, created_by) VALUES (?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$org_id, $center_id,$room_id, $bed_no,$status, $created_by]);$_SESSION['swal_success'] = "Bed added successfully.";
-            }
-            header("Location: master_beds.php");
-            exit;
-        } catch (PDOException $e) {$_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
+    try {
+        if (!$room_id || $bed_no === '') {
+            throw new Exception("Room selection and Bed No are required.");
         }
+        if ($edit_id > 0) {
+            $stmt = $tenant_pdo->prepare("UPDATE master_beds SET room_id=?, bed_no=?, status=? WHERE id=? AND org_id=? AND center_id=?");
+            $stmt->execute([$room_id, $bed_no, $status, $edit_id, $org_id, $center_id]);
+            $id = $edit_id;
+            $message = "Bed updated successfully.";
+        } else {
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_beds (org_id, center_id, room_id, bed_no, status, created_by) VALUES (?, ?, ?, ?, ?, ?)");
+            $stmt->execute([$org_id, $center_id, $room_id, $bed_no, $status, $created_by]);
+            $id = (int)$tenant_pdo->lastInsertId();
+            $message = "Bed added successfully.";
+        }
+        if ($isAjax) {
+            $rowStmt = $tenant_pdo->prepare("SELECT bd.*, r.room_no, r.building_id, r.block_id, r.floor_id, b.building_name, bk.block_name, f.floor_name FROM master_beds bd JOIN master_rooms r ON bd.room_id=r.id JOIN master_buildings b ON r.building_id=b.id LEFT JOIN master_blocks bk ON r.block_id=bk.id JOIN master_floors f ON r.floor_id=f.id WHERE bd.id=? AND bd.org_id=? AND bd.center_id=? LIMIT 1");
+            $rowStmt->execute([$id, $org_id, $center_id]);
+            header('Content-Type: application/json');
+            echo json_encode(['success'=>true, 'message'=>$message, 'row'=>$rowStmt->fetch(PDO::FETCH_ASSOC)]);
+            exit;
+        }
+        $_SESSION['swal_success'] = $message;
+        header("Location: master_beds.php"); exit;
+    } catch (Throwable $e) {
+        if ($isAjax) {
+            http_response_code(422); header('Content-Type: application/json');
+            echo json_encode(['success'=>false, 'message'=>$e->getMessage()]);
+            exit;
+        }
+        $_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
     }
 }
 
@@ -105,7 +122,7 @@ require_once __DIR__ . '/layout_header.php';
                 <span class="fw-bold small text-dark" id="formTitle"><i class="bi bi-hospital text-primary me-1"></i> Add Bed</span>
             </div>
             <div class="card-body p-3">
-                <form method="POST" action="">
+                <form method="POST" action="" id="bedForm">
                     <input type="hidden" name="action_bed" value="1">
                     <input type="hidden" name="edit_id" id="edit_id" value="0">
 
@@ -188,13 +205,13 @@ require_once __DIR__ . '/layout_header.php';
                                 <th class="text-end pe-3">Action</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody id="bedsTbody">
                             <?php if (empty($beds)): ?>
                                 <tr><td colspan="6" class="text-center py-4 text-muted">No beds configured.</td></tr>
                             <?php else: ?>
                                 <?php foreach ($beds as$bd): ?>
                                     <?php $is_act = (int)$bd['status'] === 1; ?>
-                                    <tr>
+                                    <tr id="bed-row-<?= (int)$bd['id'] ?>">
                                         <td class="ps-3 fw-bold text-primary font-monospace text-uppercase"><?= htmlspecialchars($bd['bed_no']) ?></td>
                                         <td class="text-uppercase fw-semibold"><?= htmlspecialchars($bd['room_no']) ?></td>
                                         <td class="text-uppercase"><?= htmlspecialchars($bd['floor_name']) ?></td>
@@ -347,6 +364,41 @@ function confirmToggle(id, currentStatus) {
         }
     });
 }
+
+// AJAX save: retain selected building/block/floor/ward for rapid bed setup.
+document.getElementById('bedForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const form = this, btn = document.getElementById('btnSubmit');
+    if (btn.disabled) return;
+    const oldText = btn.textContent; btn.disabled = true; btn.textContent = 'Saving...';
+    try {
+        const res = await fetch(window.location.href, {method:'POST', body:new FormData(form), headers:{'X-Requested-With':'XMLHttpRequest'}});
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.message || 'Unable to save bed');
+        const r = data.row, esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        const tr = document.createElement('tr'); tr.id = 'bed-row-' + r.id;
+        tr.innerHTML = `<td class="ps-3 fw-bold text-primary font-monospace text-uppercase">${esc(r.bed_no)}</td>
+          <td class="text-uppercase fw-semibold">${esc(r.room_no)}</td>
+          <td class="text-uppercase">${esc(r.floor_name)}</td>
+          <td><small class="text-muted text-uppercase">${esc(r.building_name)} ${r.block_name ? '('+esc(r.block_name)+')' : ''}</small></td>
+          <td><a href="javascript:void(0)" class="badge text-decoration-none ${Number(r.status)===1?'bg-success-subtle text-success border border-success':'bg-danger-subtle text-danger border border-danger'}">${Number(r.status)===1?'Active':'Inactive'}</a></td>
+          <td class="text-end pe-3"><button type="button" class="btn btn-outline-primary btn-sm py-0 px-2"><i class="bi bi-pencil"></i></button></td>`;
+        const existing = document.getElementById('bed-row-' + r.id);
+        if (existing) existing.replaceWith(tr); else document.getElementById('bedsTbody').prepend(tr);
+        tr.querySelector('button').addEventListener('click', () => editRow(r));
+        const empty = document.querySelector('#bedsTbody tr td[colspan="6"]'); if (empty) empty.parentElement.remove();
+        document.querySelector('.col-lg-8 .card-header .badge').textContent = document.querySelectorAll('#bedsTbody tr[id^="bed-row-"]').length + ' Records';
+        document.getElementById('edit_id').value = '0';
+        document.getElementById('bed_no').value = '';
+        document.getElementById('formTitle').innerHTML = '<i class="bi bi-hospital text-primary me-1"></i> Add Bed';
+        btn.textContent = 'Save Bed';
+        document.getElementById('name_error').style.display = 'none';
+        Swal.fire({toast:true,position:'top-end',icon:'success',title:data.message,showConfirmButton:false,timer:1800});
+        document.getElementById('bed_no').focus();
+    } catch(err) { Swal.fire({icon:'error',title:'Save failed',text:err.message}); }
+    finally { btn.disabled = false; if (btn.textContent === 'Saving...') btn.textContent = oldText; }
+});
+
 </script>
 
 <script>
