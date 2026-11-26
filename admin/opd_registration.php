@@ -4,6 +4,7 @@
 date_default_timezone_set('Asia/Kolkata');
 $page_title = "OPD Payment";
 require_once __DIR__ . '/../config/tenant_db.php';
+require_once __DIR__ . '/../config/audit_helper.php';
 require_once __DIR__ . '/../config/alerts.php'; 
 
 // ==============================================================
@@ -463,9 +464,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
 
             if ($post_edit_id > 0) {
                 // UPDATE EXISTING RECORD
-                $up_visit = $tenant_pdo->prepare("SELECT patient_id FROM opd_visits WHERE visit_id = ? AND org_id = ?");
+                $up_visit = $tenant_pdo->prepare("SELECT * FROM opd_visits WHERE visit_id = ? AND org_id = ?");
                 $up_visit->execute([$post_edit_id, $org_id]);
-                $patient_id = $up_visit->fetchColumn();
+                $oldVisitAudit = $up_visit->fetch(PDO::FETCH_ASSOC);
+                $patient_id = (int)($oldVisitAudit['patient_id'] ?? 0);
 
                 $uhid_stmt = $tenant_pdo->prepare("SELECT uhid FROM patient_master WHERE patient_id = ? AND org_id = ? LIMIT 1");
                 $uhid_stmt->execute([$patient_id, $org_id]);
@@ -474,6 +476,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     throw new Exception("Patient UHID was not found.");
                 }
 
+                $oldPatientStmt = $tenant_pdo->prepare("SELECT fullname,dob,gender,age,mobile FROM patient_master WHERE patient_id=? AND org_id=? LIMIT 1");
+                $oldPatientStmt->execute([$patient_id,$org_id]);
+                $oldPatientAudit = $oldPatientStmt->fetch(PDO::FETCH_ASSOC) ?: [];
                 $tenant_pdo->prepare("UPDATE patient_master SET fullname = ?, dob = ?, gender = ?, age = ?, mobile = ? WHERE patient_id = ? AND org_id = ?")
                            ->execute([$fullname, $dob, $gender, $age, $mobile, $patient_id, $org_id]);
 
@@ -484,6 +489,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                         payment_breakdown = ?, payment_status = ? 
                     WHERE visit_id = ? AND org_id = ?
                 ")->execute([$visit_date, $payment_date, $doctor_id, $department_id, $service_id, $category_id, $insurance_id, $fee, $discount, $discount_percent, $remark, $pay_mode, $total_paid, $change_ret, $pay_breakdown, $pay_status, $post_edit_id, $org_id]);
+                audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'module_name'=>'OPD REGISTRATION','action_type'=>'UPDATE','table_name'=>'opd_visits','record_id'=>$post_edit_id,'patient_id'=>$patient_id,'transaction_id'=>$post_edit_id,'reason'=>'OPD registration / bill edited','changes'=>[['field_name'=>'consultation_fee','old_value'=>$oldVisitAudit['consultation_fee']??null,'new_value'=>$fee],['field_name'=>'discount_amount','old_value'=>$oldVisitAudit['discount_amount']??null,'new_value'=>$discount],['field_name'=>'amount_paid','old_value'=>$oldVisitAudit['amount_paid']??null,'new_value'=>$total_paid],['field_name'=>'payment_status','old_value'=>$oldVisitAudit['payment_status']??null,'new_value'=>$pay_status],['field_name'=>'patient_name','old_value'=>$oldPatientAudit['fullname']??null,'new_value'=>$fullname],['field_name'=>'mobile','old_value'=>$oldPatientAudit['mobile']??null,'new_value'=>$mobile]]]);
 
                 if ($appointment_id > 0) {
                     $tenant_pdo->prepare("
@@ -521,7 +527,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     $dupVisit->execute([$org_id, $center_id, $appointment_id]);
                     $alreadyBilled = $dupVisit->fetch(PDO::FETCH_ASSOC);
                     if ($alreadyBilled) {
-                        throw new Exception("IS APPOINTMENT KA OPD BILL PEHLE HI BAN CHUKA HAI (Receipt: " . (string)($alreadyBilled['receipt_no'] ?? $alreadyBilled['visit_id']) . "). Duplicate bill nahi banaya gaya.");
+                        throw new Exception("An OPD bill has already been created for this appointment (Receipt No: " . (string)($alreadyBilled['receipt_no'] ?? $alreadyBilled['visit_id']) . "). A duplicate bill was not created.");
                     }
 
                     if (!empty($appt_row['uhid'])) {
@@ -592,7 +598,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     $legacyDup->execute([$org_id, $center_id, $patient_id, $doctor_id, $visit_date]);
                     $legacyExisting = $legacyDup->fetch(PDO::FETCH_ASSOC);
                     if ($legacyExisting) {
-                        throw new Exception("IS APPOINTMENT KA BILL/OPD VISIT PEHLE HI SAVE HAI (Receipt: " . (string)($legacyExisting['receipt_no'] ?? $legacyExisting['visit_id']) . "). Duplicate entry rok di gayi.");
+                        throw new Exception("A bill/OPD visit has already been saved for this appointment (Receipt No: " . (string)($legacyExisting['receipt_no'] ?? $legacyExisting['visit_id']) . "). The duplicate entry was prevented.");
                     }
                 }
 
@@ -684,6 +690,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register_patient'])) 
                     }
                 }
 
+                audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'module_name'=>'OPD REGISTRATION','action_type'=>'INSERT','table_name'=>'opd_visits','record_id'=>$new_visit_id,'patient_id'=>$patient_id,'transaction_id'=>$new_visit_id,'reason'=>'New OPD registration and bill created','changes'=>[['field_name'=>'receipt_no','old_value'=>null,'new_value'=>$next_receipt_no],['field_name'=>'token_no','old_value'=>null,'new_value'=>$next_token],['field_name'=>'consultation_fee','old_value'=>null,'new_value'=>$fee],['field_name'=>'discount_amount','old_value'=>null,'new_value'=>$discount],['field_name'=>'amount_paid','old_value'=>null,'new_value'=>$total_paid]]]);
                 if ($appointment_id > 0) {
                     $tenant_pdo->prepare("
                         UPDATE opd_appointments
