@@ -674,7 +674,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_refresh'])) {
 
         } elseif ($type === 'frequency') {
 
-            $data = $tenant_pdo->query("SELECT id, frequency_name as name, status FROM frequency_master WHERE org_id = $org_id AND center_id = $center_id ORDER BY frequency_name ASC")->fetchAll(PDO::FETCH_ASSOC);
+            $data = $tenant_pdo->query("SELECT id, frequency_name as name, frequency_code as code, status FROM frequency_master WHERE org_id = $org_id AND center_id = $center_id ORDER BY frequency_name ASC")->fetchAll(PDO::FETCH_ASSOC);
 
         } elseif ($type === 'meal') {
 
@@ -873,7 +873,7 @@ if (isset($_GET['toggle_status'])) {
 
 $units = $tenant_pdo->query("SELECT id, unit_name, status FROM master_units WHERE org_id = $org_id AND center_id = $center_id ORDER BY unit_name ASC")->fetchAll() ?: [];
 
-$frequencies = $tenant_pdo->query("SELECT id, frequency_name, status FROM frequency_master WHERE org_id = $org_id AND center_id = $center_id ORDER BY frequency_name ASC")->fetchAll() ?: [];
+$frequencies = $tenant_pdo->query("SELECT id, frequency_name, frequency_code, status FROM frequency_master WHERE org_id = $org_id AND center_id = $center_id ORDER BY frequency_name ASC")->fetchAll() ?: [];
 
 $meals = $tenant_pdo->query("SELECT id, meal_name, status FROM master_meals WHERE org_id = $org_id AND center_id = $center_id ORDER BY meal_name ASC")->fetchAll() ?: [];
 
@@ -889,7 +889,7 @@ $durations = $tenant_pdo->query("SELECT id, duration_name, status FROM master_du
 
 $medicinesStmt = $tenant_pdo->prepare("
 
-    SELECT m.*, u.unit_name, f.frequency_name, ml.meal_name, d.duration_name
+    SELECT m.*, u.unit_name, f.frequency_name, f.frequency_code, ml.meal_name, d.duration_name
 
     FROM master_medicines m
 
@@ -994,7 +994,7 @@ require_once __DIR__ . '/layout_header.php';
 
                                     <?php foreach ($frequencies as $f): ?>
 
-                                        <option value="<?= (int)$f['id'] ?>" <?= (int)$f['status'] !== 1 ? 'class="text-muted"' : '' ?>><?= htmlspecialchars($f['frequency_name']) ?></option>
+                                        <option value="<?= (int)$f['id'] ?>" <?= (int)$f['status'] !== 1 ? 'class="text-muted"' : '' ?>><?= htmlspecialchars(trim((string)($f['frequency_code'] ?? '')) !== '' ? $f['frequency_code'] : $f['frequency_name']) ?></option>
 
                                     <?php endforeach; ?>
 
@@ -1296,7 +1296,7 @@ require_once __DIR__ . '/layout_header.php';
 
                                     <td class="text-uppercase text-secondary"><?= htmlspecialchars($m['unit_name'] ?? '') ?: '-' ?></td>
 
-                                    <td class="text-uppercase text-secondary"><?= htmlspecialchars($m['frequency_name'] ?? '') ?: '-' ?></td>
+                                    <td class="text-uppercase text-secondary font-monospace"><?= htmlspecialchars(trim((string)($m['frequency_code'] ?? '')) !== '' ? $m['frequency_code'] : ($m['frequency_name'] ?? '')) ?: '-' ?></td>
 
                                     <td class="text-uppercase text-secondary"><?= htmlspecialchars($m['meal_name'] ?? '') ?: '-' ?></td>
 
@@ -1742,7 +1742,7 @@ async function refreshDropdown(type) {
 
                 opt.value = item.id;
 
-                opt.textContent = item.name + (parseInt(item.status) !== 1 ? ' (INACTIVE)' : '');
+                opt.textContent = (type === 'frequency' && item.code ? item.code : item.name) + (parseInt(item.status) !== 1 ? ' (INACTIVE)' : '');
 
                 if (parseInt(item.status) !== 1) opt.className = 'text-muted';
 
