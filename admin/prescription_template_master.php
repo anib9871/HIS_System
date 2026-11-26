@@ -1024,6 +1024,7 @@ require_once __DIR__ . '/layout_header.php';
                                             <button type="button" class="btn btn-sm btn-link py-0 px-1 text-success" onclick="openQuickAdd('symptom', 'ADD NEW SYMPTOM')" title="Add New"><i class="bi bi-plus-circle"></i></button>
                                         </div>
                                     </div>
+                                    <div class="pt-help mb-1">USE CTRL TO SELECT MULTIPLE OPTIONS.</div>
                                     <input type="text" class="form-control form-control-sm mb-1" placeholder="Search Symptoms..." onkeyup="filterSelect(this, 'symptom_master_select')">
                                     <select id="symptom_master_select" class="form-select form-select-sm" multiple size="6">
                                         <?php if (empty($symptoms)): ?><option disabled>NO SYMPTOMS FOUND</option>
@@ -1040,6 +1041,7 @@ require_once __DIR__ . '/layout_header.php';
                                             <button type="button" class="btn btn-sm btn-link py-0 px-1 text-success" onclick="openQuickAdd('diagnosis', 'ADD NEW DIAGNOSIS')" title="Add New"><i class="bi bi-plus-circle"></i></button>
                                         </div>
                                     </div>
+                                    <div class="pt-help mb-1">USE CTRL TO SELECT MULTIPLE OPTIONS.</div>
                                     <input type="text" class="form-control form-control-sm mb-1" placeholder="Search Diagnosis..." onkeyup="filterSelect(this, 'diagnosis_master_select')">
                                     <select id="diagnosis_master_select" class="form-select form-select-sm" multiple size="6">
                                         <?php if (empty($diagnoses)): ?><option disabled>NO DIAGNOSES FOUND</option>
@@ -1056,6 +1058,7 @@ require_once __DIR__ . '/layout_header.php';
                                             <button type="button" class="btn btn-sm btn-link py-0 px-1 text-success" onclick="openQuickAdd('investigation', 'ADD NEW INVESTIGATION')" title="Add New"><i class="bi bi-plus-circle"></i></button>
                                         </div>
                                     </div>
+                                    <div class="pt-help mb-1">USE CTRL TO SELECT MULTIPLE OPTIONS.</div>
                                     <input type="text" class="form-control form-control-sm mb-1" placeholder="Search Investigations..." onkeyup="filterSelect(this, 'investigation_master_select')">
                                     <select id="investigation_master_select" class="form-select form-select-sm" multiple size="6">
                                         <?php if (empty($investigations)): ?><option disabled>NO INVESTIGATIONS FOUND</option>
@@ -1072,6 +1075,7 @@ require_once __DIR__ . '/layout_header.php';
                                             <button type="button" class="btn btn-sm btn-link py-0 px-1 text-success" onclick="openQuickAdd('advice', 'ADD NEW ADVICE')" title="Add New"><i class="bi bi-plus-circle"></i></button>
                                         </div>
                                     </div>
+                                    <div class="pt-help mb-1">USE CTRL TO SELECT MULTIPLE OPTIONS.</div>
                                     <input type="text" class="form-control form-control-sm mb-1" placeholder="Search Advice..." onkeyup="filterSelect(this, 'advice_master_select')">
                                     <select id="advice_master_select" class="form-select form-select-sm" multiple size="6">
                                         <?php if (empty($advices)): ?><option disabled>NO ADVICES FOUND</option>
