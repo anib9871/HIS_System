@@ -27,30 +27,60 @@ if (isset($_GET['check_name'])) {
     exit;
 }
 
-// Save / Update
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_room'])) {$building_id = (int)($_POST['building_id'] ?? 0);$block_id    = !empty($_POST['block_id']) ? (int)$_POST['block_id'] : null;
-    $floor_id    = (int)($_POST['floor_id'] ?? 0);
+// Save / Update (AJAX: page refresh ke bina)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_room'])) {
+    $isAjax = strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest';
+    $building_id = (int)($_POST['building_id'] ?? 0);
+    $block_id = !empty($_POST['block_id']) ? (int)$_POST['block_id'] : null;
+    $floor_id = (int)($_POST['floor_id'] ?? 0);
     $category_id = (int)($_POST['category_id'] ?? 0);
-    // FULL CAPITALIZATION - Text hamesha uppercase mein save hoga
-    $room_no     = strtoupper(trim($_POST['room_no'] ?? ''));
-    $status      = isset($_POST['status']) ? 1 : 0;
-    $edit_id     = (int)($_POST['edit_id'] ?? 0);
+    $room_no = strtoupper(trim($_POST['room_no'] ?? ''));
+    $status = isset($_POST['status']) ? 1 : 0;
+    $edit_id = (int)($_POST['edit_id'] ?? 0);
 
-    // FIX: Using 'or' instead of symbol to prevent copy-paste corruption
-    if ($building_id === 0 or $floor_id === 0 or$category_id === 0 or empty($room_no)) {$_SESSION['swal_error'] = "Building, Floor, Category and Room No are required.";
-    } else {
-        try {
-            if ($edit_id > 0) {
-                $stmt =$tenant_pdo->prepare("UPDATE master_rooms SET building_id = ?, block_id = ?, floor_id = ?, category_id = ?, room_no = ?, status = ? WHERE id = ? AND org_id = ? AND center_id = ?");
-                $stmt->execute([$building_id,$block_id, $floor_id,$category_id, $room_no,$status, $edit_id,$org_id, $center_id]);$_SESSION['swal_success'] = "Room updated successfully.";
-            } else {
-                $stmt =$tenant_pdo->prepare("INSERT INTO master_rooms (org_id, center_id, building_id, block_id, floor_id, category_id, room_no, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$org_id, $center_id,$building_id, $block_id,$floor_id, $category_id,$room_no, $status]);$_SESSION['swal_success'] = "Room added successfully.";
-            }
-            header("Location: master_rooms.php");
-            exit;
-        } catch (PDOException $e) {$_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
+    try {
+        if (!$building_id || !$floor_id || !$category_id || $room_no === '') {
+            throw new Exception("Building, Floor, Category and Room No are required.");
         }
+
+        // Server-side duplicate check (client-side AJAX check alone is not sufficient).
+        $duplicateStmt = $tenant_pdo->prepare(
+            "SELECT COUNT(*) FROM master_rooms
+             WHERE room_no = ? AND building_id = ? AND floor_id = ?
+               AND org_id = ? AND center_id = ? AND id != ?"
+        );
+        $duplicateStmt->execute([$room_no, $building_id, $floor_id, $org_id, $center_id, $edit_id]);
+        if ((int)$duplicateStmt->fetchColumn() > 0) {
+            throw new Exception("This room already exists in the selected location.");
+        }
+
+        if ($edit_id > 0) {
+            $stmt = $tenant_pdo->prepare("UPDATE master_rooms SET building_id=?, block_id=?, floor_id=?, category_id=?, room_no=?, status=? WHERE id=? AND org_id=? AND center_id=?");
+            $stmt->execute([$building_id, $block_id, $floor_id, $category_id, $room_no, $status, $edit_id, $org_id, $center_id]);
+            $id = $edit_id;
+            $message = "Room updated successfully.";
+        } else {
+            $stmt = $tenant_pdo->prepare("INSERT INTO master_rooms (org_id, center_id, building_id, block_id, floor_id, category_id, room_no, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->execute([$org_id, $center_id, $building_id, $block_id, $floor_id, $category_id, $room_no, $status]);
+            $id = (int)$tenant_pdo->lastInsertId();
+            $message = "Room added successfully.";
+        }
+        if ($isAjax) {
+            $rowStmt = $tenant_pdo->prepare("SELECT r.*, b.building_name, bk.block_name, f.floor_name, c.category_name FROM master_rooms r JOIN master_buildings b ON r.building_id=b.id LEFT JOIN master_blocks bk ON r.block_id=bk.id JOIN master_floors f ON r.floor_id=f.id JOIN master_room_categories c ON r.category_id=c.id WHERE r.id=? AND r.org_id=? AND r.center_id=? LIMIT 1");
+            $rowStmt->execute([$id, $org_id, $center_id]);
+            header('Content-Type: application/json');
+            echo json_encode(['success'=>true, 'message'=>$message, 'row'=>$rowStmt->fetch(PDO::FETCH_ASSOC)]);
+            exit;
+        }
+        $_SESSION['swal_success'] = $message;
+        header("Location: master_rooms.php"); exit;
+    } catch (Throwable $e) {
+        if ($isAjax) {
+            http_response_code(422); header('Content-Type: application/json');
+            echo json_encode(['success'=>false, 'message'=>$e->getMessage()]);
+            exit;
+        }
+        $_SESSION['swal_error'] = "Database Error: " . $e->getMessage();
     }
 }
 
@@ -105,7 +135,7 @@ require_once __DIR__ . '/layout_header.php';
                 <span class="fw-bold small text-dark" id="formTitle"><i class="bi bi-door-open text-primary me-1"></i> Add Room</span>
             </div>
             <div class="card-body p-3">
-                <form method="POST" action="">
+                <form method="POST" action="" id="roomForm">
                     <input type="hidden" name="action_room" value="1">
                     <input type="hidden" name="edit_id" id="edit_id" value="0">
 
@@ -173,7 +203,7 @@ require_once __DIR__ . '/layout_header.php';
         <div class="card border shadow-sm">
             <div class="card-header bg-white py-2 px-3 border-bottom d-flex justify-content-between align-items-center">
                 <span class="fw-bold small text-dark"><i class="bi bi-list-task text-primary me-1"></i> Rooms Directory</span>
-                <span class="badge bg-light text-secondary border"><?= count($rooms) ?> Records</span>
+                <span class="badge bg-light text-secondary border" id="roomRecordCount"><?= count($rooms) ?> Records</span>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive">
@@ -188,13 +218,13 @@ require_once __DIR__ . '/layout_header.php';
                                 <th class="text-end pe-3">Action</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody id="roomsTbody">
                             <?php if (empty($rooms)): ?>
                                 <tr><td colspan="6" class="text-center py-4 text-muted">No rooms configured.</td></tr>
                             <?php else: ?>
                                 <?php foreach ($rooms as$r): ?>
                                     <?php $is_act = (int)$r['status'] === 1; ?>
-                                    <tr>
+                                    <tr id="room-row-<?= (int)$r['id'] ?>">
                                         <td class="ps-3 fw-bold text-primary font-monospace text-uppercase"><?= htmlspecialchars($r['room_no']) ?></td>
                                         <td><span class="badge bg-light text-dark border text-uppercase"><?= htmlspecialchars($r['category_name']) ?></span></td>
                                         <td class="text-uppercase"><?= htmlspecialchars($r['floor_name']) ?></td>
@@ -308,6 +338,163 @@ function checkName() {
             })
             .catch(error => console.error('Error:', error));
     }, 300);
+}
+
+// Save Room through AJAX so the page and selected location fields stay in place.
+document.addEventListener('DOMContentLoaded', function () {
+    const form = document.getElementById('roomForm');
+    if (!form) return;
+
+    form.addEventListener('submit', async function (event) {
+        event.preventDefault();
+
+        const submitBtn = document.getElementById('btnSubmit');
+        const originalText = submitBtn.textContent;
+        const editId = document.getElementById('edit_id').value;
+        const buildingId = document.getElementById('building_id').value;
+        const blockId = document.getElementById('block_id').value;
+        const floorId = document.getElementById('floor_id').value;
+        const categoryId = document.getElementById('category_id').value;
+
+        if (!form.reportValidity()) return;
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = editId === '0' ? 'Saving...' : 'Updating...';
+
+        try {
+            const response = await fetch(window.location.pathname + window.location.search, {
+                method: 'POST',
+                body: new FormData(form),
+                headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
+            });
+
+            const result = await response.json();
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || 'Unable to save room.');
+            }
+
+            upsertRoomRow(result.row);
+            updateRoomRecordCount();
+
+            if (editId === '0') {
+                // Keep the selected building/block/floor/category for adding the next ward.
+                document.getElementById('building_id').value = buildingId;
+                filterDropdowns();
+                document.getElementById('block_id').value = blockId;
+                filterDropdowns();
+                document.getElementById('floor_id').value = floorId;
+                document.getElementById('category_id').value = categoryId;
+                document.getElementById('room_no').value = '';
+                document.getElementById('status').checked = true;
+                document.getElementById('edit_id').value = '0';
+                document.getElementById('formTitle').innerHTML = '<i class="bi bi-door-open text-primary me-1"></i> Add Room';
+                submitBtn.textContent = 'Save Room';
+                document.getElementById('room_no').focus();
+            } else {
+                resetRoomFormAfterUpdate();
+            }
+
+            if (window.Swal) {
+                Swal.fire({
+                    toast: true, position: 'top-end', icon: 'success',
+                    title: result.message, showConfirmButton: false, timer: 2200
+                });
+            }
+        } catch (error) {
+            if (window.Swal) {
+                Swal.fire({ icon: 'error', title: 'Unable to save', text: error.message });
+            } else {
+                alert(error.message);
+            }
+        } finally {
+            submitBtn.disabled = false;
+            if (submitBtn.textContent === 'Saving...' || submitBtn.textContent === 'Updating...') {
+                submitBtn.textContent = originalText;
+            }
+        }
+    });
+});
+
+function resetRoomFormAfterUpdate() {
+    const form = document.getElementById('roomForm');
+    form.reset();
+    document.getElementById('edit_id').value = '0';
+    document.getElementById('formTitle').innerHTML = '<i class="bi bi-door-open text-primary me-1"></i> Add Room';
+    document.getElementById('btnSubmit').textContent = 'Save Room';
+    document.getElementById('name_error').style.display = 'none';
+    filterDropdowns();
+}
+
+function upsertRoomRow(room) {
+    const tbody = document.getElementById('roomsTbody');
+    if (!tbody || !room) return;
+
+    const existing = document.getElementById('room-row-' + room.id);
+    const tr = document.createElement('tr');
+    tr.id = 'room-row-' + room.id;
+
+    function cell(text, className) {
+        const td = document.createElement('td');
+        if (className) td.className = className;
+        td.textContent = text == null ? '' : String(text);
+        return td;
+    }
+
+    tr.appendChild(cell(room.room_no, 'ps-3 fw-bold text-primary font-monospace text-uppercase'));
+
+    const categoryTd = document.createElement('td');
+    const categoryBadge = document.createElement('span');
+    categoryBadge.className = 'badge bg-light text-dark border text-uppercase';
+    categoryBadge.textContent = room.category_name || '';
+    categoryTd.appendChild(categoryBadge);
+    tr.appendChild(categoryTd);
+
+    tr.appendChild(cell(room.floor_name, 'text-uppercase'));
+
+    const locationTd = document.createElement('td');
+    const locationSmall = document.createElement('small');
+    locationSmall.className = 'text-muted text-uppercase';
+    locationSmall.textContent = (room.building_name || '') + (room.block_name ? ' (' + room.block_name + ')' : '');
+    locationTd.appendChild(locationSmall);
+    tr.appendChild(locationTd);
+
+    const statusTd = document.createElement('td');
+    const active = parseInt(room.status, 10) === 1;
+    const statusLink = document.createElement('a');
+    statusLink.href = 'javascript:void(0);';
+    statusLink.className = 'badge text-decoration-none ' + (active
+        ? 'bg-success-subtle text-success border border-success'
+        : 'bg-danger-subtle text-danger border border-danger');
+    statusLink.textContent = active ? 'Active' : 'Inactive';
+    statusLink.addEventListener('click', function () { confirmToggle(parseInt(room.id, 10), active ? 1 : 0); });
+    statusTd.appendChild(statusLink);
+    tr.appendChild(statusTd);
+
+    const actionTd = document.createElement('td');
+    actionTd.className = 'text-end pe-3';
+    const editButton = document.createElement('button');
+    editButton.type = 'button';
+    editButton.className = 'btn btn-outline-primary btn-sm py-0 px-2';
+    editButton.innerHTML = '<i class="bi bi-pencil"></i>';
+    editButton.addEventListener('click', function () { editRow(room); });
+    actionTd.appendChild(editButton);
+    tr.appendChild(actionTd);
+
+    if (existing) {
+        existing.replaceWith(tr);
+    } else {
+        const emptyRow = tbody.querySelector('tr td[colspan="6"]');
+        if (emptyRow) tbody.innerHTML = '';
+        tbody.insertBefore(tr, tbody.firstChild);
+    }
+}
+
+function updateRoomRecordCount() {
+    const tbody = document.getElementById('roomsTbody');
+    const countBadge = document.getElementById('roomRecordCount');
+    if (tbody && countBadge) {
+        countBadge.textContent = tbody.querySelectorAll('tr[id^="room-row-"]').length + ' Records';
+    }
 }
 
 function confirmToggle(id, currentStatus) {
