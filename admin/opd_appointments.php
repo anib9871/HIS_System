@@ -5,6 +5,7 @@
 $page_title = "OPD Appointment Desk";
 
 require_once __DIR__ . '/../config/tenant_db.php';
+require_once __DIR__ . '/../config/audit_helper.php';
 
 require_once __DIR__ . '/../config/alerts.php'; 
 
@@ -247,6 +248,13 @@ if (isset($_GET['q_action']) && (isset($_GET['track_id']) || isset($_GET['appoin
                 if (function_exists('set_flash_msg')) set_flash_msg('CONSULTATION COMPLETED — CHECK-OUT TIME CAPTURED!');
             } else if (function_exists('set_flash_msg')) set_flash_msg('CALL THE PATIENT IN BEFORE CHECK-OUT.');
         }
+        audit_log_event($tenant_pdo, [
+            'org_id'=>$org_id,'center_id'=>$center_id,'module_name'=>'OPD APPOINTMENTS',
+            'action_type'=>'UPDATE','table_name'=>'opd_queue_tracking','record_id'=>$track_id,
+            'patient_id'=>$patient_id ?? null,'transaction_id'=>$visit_id ?? null,
+            'reason'=>'OPD queue action: '.$action,
+            'changes'=>[['field_name'=>'queue_action','old_value'=>null,'new_value'=>$action]]
+        ]);
         $tenant_pdo->commit();
         $returnDate = (string)($_GET['date_filter'] ?? $today_date);
         $returnDoctor = (int)($_GET['doctor_filter'] ?? 0);
@@ -343,6 +351,7 @@ if (isset($_GET['update_status']) && isset($_GET['id'])) {
     if (in_array($new_status, ['Confirmed', 'Cancelled', 'Pending', 'Checked In'])) {
 
         $tenant_pdo->prepare("UPDATE opd_appointments SET status = ? WHERE appointment_id = ? AND org_id = ?")->execute([$new_status, $appt_id, $org_id]);
+        audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'module_name'=>'OPD APPOINTMENTS','action_type'=>'UPDATE','table_name'=>'opd_appointments','record_id'=>$appt_id,'reason'=>'Appointment status changed','changes'=>[['field_name'=>'status','old_value'=>null,'new_value'=>$new_status]]]);
 
         header("Location: opd_appointments.php");
 
@@ -534,6 +543,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_appointment'])
                 $edit_id, $org_id, $center_id
 
             ]);
+            audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'module_name'=>'OPD APPOINTMENTS','action_type'=>'UPDATE','table_name'=>'opd_appointments','record_id'=>$edit_id,'reason'=>'Appointment details edited','changes'=>[['field_name'=>'patient_name','old_value'=>null,'new_value'=>$patient_name],['field_name'=>'mobile','old_value'=>null,'new_value'=>$mobile],['field_name'=>'appointment_date','old_value'=>null,'new_value'=>$appt_date],['field_name'=>'doctor_id','old_value'=>null,'new_value'=>$doctor_id]]]);
 
 
 
@@ -726,6 +736,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['book_appointment'])) 
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?)
             ");
             $stmt->execute([$org_id, $center_id, $selected_uhid, $patient_name, $mobile, $age, $age_unit, $gender, $department_id, $doctor_id, $category_id, $insurance_id, $appointment_token, $appt_date, $appt_time, $remark, $created_by]);
+            $newAppointmentId = (int)$tenant_pdo->lastInsertId();
+            audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'module_name'=>'OPD APPOINTMENTS','action_type'=>'INSERT','table_name'=>'opd_appointments','record_id'=>$newAppointmentId,'reason'=>'New OPD appointment booked','changes'=>[['field_name'=>'patient_name','old_value'=>null,'new_value'=>$patient_name],['field_name'=>'mobile','old_value'=>null,'new_value'=>$mobile],['field_name'=>'appointment_date','old_value'=>null,'new_value'=>$appt_date],['field_name'=>'doctor_id','old_value'=>null,'new_value'=>$doctor_id],['field_name'=>'token_no','old_value'=>null,'new_value'=>$appointment_token]]]);
 
 
 
