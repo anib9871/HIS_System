@@ -3,6 +3,7 @@
 $page_title = "IPD Billing & Discharge";
 require_once __DIR__ . '/../config/tenant_db.php';
 require_once __DIR__ . '/../config/alerts.php';
+require_once __DIR__ . '/../config/audit_helper.php';
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -52,12 +53,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($service_id && $amount >= 0) {
             try {
+                $tenant_pdo->beginTransaction();
+                $chargePatientStmt=$tenant_pdo->prepare("SELECT patient_id FROM ipd_admissions WHERE ipd_id=? AND org_id=? AND center_id=? LIMIT 1");
+                $chargePatientStmt->execute([$ipd_id,$org_id,$center_id]);
+                $chargePatientId=(int)$chargePatientStmt->fetchColumn();
+                if($chargePatientId<=0) throw new RuntimeException('IPD admission not found for billing.');
                 $tenant_pdo->prepare("INSERT INTO ipd_billing_services (org_id, center_id, ipd_id, service_id, service_date, quantity, rate, amount, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
                            ->execute([$org_id, $center_id, $ipd_id, $service_id, $service_date, $qty, $rate, $amount, $user_id]);
+                $chargeId=(int)$tenant_pdo->lastInsertId();
+                audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$user_id,'action_type'=>'INSERT','module_name'=>'IPD BILLING','table_name'=>'ipd_billing_services','record_id'=>$chargeId,'patient_id'=>$chargePatientId,'transaction_id'=>$ipd_id,'reason'=>'IPD service charge added','changes'=>[['field_name'=>'service_id','old_value'=>null,'new_value'=>$service_id],['field_name'=>'quantity','old_value'=>null,'new_value'=>$qty],['field_name'=>'rate','old_value'=>null,'new_value'=>$rate],['field_name'=>'amount','old_value'=>null,'new_value'=>$amount]]]);
+                $tenant_pdo->commit();
                 $_SESSION['swal_success'] = "Charge added to patient's bill.";
                 header("Location: ipd_billing.php?ipd_id=" . $ipd_id);
                 exit;
-            } catch (Exception $e) { $err = $e->getMessage(); }
+            } catch (Exception $e) { if($tenant_pdo->inTransaction())$tenant_pdo->rollBack(); $err = $e->getMessage(); }
         } else {
             $err = "Please select a valid service and enter the rate.";
         }
@@ -90,25 +99,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $value = min($value, $type === 'percent' ? 100 : $gross);
 
+            $tenant_pdo->beginTransaction();
+            $discountPatientStmt=$tenant_pdo->prepare("SELECT patient_id FROM ipd_admissions WHERE ipd_id=? AND org_id=? AND center_id=? LIMIT 1");
+            $discountPatientStmt->execute([$ipd_id,$org_id,$center_id]);
+            $discountPatientId=(int)$discountPatientStmt->fetchColumn();
+            if($discountPatientId<=0) throw new RuntimeException('IPD admission not found for discount.');
+            $oldDiscountStmt=$tenant_pdo->prepare("SELECT discount_type,discount_value,discount_amount,reason FROM ipd_billing_discounts WHERE org_id=? AND center_id=? AND ipd_id=? LIMIT 1 FOR UPDATE");
+            $oldDiscountStmt->execute([$org_id,$center_id,$ipd_id]);
+            $oldDiscount=$oldDiscountStmt->fetch(PDO::FETCH_ASSOC) ?: null;
             $save = $tenant_pdo->prepare("INSERT INTO ipd_billing_discounts (org_id, center_id, ipd_id, discount_type, discount_value, discount_amount, reason, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE discount_type = VALUES(discount_type), discount_value = VALUES(discount_value), discount_amount = VALUES(discount_amount), reason = VALUES(reason), created_by = VALUES(created_by), updated_at = CURRENT_TIMESTAMP");
             $save->execute([$org_id, $center_id, $ipd_id, $type, $value, $discountAmount, $reason, $user_id]);
+            $discountChanges=[]; $newDiscount=['discount_type'=>$type,'discount_value'=>$value,'discount_amount'=>$discountAmount,'reason'=>$reason];
+            foreach($newDiscount as $f=>$v){$ov=$oldDiscount[$f]??null;if($ov!=$v)$discountChanges[]=['field_name'=>$f,'old_value'=>$ov,'new_value'=>$v];}
+            audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$user_id,'action_type'=>$oldDiscount?'UPDATE':'INSERT','module_name'=>'IPD BILLING','table_name'=>'ipd_billing_discounts','record_id'=>$ipd_id,'patient_id'=>$discountPatientId,'transaction_id'=>$ipd_id,'reason'=>$reason!==''?$reason:'IPD bill discount saved','changes'=>$discountChanges]);
+            $tenant_pdo->commit();
             $_SESSION['swal_success'] = 'Bill discount saved successfully.';
             header('Location: ipd_billing.php?ipd_id=' . $ipd_id);
             exit;
-        } catch (Throwable $e) { $err = $e->getMessage(); }
+        } catch (Throwable $e) { if($tenant_pdo->inTransaction())$tenant_pdo->rollBack(); $err = $e->getMessage(); }
     }
 
     // ACTION: DISCHARGE PATIENT
     if ($action === 'discharge_patient' && $ipd_id > 0) {
         $discharge_date = date('Y-m-d H:i:s');
         try {
+            $tenant_pdo->beginTransaction();
+            $oldStatusStmt=$tenant_pdo->prepare("SELECT status,discharge_date,patient_id,ipd_no FROM ipd_admissions WHERE ipd_id=? AND org_id=? AND center_id=? FOR UPDATE");
+            $oldStatusStmt->execute([$ipd_id,$org_id,$center_id]); $oldStatus=$oldStatusStmt->fetch(PDO::FETCH_ASSOC);
+            if(!$oldStatus) throw new RuntimeException('IPD admission not found for discharge.');
             $tenant_pdo->prepare("UPDATE ipd_admissions SET status = 0, discharge_date = ? WHERE ipd_id = ? AND org_id = ? AND center_id = ?")
                        ->execute([$discharge_date, $ipd_id, $org_id, $center_id]);
+            audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$user_id,'action_type'=>'UPDATE','module_name'=>'IPD BILLING','table_name'=>'ipd_admissions','record_id'=>$ipd_id,'patient_id'=>$oldStatus['patient_id'],'transaction_id'=>$oldStatus['ipd_no'],'reason'=>'Patient discharged','changes'=>[['field_name'=>'status','old_value'=>$oldStatus['status'],'new_value'=>0],['field_name'=>'discharge_date','old_value'=>$oldStatus['discharge_date'],'new_value'=>$discharge_date]]]);
+            $tenant_pdo->commit();
             
             $_SESSION['swal_success'] = "Patient Discharged Successfully! Bed is now available.";
             header("Location: ipd_billing.php?ipd_id=" . $ipd_id);
             exit;
-        } catch (Exception $e) { $err = $e->getMessage(); }
+        } catch (Exception $e) { if($tenant_pdo->inTransaction())$tenant_pdo->rollBack(); $err = $e->getMessage(); }
     }
 }
 
