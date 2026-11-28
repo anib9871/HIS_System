@@ -3,6 +3,7 @@
 $page_title = "Discharge Summary Builder";
 require_once __DIR__ . '/../config/tenant_db.php';
 require_once __DIR__ . '/../config/alerts.php';
+require_once __DIR__ . '/../config/audit_helper.php';
 
 if (session_status() === PHP_SESSION_NONE) session_start();
 
@@ -29,9 +30,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_summary'])) {
     $follow_up_date = !empty($_POST['follow_up_date']) ? $_POST['follow_up_date'] : null;
 
     try {
-        $check = $tenant_pdo->prepare("SELECT id FROM ipd_discharge_summary WHERE ipd_id = ? AND org_id = ?");
+        $tenant_pdo->beginTransaction();
+        $check = $tenant_pdo->prepare("SELECT id, final_diagnosis, clinical_findings, course_in_hospital, discharge_condition, discharge_advice, discharge_medications_json, follow_up_date FROM ipd_discharge_summary WHERE ipd_id = ? AND org_id = ? FOR UPDATE");
         $check->execute([$ipd_id, $org_id]);
-        if ($check->fetch()) {
+        $oldSummary = $check->fetch(PDO::FETCH_ASSOC) ?: null;
+        if ($oldSummary) {
             $stmt = $tenant_pdo->prepare("
                 UPDATE ipd_discharge_summary 
                 SET final_diagnosis=?, clinical_findings=?, course_in_hospital=?, discharge_condition=?, discharge_advice=?, discharge_medications_json=?, follow_up_date=?
@@ -46,11 +49,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_summary'])) {
             ");
             $stmt->execute([$org_id, $center_id, $ipd_id, $patient_id, $doctor_id, $final_diagnosis, $clinical_findings, $course_in_hospital, $discharge_condition, $discharge_advice, $meds_json, $follow_up_date, $user_id]);
         }
+        $summaryFields=['final_diagnosis'=>$final_diagnosis,'clinical_findings'=>$clinical_findings,'course_in_hospital'=>$course_in_hospital,'discharge_condition'=>$discharge_condition,'discharge_advice'=>$discharge_advice,'discharge_medications_json'=>$meds_json,'follow_up_date'=>$follow_up_date];
+        $summaryChanges=[]; foreach($summaryFields as $f=>$v){$ov=$oldSummary[$f]??null;if($ov!=$v)$summaryChanges[]=['field_name'=>$f,'old_value'=>$ov,'new_value'=>$v];}
+        audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$user_id,'action_type'=>$oldSummary?'UPDATE':'INSERT','module_name'=>'IPD DISCHARGE SUMMARY','table_name'=>'ipd_discharge_summary','record_id'=>$ipd_id,'patient_id'=>$patient_id,'transaction_id'=>$ipd_id,'reason'=>trim((string)($_POST['audit_reason']??'Discharge summary saved')),'changes'=>$summaryChanges]);
+        $tenant_pdo->commit();
         
         $_SESSION['swal_success'] = "Discharge Summary Saved Successfully!";
         header("Location: ipd_discharge_summary.php?ipd_id=" . $ipd_id);
         exit;
-    } catch (Exception $e) { $err = $e->getMessage(); }
+    } catch (Exception $e) { if($tenant_pdo->inTransaction())$tenant_pdo->rollBack(); $err = $e->getMessage(); }
 }
 
 /* ==========================================================
