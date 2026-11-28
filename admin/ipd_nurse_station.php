@@ -3,8 +3,11 @@
 $page_title = "Nurse Station (IPD)";
 require_once __DIR__ . '/../config/tenant_db.php';
 require_once __DIR__ . '/../config/alerts.php';
+require_once __DIR__ . '/../config/audit_helper.php';
 
 if (session_status() === PHP_SESSION_NONE) session_start();
+// Use hospital local time (India) for form defaults and saved IPD event times.
+date_default_timezone_set('Asia/Kolkata');
 
 $org_id = (int)($_SESSION['org_id'] ?? 1);
 $center_id = (int)($_SESSION['center_id'] ?? 1);
@@ -20,31 +23,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['nurse_action'] ?? '';
     $ipd_id = (int)($_POST['ipd_id'] ?? 0);
 
-    if ($action === 'give_medicine' && $ipd_id > 0) {
+    // Prevent writes against another tenant/center or a non-admitted IPD record.
+    $validAdmission = false;
+    $validPatientId = 0;
+    if ($ipd_id > 0) {
+        $checkAdmission = $tenant_pdo->prepare("SELECT ipd_id, patient_id FROM ipd_admissions WHERE ipd_id = ? AND org_id = ? AND center_id = ? AND status = 1 LIMIT 1");
+        $checkAdmission->execute([$ipd_id, $org_id, $center_id]);
+        $admissionForNurse = $checkAdmission->fetch(PDO::FETCH_ASSOC);
+        $validAdmission = (bool)$admissionForNurse;
+        $validPatientId = (int)($admissionForNurse['patient_id'] ?? 0);
+    }
+
+    if ($action === 'give_medicine' && $ipd_id > 0 && $validAdmission) {
         $med_name = trim($_POST['medicine_name'] ?? '');
         $dose = trim($_POST['dose'] ?? '');
-        $given_time = !empty($_POST['given_time']) ? $_POST['given_time'] : date('Y-m-d H:i:s');
+        $given_time = !empty($_POST['given_time']) ? str_replace('T', ' ', $_POST['given_time']) : date('Y-m-d H:i:s');
+        if (strlen($given_time) === 16) $given_time .= ':00';
+        if ($med_name === '' || $dose === '') { $err = 'Medicine name and dose are required.'; } else {
         $remarks = trim($_POST['remarks'] ?? '');
 
         try {
+            $tenant_pdo->beginTransaction();
             $tenant_pdo->prepare("INSERT INTO ipd_medication_logs (org_id, center_id, ipd_id, medicine_name, dose_given, given_time, given_by, remarks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
                        ->execute([$org_id, $center_id, $ipd_id, $med_name, $dose, $given_time, $user_id, $remarks]);
+            $medLogId=(int)$tenant_pdo->lastInsertId();
+            audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$user_id,'action_type'=>'INSERT','module_name'=>'IPD NURSE STATION','table_name'=>'ipd_medication_logs','record_id'=>$medLogId,'patient_id'=>$validPatientId,'transaction_id'=>$ipd_id,'reason'=>'Medicine administration recorded','changes'=>[['field_name'=>'medicine_name','old_value'=>null,'new_value'=>$med_name],['field_name'=>'dose_given','old_value'=>null,'new_value'=>$dose],['field_name'=>'given_time','old_value'=>null,'new_value'=>$given_time],['field_name'=>'remarks','old_value'=>null,'new_value'=>$remarks]]]);
+            $tenant_pdo->commit();
             $_SESSION['swal_success'] = "Medicine marked as given!";
             header("Location: ipd_nurse_station.php?ipd_id=$ipd_id"); exit;
-        } catch (Exception $e) { $err = $e->getMessage(); }
+        } catch (Exception $e) { if($tenant_pdo->inTransaction())$tenant_pdo->rollBack(); $err = $e->getMessage(); }
+        }
     }
 
-    if ($action === 'save_vitals' && $ipd_id > 0) {
-        $vitals_raw = $_POST['vitals'] ?? [];
+    if ($action === 'save_vitals' && $ipd_id > 0 && $validAdmission) {
+        $vitals_raw = is_array($_POST['vitals'] ?? null) ? $_POST['vitals'] : [];
+        $vitals_raw = array_filter($vitals_raw, static function ($value) { return trim((string)$value) !== ''; });
         $vitals_json = json_encode($vitals_raw, JSON_UNESCAPED_UNICODE);
-        $recorded_time = !empty($_POST['recorded_time']) ? $_POST['recorded_time'] : date('Y-m-d H:i:s');
+        $recorded_time = !empty($_POST['recorded_time']) ? str_replace('T', ' ', $_POST['recorded_time']) : date('Y-m-d H:i:s');
+        if (strlen($recorded_time) === 16) $recorded_time .= ':00';
 
-        try {
-            $tenant_pdo->prepare("INSERT INTO ipd_nursing_vitals (org_id, center_id, ipd_id, vitals_json, recorded_time, recorded_by) VALUES (?, ?, ?, ?, ?, ?)")
-                       ->execute([$org_id, $center_id, $ipd_id, $vitals_json, $recorded_time, $user_id]);
-            $_SESSION['swal_success'] = "Nursing Vitals recorded!";
-            header("Location: ipd_nurse_station.php?ipd_id=$ipd_id"); exit;
-        } catch (Exception $e) { $err = $e->getMessage(); }
+        if (empty($vitals_raw)) {
+            $err = 'Please enter at least one vital value.';
+        } else {
+            try {
+                $tenant_pdo->beginTransaction();
+                $tenant_pdo->prepare("INSERT INTO ipd_nursing_vitals (org_id, center_id, ipd_id, vitals_json, recorded_time, recorded_by) VALUES (?, ?, ?, ?, ?, ?)")
+                           ->execute([$org_id, $center_id, $ipd_id, $vitals_json, $recorded_time, $user_id]);
+                $vitalId=(int)$tenant_pdo->lastInsertId();
+                audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$user_id,'action_type'=>'INSERT','module_name'=>'IPD NURSE STATION','table_name'=>'ipd_nursing_vitals','record_id'=>$vitalId,'patient_id'=>$validPatientId,'transaction_id'=>$ipd_id,'reason'=>'Nursing vitals recorded','changes'=>[['field_name'=>'vitals_json','old_value'=>null,'new_value'=>$vitals_raw],['field_name'=>'recorded_time','old_value'=>null,'new_value'=>$recorded_time]]]);
+                $tenant_pdo->commit();
+                $_SESSION['swal_success'] = "Nursing Vitals recorded!";
+                header("Location: ipd_nurse_station.php?ipd_id=$ipd_id"); exit;
+            } catch (Exception $e) { if($tenant_pdo->inTransaction())$tenant_pdo->rollBack(); $err = $e->getMessage(); }
+        }
+    }
+
+    if ($ipd_id > 0 && !$validAdmission) {
+        $err = 'Selected IPD admission is not active or does not belong to this center.';
     }
 }
 
@@ -54,12 +89,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $admitted_patients = [];
 try {
     $q = $tenant_pdo->prepare("
-        SELECT a.*, p.uhid, p.fullname, p.gender, p.age, bd.bed_no, r.room_no, d.full_name AS doctor_name 
+        SELECT a.*, p.uhid, p.fullname, p.gender, p.age,
+               bd.bed_no, r.room_no, b.building_name,
+               d.full_name AS doctor_name, dept.dept_name,
+               cat.category_name, ins.insurance_name
         FROM ipd_admissions a
         JOIN patient_master p ON p.patient_id = a.patient_id
         JOIN master_beds bd ON a.bed_id = bd.id
         JOIN master_rooms r ON bd.room_id = r.id
+        LEFT JOIN master_buildings b ON b.id = r.building_id
         LEFT JOIN master_doctors d ON d.id = a.doctor_id
+        LEFT JOIN master_departments dept ON dept.id = a.department_id
+        LEFT JOIN master_categories cat ON cat.id = a.category_id AND cat.org_id = a.org_id
+        LEFT JOIN insurance ins ON ins.id = a.insurance_id AND ins.org_id = a.org_id
         WHERE a.org_id = ? AND a.center_id = ? AND a.status = 1
         ORDER BY r.room_no ASC, bd.bed_no ASC
     ");
@@ -73,6 +115,8 @@ try {
 $selected = null;
 $latest_rx_items = [];
 $latest_notes = '';
+$latest_doctor_round = [];
+$latest_doctor_vitals = [];
 $medication_logs = [];
 $nursing_vitals = [];
 $active_vitals = [];
@@ -84,26 +128,30 @@ if ($selected_ipd_id > 0) {
 
     if ($selected) {
         // Fetch Latest Doctor's Orders
-        $stmt = $tenant_pdo->prepare("SELECT prescription_json, doctor_notes, round_date FROM ipd_ward_rounds WHERE ipd_id = ? AND org_id = ? ORDER BY round_date DESC LIMIT 1");
-        $stmt->execute([$selected_ipd_id, $org_id]);
+        $stmt = $tenant_pdo->prepare("SELECT prescription_json, doctor_notes, round_date, vitals_json, symptoms, diagnosis, investigations, advice FROM ipd_ward_rounds WHERE ipd_id = ? AND org_id = ? AND center_id = ? ORDER BY round_date DESC, id DESC LIMIT 1");
+        $stmt->execute([$selected_ipd_id, $org_id, $center_id]);
         if ($latest = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $latest_notes = $latest['doctor_notes'];
-            $dec = json_decode($latest['prescription_json'], true);
-            if (isset($dec['items'])) $latest_rx_items = $dec['items'];
+            $latest_doctor_round = $latest;
+            $latest_notes = $latest['doctor_notes'] ?? '';
+            $latest_doctor_vitals = json_decode($latest['vitals_json'] ?? '{}', true) ?: [];
+            $dec = json_decode($latest['prescription_json'] ?? '{}', true);
+            if (isset($dec['items']) && is_array($dec['items'])) $latest_rx_items = $dec['items'];
         }
 
         // Fetch Medication Logs
-        $logStmt = $tenant_pdo->prepare("SELECT * FROM ipd_medication_logs WHERE ipd_id = ? AND org_id = ? ORDER BY given_time DESC LIMIT 20");
-        $logStmt->execute([$selected_ipd_id, $org_id]);
+        $logStmt = $tenant_pdo->prepare("SELECT * FROM ipd_medication_logs WHERE ipd_id = ? AND org_id = ? AND center_id = ? ORDER BY given_time DESC, id DESC LIMIT 20");
+        $logStmt->execute([$selected_ipd_id, $org_id, $center_id]);
         $medication_logs = $logStmt->fetchAll(PDO::FETCH_ASSOC);
 
         // Fetch Nursing Vitals
-        $nvStmt = $tenant_pdo->prepare("SELECT * FROM ipd_nursing_vitals WHERE ipd_id = ? AND org_id = ? ORDER BY recorded_time DESC LIMIT 10");
-        $nvStmt->execute([$selected_ipd_id, $org_id]);
+        $nvStmt = $tenant_pdo->prepare("SELECT * FROM ipd_nursing_vitals WHERE ipd_id = ? AND org_id = ? AND center_id = ? ORDER BY recorded_time DESC, id DESC LIMIT 10");
+        $nvStmt->execute([$selected_ipd_id, $org_id, $center_id]);
         $nursing_vitals = $nvStmt->fetchAll(PDO::FETCH_ASSOC);
 
         // Active Vitals Master
-        $active_vitals = $tenant_pdo->query("SELECT vital_name, vital_key, unit, placeholder FROM master_vitals WHERE org_id = $org_id AND status = 1 ORDER BY sort_order ASC")->fetchAll(PDO::FETCH_ASSOC);
+        $activeVitalsStmt = $tenant_pdo->prepare("SELECT vital_name, vital_key, unit, placeholder FROM master_vitals WHERE org_id = ? AND center_id = ? AND status = 1 ORDER BY sort_order ASC, vital_name ASC");
+        $activeVitalsStmt->execute([$org_id, $center_id]);
+        $active_vitals = $activeVitalsStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
 }
 
@@ -148,7 +196,15 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                                     <span class="badge bg-primary-subtle text-primary border border-primary" style="font-size: 9px;"><?= htmlspecialchars($pt['room_no'] . ' - ' . $pt['bed_no']) ?></span>
                                 </div>
                                 <div class="text-secondary" style="font-size: 10px;">
-                                    UHID: <?= htmlspecialchars($pt['uhid']) ?> | DR. <?= htmlspecialchars(strtoupper($pt['doctor_name'] ?? 'N/A')) ?>
+                                    IPD: <?= htmlspecialchars($pt['ipd_no'] ?? 'N/A') ?> | UHID: <?= htmlspecialchars($pt['uhid']) ?>
+                                </div>
+                                <div class="text-secondary mt-1" style="font-size: 10px;">
+                                    <?= htmlspecialchars($pt['building_name'] ?? 'WARD') ?> /
+                                    ROOM <?= htmlspecialchars($pt['room_no']) ?> /
+                                    BED <?= htmlspecialchars($pt['bed_no']) ?>
+                                </div>
+                                <div class="text-muted mt-1" style="font-size: 9px;">
+                                    DR. <?= htmlspecialchars(strtoupper($pt['doctor_name'] ?? 'N/A')) ?>
                                 </div>
                             </a>
                         <?php endforeach; ?>
@@ -182,15 +238,91 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                             <div class="text-primary font-monospace fw-bold" style="font-size: 11px;"><?= htmlspecialchars($selected['uhid']) ?></div>
                         </div>
                         <div class="text-end d-flex flex-column align-items-end">
-                            <div class="fw-bold text-danger fs-6 mb-1">BED: <?= htmlspecialchars($selected['room_no'] . ' - ' . $selected['bed_no']) ?></div>
-                            <div class="small text-dark fw-bold" style="font-size:10px;">DR. <?= htmlspecialchars(strtoupper($selected['doctor_name'])) ?></div>
+                            <div class="fw-bold text-danger fs-6 mb-1">BED: <?= htmlspecialchars(($selected['room_no'] ?? '') . ' - ' . ($selected['bed_no'] ?? '')) ?></div>
+                            <div class="small text-dark fw-bold" style="font-size:10px;">DR. <?= htmlspecialchars(strtoupper($selected['doctor_name'] ?? 'N/A')) ?></div>
+                            <a class="btn btn-sm btn-outline-primary mt-1" style="font-size:10px;" href="ipd_nurse_station.php?ipd_id=<?= (int)$selected_ipd_id ?>"><i class="bi bi-arrow-clockwise me-1"></i>REFRESH CLINICAL DATA</a>
                         </div>
                     </div>
 
-                    <?php if(!empty($latest_notes)): ?>
+                    <!-- ADMISSION & BED DETAILS FROM IPD ADMISSION -->
+                    <div class="card border mb-3">
+                        <div class="card-header bg-light py-2 px-3 d-flex justify-content-between align-items-center">
+                            <h6 class="mb-0 fw-bold text-dark small">
+                                <i class="bi bi-hospital text-primary me-2"></i>ADMISSION &amp; BED DETAILS
+                            </h6>
+                            <span class="badge bg-success-subtle text-success border">ADMITTED</span>
+                        </div>
+                        <div class="card-body py-2 px-3">
+                            <div class="row g-2">
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">IPD NUMBER</div>
+                                    <div class="fw-bold small"><?= htmlspecialchars($selected['ipd_no'] ?? 'N/A') ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">ADMISSION DATE</div>
+                                    <div class="fw-bold small"><?= !empty($selected['admission_date']) ? htmlspecialchars(date('d-M-Y h:i A', strtotime($selected['admission_date']))) : 'N/A' ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">DEPARTMENT</div>
+                                    <div class="fw-bold small"><?= htmlspecialchars($selected['dept_name'] ?? 'N/A') ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">ADMITTING DOCTOR</div>
+                                    <div class="fw-bold small"><?= htmlspecialchars($selected['doctor_name'] ?? 'N/A') ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">BUILDING / WARD</div>
+                                    <div class="fw-bold small"><?= htmlspecialchars($selected['building_name'] ?? 'N/A') ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">ROOM NUMBER</div>
+                                    <div class="fw-bold small"><?= htmlspecialchars($selected['room_no'] ?? 'N/A') ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">BED NUMBER</div>
+                                    <div class="fw-bold small"><?= htmlspecialchars($selected['bed_no'] ?? 'N/A') ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">ADMISSION TYPE</div>
+                                    <div class="fw-bold small"><?= htmlspecialchars($selected['admission_type'] ?? 'N/A') ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">CATEGORY</div>
+                                    <div class="fw-bold small"><?= htmlspecialchars($selected['category_name'] ?? 'N/A') ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">INSURANCE / PROVIDER</div>
+                                    <div class="fw-bold small"><?= htmlspecialchars($selected['insurance_name'] ?? 'CASH / BASE (NO INSURANCE)') ?></div>
+                                </div>
+                                <div class="col-6 col-lg-3">
+                                    <div class="text-muted" style="font-size:9px;">ADVANCE PAID</div>
+                                    <div class="fw-bold small">₹<?= number_format((float)($selected['advance_paid'] ?? 0), 2) ?></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <?php if(!empty($latest_doctor_round)): ?>
                         <div class="doctor-notes-box">
-                            <h6 class="fw-bold text-dark small mb-1"><i class="bi bi-chat-square-text-fill text-warning me-2"></i>DOCTOR'S INSTRUCTIONS / NOTES</h6>
-                            <p class="mb-0 text-dark" style="font-size: 12px; font-weight: 500; text-transform: none;"><?= nl2br(htmlspecialchars($latest_notes)) ?></p>
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h6 class="fw-bold text-dark small mb-0"><i class="bi bi-clipboard2-pulse-fill text-warning me-2"></i>LATEST DOCTOR CLINICAL UPDATE</h6>
+                                <span class="badge bg-warning-subtle text-dark"><?= htmlspecialchars(date('d-M-Y h:i A', strtotime($latest_doctor_round['round_date']))) ?></span>
+                            </div>
+                            <?php foreach (['symptoms' => 'SYMPTOMS', 'diagnosis' => 'DIAGNOSIS', 'investigations' => 'INVESTIGATIONS', 'advice' => 'ADVICE', 'doctor_notes' => 'DOCTOR NOTES / INSTRUCTIONS'] as $field => $label): ?>
+                                <?php if (trim((string)($latest_doctor_round[$field] ?? '')) !== ''): ?>
+                                    <div class="mb-1 text-dark" style="font-size:11px;text-transform:none;"><strong style="text-transform:uppercase;"><?= $label ?>:</strong> <?= nl2br(htmlspecialchars($latest_doctor_round[$field])) ?></div>
+                                <?php endif; ?>
+                            <?php endforeach; ?>
+                            <?php if (!empty($latest_doctor_vitals)): ?>
+                                <div class="mt-2 pt-2 border-top">
+                                    <strong class="small text-dark">DOCTOR-RECORDED VITALS:</strong>
+                                    <div class="d-flex flex-wrap gap-1 mt-1">
+                                        <?php foreach ($latest_doctor_vitals as $key => $value): if (trim((string)$value) !== ''): ?>
+                                            <span class="badge bg-white text-dark border"><?= htmlspecialchars(strtoupper(str_replace('_', ' ', $key))) ?>: <?= htmlspecialchars((string)$value) ?></span>
+                                        <?php endif; endforeach; ?>
+                                    </div>
+                                </div>
+                            <?php endif; ?>
                         </div>
                     <?php endif; ?>
 
@@ -206,13 +338,23 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                                         <div class="text-center text-muted small py-4 fw-bold">NO ACTIVE MEDICINES PRESCRIBED.</div>
                                     <?php else: ?>
                                         <?php foreach($latest_rx_items as $rx): ?>
+                                            <?php
+                                                // Prescription JSON may use different keys depending on the doctor-desk version.
+                                                $rxName = trim((string)($rx['name'] ?? $rx['medicine_name'] ?? $rx['medicine'] ?? $rx['med_name'] ?? ''));
+                                                $rxDose = trim((string)($rx['dose'] ?? $rx['dosage'] ?? $rx['dose_strength'] ?? $rx['strength'] ?? ''));
+                                                $rxFrequency = trim((string)($rx['freq'] ?? $rx['frequency'] ?? $rx['frequency_name'] ?? ''));
+                                                $rxNameSafe = htmlspecialchars($rxName !== '' ? $rxName : 'Medicine not specified', ENT_QUOTES, 'UTF-8');
+                                                $rxDoseSafe = htmlspecialchars($rxDose !== '' ? $rxDose : 'Not specified', ENT_QUOTES, 'UTF-8');
+                                                $rxFrequencySafe = htmlspecialchars($rxFrequency !== '' ? $rxFrequency : 'Not specified', ENT_QUOTES, 'UTF-8');
+                                            ?>
                                             <div class="rx-card d-flex justify-content-between align-items-center shadow-sm">
                                                 <div>
-                                                    <div class="fw-bold text-primary" style="font-size: 13px;"><?= htmlspecialchars($rx['name'] ?? $rx['medicine_name']) ?></div>
-                                                    <div class="text-dark fw-bold mt-1" style="font-size: 11px;">DOSE: <?= htmlspecialchars($rx['dose']) ?></div>
-                                                    <span class="badge bg-secondary mt-1" style="font-size: 9px;"><?= htmlspecialchars($rx['freq'] ?? $rx['frequency']) ?></span>
+                                                    <div class="fw-bold text-primary" style="font-size: 13px;"><?= $rxNameSafe ?></div>
+                                                    <div class="text-dark fw-bold mt-1" style="font-size: 11px;">DOSE: <?= $rxDoseSafe ?></div>
+                                                    <span class="badge bg-secondary mt-1" style="font-size: 9px;"><?= $rxFrequencySafe ?></span>
                                                 </div>
-                                                <button class="btn btn-sm btn-success fw-bold px-3 py-1" style="font-size: 11px;" onclick="openGiveModal('<?= htmlspecialchars($rx['name'] ?? $rx['medicine_name'], ENT_QUOTES) ?>', '<?= htmlspecialchars($rx['dose'], ENT_QUOTES) ?>')">
+                                                <button type="button" class="btn btn-sm btn-success fw-bold px-3 py-1" style="font-size: 11px;"
+                                                    onclick='openGiveModal(<?= json_encode($rxName !== "" ? $rxName : "Medicine not specified", JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_TAG | JSON_HEX_AMP) ?>, <?= json_encode($rxDose !== "" ? $rxDose : "Not specified", JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_TAG | JSON_HEX_AMP) ?>)'>
                                                     <i class="bi bi-check2-circle me-1"></i> GIVE
                                                 </button>
                                             </div>
@@ -234,7 +376,7 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                                         <input type="hidden" name="ipd_id" value="<?= $selected_ipd_id ?>">
                                         <div class="mb-3">
                                             <label class="form-label" style="font-size: 10px; font-weight: 800;">RECORD TIME *</label>
-                                            <input type="datetime-local" name="recorded_time" class="form-control compact-input fw-bold" value="<?= date('Y-m-d\TH:i') ?>" required>
+                                            <input type="text" name="recorded_time" class="form-control compact-input fw-bold js-datetime-picker" value="<?= date('Y-m-d H:i:S') ?>" placeholder="DD-MM-YYYY HH:MM AM/PM" autocomplete="off" required>
                                         </div>
                                         <div class="row g-2 mb-3">
                                             <?php foreach($active_vitals as $v): ?>
@@ -291,7 +433,7 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                                                 $vDecoded = json_decode($nv['vitals_json'], true); 
                                                 if($vDecoded) {
                                                     foreach($vDecoded as $k => $v) {
-                                                        if(trim($v) !== '') echo '<span class="badge bg-white text-dark border border-secondary" style="font-size:9px;"><strong>'.strtoupper(str_replace('_', ' ', $k)).':</strong> '.htmlspecialchars($v).'</span>';
+                                                        if(trim((string)$v) !== '') echo '<span class="badge bg-white text-dark border border-secondary" style="font-size:9px;"><strong>'.strtoupper(str_replace('_', ' ', $k)).':</strong> '.htmlspecialchars($v).'</span>';
                                                     }
                                                 }
                                                 ?>
@@ -331,7 +473,7 @@ input[type="datetime-local"], input[type="text"] { text-transform: none; }
                     </div>
                     <div class="mb-2">
                         <label class="form-label small fw-bold text-secondary">GIVEN TIME *</label>
-                        <input type="datetime-local" name="given_time" class="form-control form-control-sm fw-bold" value="<?= date('Y-m-d\TH:i') ?>" required>
+                        <input type="text" name="given_time" class="form-control form-control-sm fw-bold js-datetime-picker" value="<?= date('Y-m-d H:i:S') ?>" placeholder="DD-MM-YYYY HH:MM AM/PM" autocomplete="off" required>
                     </div>
                     <div class="mb-3">
                         <label class="form-label small fw-bold text-secondary">REMARKS (OPTIONAL)</label>
