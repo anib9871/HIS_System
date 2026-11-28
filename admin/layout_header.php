@@ -29,7 +29,8 @@ $ipd_pages = [
     'ipd_doctor_desk.php',
     'ipd_nurse_station.php',
     'ipd_billing.php',
-    'ipd_discharge_summary.php'
+    'ipd_discharge_summary.php',
+    'audit_logs.php'
 ];
 $is_ipd_active = in_array($current_page, $ipd_pages);
 
@@ -354,6 +355,69 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
         .content {
             padding: 25px;
             flex-grow: 1;
+        }
+
+
+        /* IPD Admission-only bed counters: plain colored text, not cards */
+        .ipd-header-bed-stats {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            column-gap: 12px;
+            row-gap: 3px;
+            margin-right: 4px;
+            flex: 0 1 auto;
+            line-height: 1.2;
+            white-space: nowrap;
+        }
+        .ipd-header-bed-stat {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 4px;
+            padding: 0;
+            margin: 0;
+            border: 0;
+            border-radius: 0;
+            background: transparent !important;
+            box-shadow: none !important;
+            color: #334155;
+        }
+        .ipd-header-bed-stat i { display: none; }
+        .ipd-header-bed-stat .stat-label {
+            display: inline;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: .1px;
+        }
+        .ipd-header-bed-stat .stat-value {
+            display: inline;
+            margin: 0;
+            font-size: 14px;
+            font-weight: 800;
+        }
+        .ipd-header-bed-stat.total { color: #343a40; }
+        .ipd-header-bed-stat.available { color: #198754; }
+        .ipd-header-bed-stat.occupied { color: #dc3545; }
+        .ipd-header-bed-stat + .ipd-header-bed-stat {
+            border-left: 1px solid #dbe2ea;
+            padding-left: 12px;
+        }
+        @media (max-width: 767.98px) {
+            .ipd-header-bed-stats { column-gap: 7px; }
+            .ipd-header-bed-stat .stat-label { font-size: 9px; }
+            .ipd-header-bed-stat .stat-value { font-size: 12px; }
+            .ipd-header-bed-stat + .ipd-header-bed-stat { padding-left: 7px; }
+        }
+        @media (max-width: 480px) {
+            .ipd-header-bed-stats {
+                white-space: normal;
+                justify-content: flex-start;
+                column-gap: 6px;
+            }
+            .ipd-header-bed-stat .stat-label { font-size: 8px; }
+            .ipd-header-bed-stat .stat-value { font-size: 11px; }
+            .ipd-header-bed-stat + .ipd-header-bed-stat { padding-left: 6px; }
         }
 
         .btn-logout {
@@ -949,6 +1013,9 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
                     <?php if (has_access('ipd_discharge', $is_full_admin, $user_menus)): ?>
                     <li><a href="ipd_discharge_summary.php" class="<?= ($current_page == 'ipd_discharge_summary.php') ? 'active-child' : '' ?>"><i class="bi bi-file-earmark-medical"></i> Discharge Summary</a></li>
                     <?php endif; ?>
+                    <?php if ($is_full_admin): ?>
+                    <li><a href="audit_logs.php" class="<?= ($current_page == 'audit_logs.php') ? 'active-child' : '' ?>"><i class="bi bi-shield-check"></i> System Audit Trail</a></li>
+                    <?php endif; ?>
                 </ul>
             </div>
         </li>
@@ -968,6 +1035,32 @@ $ipd_keys = ['ipd_adm', 'ipd_doc', 'ipd_nurse', 'ipd_bill', 'ipd_discharge']; //
         </div>
         
         <div class="d-flex align-items-center gap-2 gap-sm-3">
+            <?php if (
+                $current_page === 'ipd_admission.php'
+                && isset($total_beds, $available_beds, $occupied_beds)
+            ): ?>
+                <div class="ipd-header-bed-stats" aria-label="Live bed availability">
+                    <div class="ipd-header-bed-stat total" title="Total Bed Capacity">
+                        <div>
+                            <span class="stat-label">TOTAL BED CAPACITY</span>
+                            <span class="stat-value"><?= (int)$total_beds ?></span>
+                        </div>
+                    </div>
+                    <div class="ipd-header-bed-stat available" title="Available Beds">
+                        <div>
+                            <span class="stat-label">AVAILABILITY</span>
+                            <span class="stat-value"><?= (int)$available_beds ?></span>
+                        </div>
+                    </div>
+                    <div class="ipd-header-bed-stat occupied" title="Occupied Beds">
+                        <div>
+                            <span class="stat-label">OCCUPIED</span>
+                            <span class="stat-value"><?= (int)$occupied_beds ?></span>
+                        </div>
+                    </div>
+                </div>
+            <?php endif; ?>
+
             <?php
                 $header_login_name = trim((string)($_SESSION['fullname'] ?? ''));
                 if ($header_login_name === '') {
