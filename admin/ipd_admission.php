@@ -2,7 +2,8 @@
 // admin/ipd_admission.php
 $page_title = "IPD Admission & Live Bed Dashboard";
 require_once __DIR__ . '/../config/tenant_db.php';
-require_once __DIR__ . '/../config/alerts.php'; 
+require_once __DIR__ . '/../config/alerts.php';
+require_once __DIR__ . '/../config/audit_helper.php'; 
 
 if (session_status() === PHP_SESSION_NONE) session_start();
 $org_id = (int)($_SESSION['org_id'] ?? 1);
@@ -74,7 +75,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'print' && isset($_GET['ipd_id
     $stmt = $tenant_pdo->prepare("
         SELECT a.*, p.uhid, p.fullname, p.age, p.gender, p.mobile, p.address,
                bd.bed_no, r.room_no, b.building_name,
-               d.full_name AS doctor_name, dept.dept_name
+               d.full_name AS doctor_name, dept.dept_name,
+               cat.category_name, ins.insurance_name
         FROM ipd_admissions a
         JOIN patient_master p ON p.patient_id = a.patient_id
         JOIN master_beds bd ON a.bed_id = bd.id
@@ -82,6 +84,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'print' && isset($_GET['ipd_id
         JOIN master_buildings b ON r.building_id = b.id
         LEFT JOIN master_doctors d ON d.id = a.doctor_id
         LEFT JOIN master_departments dept ON dept.id = a.department_id
+        LEFT JOIN master_categories cat ON cat.id = a.category_id AND cat.org_id = a.org_id
+        LEFT JOIN insurance ins ON ins.id = a.insurance_id AND ins.org_id = a.org_id
         WHERE a.ipd_id = ? AND a.org_id = ? AND a.center_id = ?
     ");
     $stmt->execute([$ipd_id, $org_id, $center_id]);
@@ -139,8 +143,12 @@ if (isset($_GET['action']) && $_GET['action'] === 'print' && isset($_GET['ipd_id
                     <td class="lbl">WARD / BED:</td><td class="fw-bold fs-6 text-primary"><?= htmlspecialchars($adm['building_name'] . ' - ' . $adm['room_no'] . ' (BED ' . $adm['bed_no'] . ')') ?></td>
                 </tr>
                 <tr>
-                    <td class="lbl">ADMITTING DOCTOR:</td><td class="fw-bold">DR. <?= htmlspecialchars($adm['doctor_name'] ?? 'N/A') ?></td>
+                    <td class="lbl">ADMITTING DOCTOR:</td><td class="fw-bold">DR. <?= htmlspecialchars(preg_replace('/^(?:DR\.?\s*)+/i', '', trim((string)($adm['doctor_name'] ?? 'N/A')))) ?></td>
                     <td class="lbl">ADMISSION TYPE:</td><td><?= htmlspecialchars($adm['admission_type']) ?></td>
+                </tr>
+                <tr>
+                    <td class="lbl">CATEGORY:</td><td><?= htmlspecialchars($adm['category_name'] ?? 'N/A') ?></td>
+                    <td class="lbl">INSURANCE / PROVIDER:</td><td><?= htmlspecialchars($adm['insurance_name'] ?? 'CASH / BASE (NO INSURANCE)') ?></td>
                 </tr>
             </table>
             <div class="section-title">ADVANCE DEPOSIT RECEIPT</div>
@@ -256,13 +264,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admit_patient'])) {
             $tenant_pdo->beginTransaction();
             if ($existing_patient_id > 0) {
                 $patient_id = $existing_patient_id;
+                $oldPatientStmt = $tenant_pdo->prepare("SELECT fullname, dob, gender, age, mobile FROM patient_master WHERE patient_id=? AND org_id=? FOR UPDATE");
+                $oldPatientStmt->execute([$patient_id, $org_id]);
+                $oldPatient = $oldPatientStmt->fetch(PDO::FETCH_ASSOC) ?: [];
                 $tenant_pdo->prepare("UPDATE patient_master SET fullname=?, dob=?, gender=?, age=?, mobile=? WHERE patient_id=? AND org_id=?")
                            ->execute([$fullname, $dob, $gender, $age, $mobile, $patient_id, $org_id]);
+                audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$created_by,'action_type'=>'UPDATE','module_name'=>'IPD ADMISSION','table_name'=>'patient_master','record_id'=>$patient_id,'patient_id'=>$patient_id,'reason'=>'Patient details updated during IPD admission','changes'=>array_map(static fn($f)=>['field_name'=>$f,'old_value'=>$oldPatient[$f]??null,'new_value'=>$$f],['fullname','dob','gender','age','mobile'])]);
             } else {
                 $uhid = generateSecureUHID($tenant_pdo, $center_id, $current_fy_code);
                 $stmt = $tenant_pdo->prepare("INSERT INTO patient_master (org_id, center_id, uhid, fullname, dob, gender, age, mobile, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)");
                 $stmt->execute([$org_id, $center_id, $uhid, $fullname, $dob, $gender, $age, $mobile]);
                 $patient_id = (int)$tenant_pdo->lastInsertId();
+                audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$created_by,'action_type'=>'INSERT','module_name'=>'IPD ADMISSION','table_name'=>'patient_master','record_id'=>$patient_id,'patient_id'=>$patient_id,'reason'=>'New patient registered during IPD admission','changes'=>[['field_name'=>'fullname','old_value'=>null,'new_value'=>$fullname],['field_name'=>'dob','old_value'=>null,'new_value'=>$dob],['field_name'=>'gender','old_value'=>null,'new_value'=>$gender],['field_name'=>'mobile','old_value'=>null,'new_value'=>$mobile]]]);
             }
 
             $ipd_stmt = $tenant_pdo->prepare("SELECT COUNT(*) FROM ipd_admissions WHERE org_id = ? AND center_id = ? AND admission_date >= ?");
@@ -281,10 +294,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admit_patient'])) {
             ");
             $adm_stmt->execute([$org_id, $center_id, $patient_id, $ipd_no, $next_receipt_no, $admission_date, $department_id, $doctor_id, $service_id, $bed_id, $admission_type, $category_id, $insurance_id, $advance_paid, $payment_mode_id, $pay_mode, $pay_breakdown, $created_by]);
             
+            $newIpdId = (int)$tenant_pdo->lastInsertId();
+            audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$created_by,'action_type'=>'INSERT','module_name'=>'IPD ADMISSION','table_name'=>'ipd_admissions','record_id'=>$newIpdId,'patient_id'=>$patient_id,'transaction_id'=>$ipd_no,'reason'=>'Patient admitted','changes'=>[['field_name'=>'ipd_no','old_value'=>null,'new_value'=>$ipd_no],['field_name'=>'admission_date','old_value'=>null,'new_value'=>$admission_date],['field_name'=>'bed_id','old_value'=>null,'new_value'=>$bed_id],['field_name'=>'advance_paid','old_value'=>null,'new_value'=>$advance_paid],['field_name'=>'status','old_value'=>null,'new_value'=>1]]]);
             $tenant_pdo->commit();
             if(function_exists('set_flash_msg')) set_flash_msg("Patient Admitted Successfully! IPD No: " . $ipd_no);
             header("Location: ipd_admission.php"); exit;
-        } catch (Exception $e) { $tenant_pdo->rollBack(); $err = "Admission Error: " . $e->getMessage(); }
+        } catch (Exception $e) { if ($tenant_pdo->inTransaction()) $tenant_pdo->rollBack(); $err = "Admission Error: " . $e->getMessage(); }
     }
 }
 
@@ -314,6 +329,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_full_admission
 
     try {
         $tenant_pdo->beginTransaction();
+        $oldPatientStmt = $tenant_pdo->prepare("SELECT fullname, dob, gender, age, mobile FROM patient_master WHERE patient_id=? AND org_id=? FOR UPDATE");
+        $oldPatientStmt->execute([$edit_patient_id, $org_id]);
+        $oldPatient = $oldPatientStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $oldAdmissionStmt = $tenant_pdo->prepare("SELECT admission_date, department_id, doctor_id, service_id, bed_id, admission_type, category_id, insurance_id FROM ipd_admissions WHERE ipd_id=? AND org_id=? AND center_id=? FOR UPDATE");
+        $oldAdmissionStmt->execute([$edit_ipd_id, $org_id, $center_id]);
+        $oldAdmission = $oldAdmissionStmt->fetch(PDO::FETCH_ASSOC) ?: [];
         
         $tenant_pdo->prepare("UPDATE patient_master SET fullname=?, dob=?, gender=?, age=?, mobile=? WHERE patient_id=? AND org_id=?")
                    ->execute([$fullname, $dob, $gender, $age, $mobile, $edit_patient_id, $org_id]);
@@ -321,10 +342,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_full_admission
         $tenant_pdo->prepare("UPDATE ipd_admissions SET admission_date=?, department_id=?, doctor_id=?, service_id=?, bed_id=?, admission_type=?, category_id=?, insurance_id=? WHERE ipd_id=? AND org_id=?")
                    ->execute([$admission_date, $department_id, $doctor_id, $service_id, $bed_id, $admission_type, $category_id, $insurance_id, $edit_ipd_id, $org_id]);
                    
+        audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$created_by,'action_type'=>'UPDATE','module_name'=>'IPD ADMISSION','table_name'=>'patient_master','record_id'=>$edit_patient_id,'patient_id'=>$edit_patient_id,'reason'=>trim((string)($_POST['audit_reason']??'Admission details edited')),'changes'=>array_map(static fn($f)=>['field_name'=>$f,'old_value'=>$oldPatient[$f]??null,'new_value'=>$$f],['fullname','dob','gender','age','mobile'])]);
+        $newAdmission = ['admission_date'=>$admission_date,'department_id'=>$department_id,'doctor_id'=>$doctor_id,'service_id'=>$service_id,'bed_id'=>$bed_id,'admission_type'=>$admission_type,'category_id'=>$category_id,'insurance_id'=>$insurance_id];
+        $admissionChanges=[]; foreach($newAdmission as $field=>$value){if(($oldAdmission[$field]??null)!=$value)$admissionChanges[]=['field_name'=>$field,'old_value'=>$oldAdmission[$field]??null,'new_value'=>$value];}
+        if($admissionChanges) audit_log_event($tenant_pdo, ['org_id'=>$org_id,'center_id'=>$center_id,'user_id'=>$created_by,'action_type'=>'UPDATE','module_name'=>'IPD ADMISSION','table_name'=>'ipd_admissions','record_id'=>$edit_ipd_id,'patient_id'=>$edit_patient_id,'reason'=>trim((string)($_POST['audit_reason']??'Admission details edited')),'changes'=>$admissionChanges]);
         $tenant_pdo->commit();
         if(function_exists('set_flash_msg')) set_flash_msg("Admission Updated Successfully!");
         header("Location: ipd_admission.php"); exit;
-    } catch (Exception $e) { $tenant_pdo->rollBack(); $err = "Update Error: " . $e->getMessage(); }
+    } catch (Exception $e) { if ($tenant_pdo->inTransaction()) $tenant_pdo->rollBack(); $err = "Update Error: " . $e->getMessage(); }
 }
 
 // ============================================================
@@ -388,12 +413,14 @@ $available_beds->execute([$org_id, $org_id, $current_bed_id]);
 $beds = $available_beds->fetchAll(PDO::FETCH_GROUP|PDO::FETCH_ASSOC);
 
 $today_admissions = $tenant_pdo->query("
-    SELECT a.*, p.uhid, p.fullname, p.mobile, bd.bed_no, r.room_no, ins.insurance_name 
+    SELECT a.*, p.uhid, p.fullname, p.mobile, bd.bed_no, r.room_no,
+           ins.insurance_name, cat.category_name
     FROM ipd_admissions a
     JOIN patient_master p ON a.patient_id = p.patient_id
     JOIN master_beds bd ON a.bed_id = bd.id
     JOIN master_rooms r ON bd.room_id = r.id
-    LEFT JOIN insurance ins ON a.insurance_id = ins.id
+    LEFT JOIN insurance ins ON a.insurance_id = ins.id AND ins.org_id = a.org_id
+    LEFT JOIN master_categories cat ON a.category_id = cat.id AND cat.org_id = a.org_id
     WHERE a.org_id = $org_id AND a.status = 1
     ORDER BY a.ipd_id DESC
 ")->fetchAll(PDO::FETCH_ASSOC);
@@ -426,7 +453,9 @@ $bed_status_query = $tenant_pdo->prepare("
         a.admission_date,
         d.full_name AS doctor_name,
         rc.category_name AS room_category_name,
-        rc.id AS room_category_id
+        rc.id AS room_category_id,
+        patient_cat.category_name AS patient_category_name,
+        patient_ins.insurance_name AS patient_insurance_name
     FROM master_beds bd
     JOIN master_rooms r ON bd.room_id = r.id
     JOIN master_buildings b ON r.building_id = b.id
@@ -435,6 +464,8 @@ $bed_status_query = $tenant_pdo->prepare("
     LEFT JOIN patient_master p ON a.patient_id = p.patient_id
     LEFT JOIN master_doctors d ON a.doctor_id = d.id
     LEFT JOIN master_departments dept ON a.department_id = dept.id
+    LEFT JOIN master_categories patient_cat ON patient_cat.id = a.category_id AND patient_cat.org_id = a.org_id
+    LEFT JOIN insurance patient_ins ON patient_ins.id = a.insurance_id AND patient_ins.org_id = a.org_id
     WHERE bd.org_id = ? AND bd.status = 1
     ORDER BY b.building_name, rc.category_name, r.room_no, bd.bed_no
 ");
@@ -522,36 +553,6 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
     <!-- TAB 1: LIVE BED DASHBOARD (LIST VIEW) -->
     <!-- ========================================== -->
     <div class="tab-pane fade <?= !$is_edit ? 'show active' : '' ?>" id="nav-dashboard" role="tabpanel">
-        <div class="row g-3 mb-4">
-            <div class="col-md-4">
-                <div class="bed-stats-box bg-dark shadow-sm">
-                    <i class="bi bi-building fs-1 opacity-75"></i>
-                    <div>
-                        <div class="fs-6 text-uppercase fw-semibold opacity-75">Total Bed Capacity</div>
-                        <div class="fs-3 fw-bold"><?= $total_beds ?></div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="bed-stats-box bg-success shadow-sm">
-                    <i class="bi bi-check-circle fs-1 opacity-75"></i>
-                    <div>
-                        <div class="fs-6 text-uppercase fw-semibold opacity-75">Available / Empty</div>
-                        <div class="fs-3 fw-bold"><?= $available_beds ?></div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
-                <div class="bed-stats-box bg-danger shadow-sm">
-                    <i class="bi bi-person-bed fs-1 opacity-75"></i>
-                    <div>
-                        <div class="fs-6 text-uppercase fw-semibold opacity-75">Occupied / Admitted</div>
-                        <div class="fs-3 fw-bold"><?= $occupied_beds ?></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <div class="card border-0 shadow-sm rounded-3">
             <div class="card-header bg-white py-2 px-3 border-bottom">
                 <h6 class="mb-0 fw-bold text-dark small text-nowrap"><i class="bi bi-hospital-fill text-primary me-2"></i>Live Ward & Bed Status</h6>
@@ -599,11 +600,16 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                                 <span class="text-danger fw-bold">#<?= htmlspecialchars($room['ipd_no']) ?></span> | 
                                                 <?= !empty($room['age']) ? $room['age'].' Yrs' : '' ?> <?= !empty($room['gender']) ? '• '.$room['gender'] : '' ?>
                                             </div>
+                                            <div class=\"mt-1\" style=\"font-size: 10px;\">
+                                                <span class=\"text-primary fw-semibold\">CATEGORY:</span> <?= htmlspecialchars($room['patient_category_name'] ?? 'N/A') ?>
+                                                <span class=\"text-muted mx-1\">|</span>
+                                                <span class=\"text-success fw-semibold\">INSURANCE:</span> <?= htmlspecialchars($room['patient_insurance_name'] ?? 'CASH / BASE') ?>
+                                            </div>
                                         <?php else: ?>
                                             <span class="text-muted fst-italic">Empty</span>
                                         <?php endif; ?>
                                     </td>
-                                    <td class="fw-semibold text-secondary"><?= !empty($room['doctor_name']) ? 'DR. '.htmlspecialchars($room['doctor_name']) : '-' ?></td>
+                                    <td class="fw-semibold text-secondary"><?= !empty($room['doctor_name']) ? 'DR. '.htmlspecialchars(preg_replace('/^(?:DR\.?\s*)+/i', '', trim((string)$room['doctor_name']))) : '-' ?></td>
                                     <td class="text-muted font-monospace"><?= !empty($room['admission_date']) ? date('d-M-Y h:i A', strtotime($room['admission_date'])) : '-' ?></td>
                                     <td class="text-end pe-3">
                                         <?php if(empty($room['patient_name'])): ?>
@@ -883,9 +889,10 @@ input[type="number"], input[type="date"], input[type="datetime-local"], input[in
                                             <div class="fw-bold"><?= htmlspecialchars($adm['fullname']) ?></div>
                                             <small class="text-muted"><?= htmlspecialchars($adm['uhid']) ?> | <?= htmlspecialchars($adm['mobile']) ?></small><br>
                                             <!-- Insurance Display -->
-                                            <span class="badge bg-info-subtle text-info border border-info px-1 mt-1" style="font-size: 9px;">
-                                                <i class="bi bi-shield-check me-1"></i><?= !empty($adm['insurance_name']) ? htmlspecialchars($adm['insurance_name']) : 'CASH / BASE' ?>
-                                            </span>
+                                            <div class="mt-1 d-flex flex-wrap gap-1 align-items-center">
+                                                <span class="badge bg-primary-subtle text-primary border border-primary px-1" style="font-size: 9px;">CATEGORY: <?= !empty($adm['category_name']) ? htmlspecialchars($adm['category_name']) : 'N/A' ?></span>
+                                                <span class="badge bg-info-subtle text-info border border-info px-1" style="font-size: 9px;"><i class="bi bi-shield-check me-1"></i><?= !empty($adm['insurance_name']) ? htmlspecialchars($adm['insurance_name']) : 'CASH / BASE (NO INSURANCE)' ?></span>
+                                            </div>
                                         </td>
                                         <td><span class="badge bg-primary-subtle text-primary border border-primary px-2"><?= htmlspecialchars($adm['room_no'] . ' - ' . $adm['bed_no']) ?></span></td>
                                         <td>
